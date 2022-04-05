@@ -18,5 +18,5 @@ scripts/pyinstall.sh
 
 # Systemd
 
-放在`/lib/systemd/system/focusd.service`
+Put int `/lib/systemd/system/focusd.service`
 

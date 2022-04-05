@@ -1,5 +1,5 @@
 ---
-name: python skeleton tests
+name: Focusd CI
 on: [push]
 jobs:
   run-format-checker:
