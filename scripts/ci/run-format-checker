@@ -1,0 +1,20 @@
+#!/bin/bash
+
+set -eux
+
+reformat () {
+  isort focusd/  # sort imports
+  black focusd/  # all other code formatting
+}
+
+reformat
+
+# is git installed and on the $PATH?
+git help &> /dev/null
+
+if [[ -n $(git diff --stat) ]]; then
+    echo "Repo state dirty after ./reformat:"
+    git diff --stat
+
+    exit 1
+fi

@@ -1,0 +1,15 @@
+*.egg-info
+*.pyc
+.coverage
+.mypy_cache
+.pytest_cache
+.tox/
+.idea/
+.venv/
+__pycache__
+_snapshots/
+build/
+dist/
+install/
+install/*
+htmlcov/
