@@ -11,12 +11,12 @@ block_ip: str = "192.168.0.99"
 
 dns_servers: List[Any] = [
     {
-        "description": "opendns01",
-        "ip": "208.67.220.220",
+        "descrption": "opendns01",
+        "ip": "208.67.220.222",
     },
     {
-        "descrption": "opendns02",
-        "ip": "208.67.220.222",
+        "description": "opendns02",
+        "ip": "208.67.220.220",
     },
 ]
 

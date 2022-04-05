@@ -33,5 +33,4 @@ resolv_conf_template = """
     nameserver {{ dns_server.ip }}
 {% endfor -%}
 nameserver 127.0.0.53
-search nearmap.local
-"""
+search nearmap.local"""
