@@ -21,3 +21,7 @@ scripts/pyinstall.sh
 Put int `/etc/systemd/system/focusd.service`
 
 Pls refer to https://stackoverflow.com/a/41316833 for configuring systemd
+
+# Leechblock
+
+s92ksjshf9173lasjd81

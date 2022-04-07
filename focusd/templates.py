@@ -8,11 +8,7 @@ chrome_policy_template = """
     "BrowserGuestModeEnabled": false,
     "BrowserAddPersonEnabled": false,
     "BrowserSignin": 2,
-    "ExtensionInstallForcelist": [
-        {% for plugin in plugins -%}
-            "{{ plugin.id }}"
-        {% endfor %}
-    ]
+    "ExtensionInstallForcelist": {{ plugin_id_list | tojson(indent=8)}}
 }
 """
 

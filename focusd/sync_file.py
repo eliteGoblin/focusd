@@ -21,7 +21,7 @@ def sync(file_content: str, file_path: str) -> None:
     with os.fdopen(fd, "w") as tmp:
         tmp.write(file_content)
         print(
-            "In {folder}, writing: {file}, content: {content}".format(
+            "In {folder}, writing: {file}, content: {content}\n".format(
                 folder=str(Path(file_path).parent), file=file_path, content=file_content
             )
         )

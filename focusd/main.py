@@ -1,7 +1,7 @@
 import argparse
 import os
 import time
-from typing import Any, List
+from typing import Any, Dict, List
 
 from jinja2 import Template
 
@@ -45,6 +45,15 @@ kill_list: List[str] = [
     "firefox",
 ]
 
+hosts_overwrite: Dict[str, List[str]] = {
+    # forcesafesearch.google.com
+    "216.239.38.120": [
+        "www.google.com",
+        "youtubei.googleapis.com",
+        "youtube.googleapis.com",
+    ]
+}
+
 
 if __name__ == "__main__":
 
@@ -56,11 +65,20 @@ if __name__ == "__main__":
         dns_servers=dns_servers
     )
     chrome_policy: str = Template(templates.chrome_policy_template).render(
-        plugins=plugins
+        plugin_id_list=[e["id"] for e in plugins]
     )
     black_list: List[str] = []
     with open("/home/frank.sun/devel/focusd/data/black.csv") as f:
         black_list = [block_ip + "  " + line for line in list(f)]
+
+    # add overwrite route
+    for k in hosts_overwrite:
+        black_list.extend(
+            [
+                "{ip} {dns_name}\n".format(ip=k, dns_name=dns_name)
+                for dns_name in hosts_overwrite[k]
+            ]
+        )
 
     output_folder: str = "/etc"
 
