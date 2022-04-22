@@ -1,4 +1,4 @@
 
 #!/bin/sh
 # ignore line longer than 80 chars
-pycodestyle --exclude=.venv --ignore=E501,W503 focusd/
+pycodestyle --exclude=.venv --ignore=E501,W503 focusd/ publish/

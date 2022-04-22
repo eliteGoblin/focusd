@@ -54,6 +54,7 @@ hosts_overwrite: Dict[str, List[str]] = {
     ]
 }
 
+black_list_path: str = "/home/frank.sun/devel/focusd/data/black.csv"
 
 if __name__ == "__main__":
 
@@ -68,7 +69,7 @@ if __name__ == "__main__":
         plugin_id_list=[e["id"] for e in plugins]
     )
     black_list: List[str] = []
-    with open("/home/frank.sun/devel/focusd/data/black.csv") as f:
+    with open(black_list_path) as f:
         black_list = [block_ip + "  " + line for line in list(f)]
 
     # add overwrite route

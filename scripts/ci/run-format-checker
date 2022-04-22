@@ -3,8 +3,8 @@
 set -eux
 
 reformat () {
-  isort focusd/  # sort imports
-  black focusd/  # all other code formatting
+  isort focusd/ publish/ # sort imports
+  black focusd/ publish/ # all other code formatting
 }
 
 reformat
