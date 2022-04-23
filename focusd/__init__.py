@@ -1,1 +1,3 @@
-__all__ = ["sync_file"]
+from .sync_file import sync
+
+__all__ = ["sync"]

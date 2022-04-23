@@ -14,7 +14,7 @@ def sync(file_content: str, file_path: str) -> None:
             hashlib.md5(expected_bytes).hexdigest()
             == hashlib.md5(file_bytes).hexdigest()
         ):
-            print(file_path + " same hash, skip")
+            print("same hash, skip writing")
             return
 
     fd, path = tempfile.mkstemp()

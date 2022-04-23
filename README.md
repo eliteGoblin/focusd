@@ -13,15 +13,18 @@ python focusd/main.py
 ```s
 cd /home/frank.sun/devel/focusd
 scripts/pyinstall.sh
-# generate following file: ./dist/main
+# generate following file: ./install/dist/focusd
 ```
 
-# Systemd
+```sh
+# run focusd: sync files: /etc/hosts, resolv.conf, etc
+./install/dist/focusd run
+# Publish systemd files, run as daemon 
+./install/dist/focusd publish
+```
 
-Put int `/etc/systemd/system/focusd.service`
-
-Pls refer to https://stackoverflow.com/a/41316833 for configuring systemd
+s92ksjshf9173lasjd81
 
 # Leechblock
 
-s92ksjshf9173lasjd81(SOPS?)
+(SOPS?)

@@ -1,11 +1,14 @@
-import argparse
 import os
 import time
 from typing import Any, Dict, List
 
+import click
 from jinja2 import Template
 
-from focusd import sync_file, templates
+from . import sync_file, templates
+
+output_folder: str = "/etc"
+# output_folder: str = "/tmp/etc"
 
 block_ip: str = "192.168.0.99"
 
@@ -56,11 +59,10 @@ hosts_overwrite: Dict[str, List[str]] = {
 
 black_list_path: str = "/home/frank.sun/devel/focusd/data/black.csv"
 
-if __name__ == "__main__":
 
-    parser = argparse.ArgumentParser()
-    parser.add_argument("-d", "--daemon", help="daemon mode", action="store_true")
-    args = parser.parse_args()
+@click.command(name="run", help="run focusd")
+@click.option("--daemon", "-d", is_flag=True, help="daemon mode")
+def run(daemon: bool) -> None:
 
     resolv_conf_content: str = Template(templates.resolv_conf_template).render(
         dns_servers=dns_servers
@@ -81,8 +83,6 @@ if __name__ == "__main__":
             ]
         )
 
-    output_folder: str = "/etc"
-
     while True:
         os.system("killall " + " ".join(kill_list))
         sync_file.sync("".join(black_list), os.path.join(output_folder, "hosts"))
@@ -93,6 +93,6 @@ if __name__ == "__main__":
                 output_folder, "opt/chrome/policies/managed/managed_policies.json"
             ),
         )
-        if args.daemon is False:
+        if daemon is False:
             break
-        time.sleep(3)
+        time.sleep(2)

@@ -30,3 +30,20 @@ resolv_conf_template = """
 {% endfor -%}
 nameserver 127.0.0.53
 search nearmap.local"""
+
+service_template = """
+[Unit]
+Description={{ name }}
+After=syslog.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/usr/bin
+ExecStart={{ name }} run -d
+Restart=always
+KillSignal=SIGQUIT
+
+[Install]
+WantedBy=multi-user.target
+"""

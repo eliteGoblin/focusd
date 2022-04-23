@@ -6,6 +6,7 @@ cups-libc-mount
 emergency-check
 emergency-trigger
 e2scrub-all-report
+focusd
 package-utils
 packagekit-mount
 systemd-kernel-halt
