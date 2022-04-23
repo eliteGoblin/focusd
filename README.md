@@ -23,8 +23,6 @@ scripts/pyinstall.sh
 ./install/dist/focusd publish
 ```
 
-s92ksjshf9173lasjd81
-
 # Leechblock
 
 (SOPS?)
