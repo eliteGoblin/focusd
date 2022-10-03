@@ -28,13 +28,14 @@ scripts/pyinstall.sh
 ```s
 # need to pack into bin first
 sudo ./install/dist/focusd publish
-# put things together, everytime changes, run
-scripts/pyinstall.sh && sudo ./install/dist/focusd publish
 ```
 
 Note:
 
-*  Every time data like black.csv updated, need to re-pack and publish. 
+* Every time data like black.csv updated, need to re-pack and publish
+```s
+scripts/pyinstall.sh && sudo ./install/dist/focusd publish
+```
 
 # Leechblock
 

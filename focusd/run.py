@@ -1,6 +1,6 @@
 import os
-import time
 import shutil
+import time
 from typing import Any, Dict, List
 
 import click
@@ -66,7 +66,7 @@ hosts_overwrite: Dict[str, List[str]] = {
 black_list_path: str = "/home/frank.sun/devel/focusd/data/black.csv"
 
 # !!! BE CAREFUL !!! , could destroy system files
-remove_path_list: list = [
+remove_path_list: List[str] = [
     "/snap/bin/chromium",
     "/opt/brave.com/brave",
 ]
