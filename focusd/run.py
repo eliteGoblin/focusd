@@ -1,5 +1,6 @@
 import os
 import time
+import shutil
 from typing import Any, Dict, List
 
 import click
@@ -44,8 +45,13 @@ plugins: List[Any] = [
 
 
 kill_list: List[str] = [
-    "brave",
     "firefox",
+    "brave",
+    "brave-browser",
+    "chromium-browser",
+    "epiphany-browser",
+    "opera",
+    "vivaldi",
 ]
 
 hosts_overwrite: Dict[str, List[str]] = {
@@ -58,6 +64,12 @@ hosts_overwrite: Dict[str, List[str]] = {
 }
 
 black_list_path: str = "/home/frank.sun/devel/focusd/data/black.csv"
+
+# !!! BE CAREFUL !!! , could destroy system files
+remove_path_list: list = [
+    "/snap/bin/chromium",
+    "/opt/brave.com/brave",
+]
 
 
 @click.command(name="run", help="run focusd")
@@ -93,6 +105,13 @@ def run(daemon: bool) -> None:
                 output_folder, "opt/chrome/policies/managed/managed_policies.json"
             ),
         )
+
+        for path in remove_path_list:
+            if os.path.isfile(path) and os.path.exists(path):
+                os.remove(path)
+            else:
+                shutil.rmtree(path, ignore_errors=True)
+
         if daemon is False:
             break
         time.sleep(2)

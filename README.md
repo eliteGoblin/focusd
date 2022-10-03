@@ -28,6 +28,8 @@ scripts/pyinstall.sh
 ```s
 # need to pack into bin first
 sudo ./install/dist/focusd publish
+# put things together, everytime changes, run
+scripts/pyinstall.sh && sudo ./install/dist/focusd publish
 ```
 
 Note:
