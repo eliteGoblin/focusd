@@ -75,6 +75,7 @@ remove_path_list: List[str] = [
 @click.command(name="run", help="run focusd")
 @click.option("--daemon", "-d", is_flag=True, help="daemon mode")
 def run(daemon: bool) -> None:
+    raise Exception()
 
     resolv_conf_content: str = Template(templates.resolv_conf_template).render(
         dns_servers=dns_servers

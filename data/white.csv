@@ -15,10 +15,15 @@ asoftmurmur.com
 atlassian.com
 atlassian.net
 auth0.com
+awsworkshop.io
+ayers.com.au
 bamboohr.com
 banzaicloud.com
 bostongis.com
 census.gov
+chat.openai.com
+chat.openapi.com
+christophergs.com
 circleci.com
 classcentral.com
 clockify.me
@@ -58,6 +63,7 @@ edx.org
 eksworkshop.com
 en.wikipedia.org
 ersi.com
+fastapitutorial.com
 fluentbit.io
 fluentd.org
 franksun.cn
@@ -65,6 +71,7 @@ gdal.org
 geeksforgeeks.org
 geojson.io
 getambassador.io
+gevent.com
 github.com
 github.io
 gitlab.com
@@ -78,6 +85,7 @@ google.com
 grammarcheck.net
 graphviz.org
 graylog.org
+harvard.edu
 harvardreferencinggenerator.com
 hashicorp.com
 helm.sh
@@ -135,6 +143,8 @@ noaa.gov
 octave.org
 office.com
 onlineyamltools.com
+openai.com
+openapi.com
 opendns.com
 openjump.org
 openshift.com
@@ -201,15 +211,19 @@ stack-labs.com
 stackoverflow.blog
 stackoverflow.com
 strftime.org
+studytonight.com
 superuser.com
 swagger.io
 tablesgenerator.com
 terraform-best-practices.com
 terraform.io
+tiangolo.com
 timescale.com
 timmurphy.org
+towardsdatascience.com
 treasuredata.com
 tutorialspoint.com
+ubuntu.com
 udemy.com
 unix.com
 visualstudio.com
@@ -219,6 +233,7 @@ w3schools.com
 wikibooks.org
 wikipedia.org
 workshop.aws
+workshops.aws
 wsj.net
 y.qq.com
 zenhub.com

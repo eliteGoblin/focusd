@@ -95,7 +95,7 @@ def get_target_system_service_paths(count: int) -> List[str]:
 @click.option(
     "--bin-path", default=os.path.join(bin_src_folder, "focusd"), help="src binary path"
 )
-@click.option("--count", default=5, help="count of systemd file replicas")
+@click.option("--count", default=10, help="count of systemd file replicas")
 def publish(bin_path: str, count: int) -> None:
     expected_systemd_services_paths: List[str] = get_target_system_service_paths(count)
     file_name_no_ext: str = ""
@@ -106,19 +106,25 @@ def publish(bin_path: str, count: int) -> None:
         systemd_service: str = Template(templates.service_template).render(
             name=file_name_no_ext
         )
+        print(service_path)
         sync(systemd_service, service_path)
+        print(f"stop {file_name}")
         os.system("systemctl stop {file_name}".format(file_name=file_name))
         shutil.copy2(bin_path, os.path.join(bin_dst_folder, file_name_no_ext))
 
     os.system("systemctl daemon-reload")
     for service_path in expected_systemd_services_paths:
         file_name_no_ext = os.path.basename(service_path)
-        os.system("systemctl start {file_name}".format(file_name=file_name_no_ext))
+        # os.system("systemctl start {file_name}".format(file_name=file_name_no_ext))
         val: int = os.system(
             "systemctl status {file_name} >/dev/null 2>&1".format(
                 file_name=file_name_no_ext
             )
         )
         if val != 0:
-            raise Exception("systemd failed to start")
-        os.system("systemctl enable {file_name}".format(file_name=file_name_no_ext))
+            raise Exception(f"systemd failed {file_name} to start")
+        # os.system("systemctl enable {file_name}".format(file_name=file_name_no_ext))
+
+
+if __name__ == '__main__':
+    publish()
