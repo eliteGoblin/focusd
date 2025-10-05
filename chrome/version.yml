@@ -1,0 +1,28 @@
+version: "0.1.0"
+release_date: "2025-10-06"
+release_name: "Initial Release"
+
+# Release metadata for CI/CD
+# Dependencies managed in pyproject.toml (source of truth)
+
+platforms:
+  - name: "Ubuntu"
+    version: "24.04"
+    status: "tested"
+  - name: "macOS"
+    version: "latest"
+    status: "supported"
+
+features:
+  - "Chrome extension enforcement"
+  - "Background daemon with auto-restore"
+  - "Motivational quote barriers"
+  - "Temporary disable (max 60 min)"
+  - "Process name obfuscation"
+  - "CLI wrapper (cf command)"
+
+# CI/CD can use this for automated releases
+artifacts:
+  - name: "chrome-focus"
+    type: "python-package"
+    entry_point: "chrome_focus:cli"

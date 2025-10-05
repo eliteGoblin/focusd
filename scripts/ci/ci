@@ -1,8 +1,0 @@
-set -e
-
-
-script_dir=$(dirname "$0")
-./${script_dir}/typecheck
-./${script_dir}/run-format-checker
-./${script_dir}/stylecheck
-./${script_dir}/unittests

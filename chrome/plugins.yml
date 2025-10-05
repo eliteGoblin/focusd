@@ -1,0 +1,25 @@
+plugins:
+  - id: abdkjmofmjelgafcdffaimhgdgpagmop
+    name: Freedom
+    description: Website and app blocker for focused work
+    link: chrome://extensions/?id=abdkjmofmjelgafcdffaimhgdgpagmop
+
+  - id: cfhdojbkjhnklbpkdaibdccddilifddb
+    name: Extension 1
+    description: Chrome extension for productivity
+    link: chrome://extensions/?id=cfhdojbkjhnklbpkdaibdccddilifddb
+
+  - id: gighmmpiobklfepjocnamgkkbiglidom
+    name: Extension 2
+    description: Chrome extension for focus
+    link: chrome://extensions/?id=gighmmpiobklfepjocnamgkkbiglidom
+
+  - id: nfghbmabdoakhobmimnjkamfdnpfammn
+    name: Extension 3
+    description: Chrome extension for blocking
+    link: chrome://extensions/?id=nfghbmabdoakhobmimnjkamfdnpfammn
+
+  - id: khncfooichmfjbepaaaebmommgaepoid
+    name: Extension 4
+    description: Chrome extension for productivity
+    link: chrome://extensions/?id=khncfooichmfjbepaaaebmommgaepoid

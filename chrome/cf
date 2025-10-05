@@ -1,0 +1,30 @@
+#!/usr/bin/env bash
+# Chrome Focus CLI wrapper
+
+# Detect real user (works with sudo)
+if [ -n "$SUDO_USER" ]; then
+    REAL_USER="$SUDO_USER"
+    REAL_HOME=$(getent passwd "$SUDO_USER" | cut -d: -f6)
+else
+    REAL_USER="$USER"
+    REAL_HOME="$HOME"
+fi
+
+CHROME_FOCUS_DIR="$REAL_HOME/devel/focusd/chrome"
+
+if [ ! -d "$CHROME_FOCUS_DIR" ]; then
+    echo "Error: Chrome Focus directory not found at $CHROME_FOCUS_DIR"
+    exit 1
+fi
+
+cd "$CHROME_FOCUS_DIR" || exit 1
+
+# Look for poetry in user's .local/bin first
+if [ -f "$REAL_HOME/.local/bin/poetry" ]; then
+    "$REAL_HOME/.local/bin/poetry" run python chrome_focus.py "$@"
+elif command -v poetry &> /dev/null; then
+    poetry run python chrome_focus.py "$@"
+else
+    echo "Error: Poetry not found. Install with: curl -sSL https://install.python-poetry.org | python3 -"
+    exit 1
+fi
