@@ -39,6 +39,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- Anti-paste protection: `off` command now requires character-by-character typing
+- Paste detection prevents copy/paste shortcuts when disabling
+- Makes impulsive disabling significantly harder
+
 ### Planned
 - Windows support
 - Browser restart detection and auto-restart

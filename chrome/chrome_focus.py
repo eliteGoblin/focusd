@@ -6,12 +6,21 @@ import time
 import signal
 import hashlib
 import subprocess
+import select
 from pathlib import Path
 from typing import List, Dict, Optional
 import click
 import yaml
 import requests
 import psutil
+
+# Terminal control for anti-paste
+try:
+    import tty
+    import termios
+    HAS_TERMIOS = True
+except ImportError:
+    HAS_TERMIOS = False
 
 
 # Cross-platform Chrome policy paths
@@ -114,6 +123,70 @@ def get_motivational_quote() -> str:
     return random.choice(fallbacks)
 
 
+def read_quote_no_paste(expected_quote: str) -> bool:
+    """
+    Read user input character-by-character to prevent copy/paste.
+    Returns True if quote matches exactly, False otherwise.
+    """
+    if not HAS_TERMIOS:
+        # Fallback to regular input on Windows or if termios unavailable
+        print("\n(Copy/paste detection not available on this platform)")
+        user_input = input("\nType here: ").strip()
+        return user_input == expected_quote
+
+    print("\nType the quote character by character:")
+    print("(⚠️  Copy/paste will be detected and rejected)")
+    print("\nType here: ", end='', flush=True)
+
+    typed = []
+    fd = sys.stdin.fileno()
+    old_settings = termios.tcgetattr(fd)
+
+    try:
+        tty.setraw(fd)
+
+        while True:
+            # Read one character
+            char = sys.stdin.read(1)
+
+            # Check if there's more input waiting (paste detection)
+            # Use select with 0 timeout to check if more data is available
+            if select.select([sys.stdin], [], [], 0.0)[0]:
+                # More characters waiting = paste detected
+                print("\n\n✗ Paste detected! You must type the quote manually.")
+                print("Chrome Focus remains enabled.\n")
+                return False
+
+            # Handle special characters
+            if char == '\x03':  # Ctrl+C
+                print("\n\n✗ Cancelled.\n")
+                return False
+
+            if char == '\x7f' or char == '\b':  # Backspace
+                if typed:
+                    typed.pop()
+                    sys.stdout.write('\b \b')
+                    sys.stdout.flush()
+                continue
+
+            if char == '\r' or char == '\n':  # Enter
+                break
+
+            # Add character and display it
+            if char.isprintable() or char == ' ':
+                typed.append(char)
+                sys.stdout.write(char)
+                sys.stdout.flush()
+
+    finally:
+        # Restore terminal settings
+        termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)
+        print()  # Newline after input
+
+    typed_text = ''.join(typed)
+    return typed_text == expected_quote
+
+
 def start_daemon() -> None:
     """Start the file watcher daemon with obfuscated name"""
     daemon_script = Path(__file__).parent / "daemon.py"
@@ -208,9 +281,8 @@ def off(duration: Optional[int]):
     print(f'  "{quote}"')
     print("\n" + "-"*80)
 
-    user_input = input("\nType here: ").strip()
-
-    if user_input != quote:
+    # Use anti-paste character-by-character input
+    if not read_quote_no_paste(quote):
         print("\n✗ Quote doesn't match. Chrome Focus remains enabled.")
         return
 
