@@ -11,6 +11,7 @@ on:
     paths:
       - 'app_mon/**'
       - '.github/workflows/app_mon.yml'
+  workflow_dispatch:  # Manual trigger
 
 defaults:
   run:
