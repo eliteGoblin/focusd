@@ -419,7 +419,8 @@ func runDaemon(cmd *cobra.Command, args []string) error {
 	pm := infra.NewProcessManager()
 	fs := infra.NewFileSystemManager()
 	registry := infra.NewFileRegistry(pm)
-	launchAgent := infra.NewLaunchAgentManager()
+	execMode := infra.DetectExecMode() // Auto-detect: root → LaunchDaemon, user → LaunchAgent
+	launchdManager := infra.NewLaunchdManager(execMode)
 	policyStore := policy.NewPolicyStore()
 	strategyManager := infra.NewStrategyManager()
 	enforcer := usecase.NewEnforcerWithStrategy(pm, fs, policyStore, strategyManager, logger)
@@ -447,7 +448,7 @@ func runDaemon(cmd *cobra.Command, args []string) error {
 			enforcer,
 			registry,
 			pm,
-			launchAgent,
+			launchdManager,
 			backupManager,
 			d,
 			logger,
