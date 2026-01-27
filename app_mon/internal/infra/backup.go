@@ -12,6 +12,8 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+
+	"go.uber.org/zap"
 )
 
 // BackupConfig stores information about binary backups
@@ -22,12 +24,16 @@ type BackupConfig struct {
 	PlistPath      string   `json:"plist_path"`
 	Version        string   `json:"version"`
 	BuildTime      string   `json:"build_time"`
+	ExecMode       string   `json:"exec_mode"` // "user" or "system"
 }
 
 // BackupManager handles binary self-replication and restoration
+// Implements hybrid backup: local copies + GitHub release download
 type BackupManager struct {
 	homeDir    string
 	configPath string
+	downloader *GitHubDownloader
+	logger     *zap.Logger
 }
 
 // NewBackupManager creates a new backup manager
@@ -43,10 +49,21 @@ func NewBackupManagerWithHome(home string) *BackupManager {
 	hash := md5.Sum([]byte("appmon-backup-cfg-" + hostname))
 	configDir := filepath.Join(home, ".config", ".com.apple.preferences."+hex.EncodeToString(hash[:])[:6])
 
+	logger, _ := zap.NewProduction()
+
 	return &BackupManager{
 		homeDir:    home,
 		configPath: filepath.Join(configDir, ".helper.json"),
+		downloader: NewGitHubDownloader(),
+		logger:     logger,
 	}
+}
+
+// NewBackupManagerWithLogger creates a backup manager with a custom logger
+func NewBackupManagerWithLogger(home string, logger *zap.Logger) *BackupManager {
+	bm := NewBackupManagerWithHome(home)
+	bm.logger = logger
+	return bm
 }
 
 // getBackupLocations returns obfuscated backup directory paths
@@ -70,6 +87,11 @@ func (bm *BackupManager) getBackupLocations() []string {
 
 // SetupBackups copies the current binary to backup locations
 func (bm *BackupManager) SetupBackups(mainBinaryPath, version, buildTime string) error {
+	return bm.SetupBackupsWithMode(mainBinaryPath, version, buildTime, ExecModeUser)
+}
+
+// SetupBackupsWithMode copies the current binary to backup locations with exec mode
+func (bm *BackupManager) SetupBackupsWithMode(mainBinaryPath, version, buildTime string, mode ExecMode) error {
 	// Compute SHA256 of main binary
 	sha, err := computeSHA256(mainBinaryPath)
 	if err != nil {
@@ -102,14 +124,23 @@ func (bm *BackupManager) SetupBackups(mainBinaryPath, version, buildTime string)
 		return fmt.Errorf("failed to create any backups")
 	}
 
+	// Determine plist path based on mode
+	var plistPath string
+	if mode == ExecModeSystem {
+		plistPath = "/Library/LaunchDaemons/com.focusd.appmon.plist"
+	} else {
+		plistPath = filepath.Join(bm.homeDir, "Library/LaunchAgents/com.focusd.appmon.plist")
+	}
+
 	// Save config
 	config := BackupConfig{
 		MainBinaryPath: mainBinaryPath,
 		SHA256:         sha,
 		BackupPaths:    successfulBackups,
-		PlistPath:      filepath.Join(bm.homeDir, "Library/LaunchAgents/com.focusd.appmon.plist"),
+		PlistPath:      plistPath,
 		Version:        version,
 		BuildTime:      buildTime,
+		ExecMode:       string(mode),
 	}
 
 	return bm.saveConfig(config)
@@ -147,6 +178,7 @@ func (bm *BackupManager) saveConfig(config BackupConfig) error {
 }
 
 // VerifyAndRestore checks binary integrity and restores if needed
+// Uses hybrid approach: try local backups first, then GitHub as fallback
 func (bm *BackupManager) VerifyAndRestore() (restored bool, err error) {
 	config, err := bm.GetConfig()
 	if err != nil {
@@ -155,15 +187,15 @@ func (bm *BackupManager) VerifyAndRestore() (restored bool, err error) {
 
 	// Check if main binary exists
 	if _, statErr := os.Stat(config.MainBinaryPath); os.IsNotExist(statErr) {
-		// Binary MISSING → restore from backup
-		return bm.restoreFromBackup(config)
+		// Binary MISSING → restore (local first, then GitHub)
+		return bm.restoreWithFallback(config)
 	}
 
 	// Binary exists - check SHA256
 	currentSHA, err := computeSHA256(config.MainBinaryPath)
 	if err != nil {
 		// Can't compute SHA → try to restore
-		return bm.restoreFromBackup(config)
+		return bm.restoreWithFallback(config)
 	}
 
 	if currentSHA == config.SHA256 {
@@ -175,25 +207,53 @@ func (bm *BackupManager) VerifyAndRestore() (restored bool, err error) {
 	currentVersion, err := bm.queryBinaryVersion(config.MainBinaryPath)
 	if err != nil {
 		// Can't query version → assume corruption, restore
-		return bm.restoreFromBackup(config)
+		return bm.restoreWithFallback(config)
 	}
 
 	// Compare versions
 	if isNewerVersion(currentVersion, config.Version) {
 		// Newer version → legitimate update, update backups
-		return false, bm.SetupBackups(config.MainBinaryPath, currentVersion, "")
+		mode := ExecMode(config.ExecMode)
+		if mode == "" {
+			mode = ExecModeUser
+		}
+		return false, bm.SetupBackupsWithMode(config.MainBinaryPath, currentVersion, "", mode)
 	}
 
 	// Same or older version with different SHA → corruption, restore
-	return bm.restoreFromBackup(config)
+	return bm.restoreWithFallback(config)
 }
 
-// restoreFromBackup restores the main binary from a valid backup
-func (bm *BackupManager) restoreFromBackup(config *BackupConfig) (bool, error) {
+// restoreWithFallback tries local backups first, then GitHub download
+func (bm *BackupManager) restoreWithFallback(config *BackupConfig) (bool, error) {
+	// Try local backups first
+	restored, err := bm.restoreFromLocalBackup(config)
+	if restored {
+		if bm.logger != nil {
+			bm.logger.Info("restored binary from local backup")
+		}
+		return true, nil
+	}
+
+	if bm.logger != nil {
+		bm.logger.Warn("local backup restore failed, trying GitHub download", zap.Error(err))
+	}
+
+	// Local backups failed, try GitHub download
+	restored, err = bm.restoreFromGitHub(config)
+	if err != nil {
+		return false, fmt.Errorf("all restore methods failed: %w", err)
+	}
+
+	return restored, nil
+}
+
+// restoreFromLocalBackup restores the main binary from a valid local backup
+func (bm *BackupManager) restoreFromLocalBackup(config *BackupConfig) (bool, error) {
 	for _, backupPath := range config.BackupPaths {
 		backupSHA, err := computeSHA256(backupPath)
 		if err != nil || backupSHA != config.SHA256 {
-			continue // This backup is corrupted
+			continue // This backup is corrupted or missing
 		}
 
 		// Found good backup, restore it
@@ -205,7 +265,70 @@ func (bm *BackupManager) restoreFromBackup(config *BackupConfig) (bool, error) {
 		_ = os.Chmod(config.MainBinaryPath, 0755)
 		return true, nil
 	}
-	return false, fmt.Errorf("all backups corrupted or missing")
+	return false, fmt.Errorf("all local backups corrupted or missing")
+}
+
+// restoreFromGitHub downloads latest binary from GitHub and restores it
+func (bm *BackupManager) restoreFromGitHub(config *BackupConfig) (bool, error) {
+	if bm.logger != nil {
+		bm.logger.Info("downloading latest release from GitHub")
+	}
+
+	// Download to temp location
+	tmpPath, err := bm.downloader.DownloadToTemp()
+	if err != nil {
+		return false, fmt.Errorf("GitHub download failed: %w", err)
+	}
+	defer os.RemoveAll(filepath.Dir(tmpPath))
+
+	// Ensure destination directory exists
+	if err := os.MkdirAll(filepath.Dir(config.MainBinaryPath), 0755); err != nil {
+		return false, fmt.Errorf("failed to create binary directory: %w", err)
+	}
+
+	// Copy to main binary location
+	if err := copyFile(tmpPath, config.MainBinaryPath); err != nil {
+		return false, fmt.Errorf("failed to copy downloaded binary: %w", err)
+	}
+	_ = os.Chmod(config.MainBinaryPath, 0755)
+
+	if bm.logger != nil {
+		bm.logger.Info("restored binary from GitHub release")
+	}
+
+	// Update local backups with the new binary
+	newSHA, err := computeSHA256(config.MainBinaryPath)
+	if err != nil {
+		if bm.logger != nil {
+			bm.logger.Warn("failed to compute SHA of restored binary", zap.Error(err))
+		}
+	} else {
+		// Update config with new SHA and refresh local backups
+		version, _ := bm.downloader.GetLatestVersion()
+		mode := ExecMode(config.ExecMode)
+		if mode == "" {
+			mode = ExecModeUser
+		}
+
+		if err := bm.SetupBackupsWithMode(config.MainBinaryPath, version, "", mode); err != nil {
+			if bm.logger != nil {
+				bm.logger.Warn("failed to update local backups after GitHub restore", zap.Error(err))
+			}
+		} else {
+			if bm.logger != nil {
+				bm.logger.Info("updated local backups with downloaded binary",
+					zap.String("sha256", newSHA[:16]+"..."),
+					zap.String("version", version))
+			}
+		}
+	}
+
+	return true, nil
+}
+
+// restoreFromBackup restores the main binary from a valid backup (legacy method)
+func (bm *BackupManager) restoreFromBackup(config *BackupConfig) (bool, error) {
+	return bm.restoreWithFallback(config)
 }
 
 // queryBinaryVersion runs the binary with "version --json" to get its version

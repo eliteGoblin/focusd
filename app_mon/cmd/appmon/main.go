@@ -4,8 +4,10 @@ package main
 import (
 	"context"
 	"fmt"
+	"io"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"syscall"
 	"time"
 
@@ -112,6 +114,16 @@ func init() {
 }
 
 func runStart(cmd *cobra.Command, args []string) error {
+	// Detect execution mode (sudo vs non-sudo)
+	execMode := infra.DetectExecMode()
+
+	fmt.Printf("Execution mode: %s\n", execMode.Mode)
+	if execMode.IsRoot {
+		fmt.Println("Running as root - will install as LaunchDaemon (system-wide)")
+	} else {
+		fmt.Println("Running as user - will install as LaunchAgent (user-space)")
+	}
+
 	// Initialize components
 	pm := infra.NewProcessManager()
 	registry := infra.NewFileRegistry(pm)
@@ -128,29 +140,52 @@ func runStart(cmd *cobra.Command, args []string) error {
 		}
 	}
 
-	// Get current executable path
-	execPath, err := os.Executable()
+	// Determine binary path based on execution mode
+	var binaryPath string
+	currentExecPath, err := os.Executable()
 	if err != nil {
 		return fmt.Errorf("failed to get executable path: %w", err)
 	}
 
-	// Set up binary backups for self-protection
+	// Copy binary to appropriate location if not already there
+	binaryPath = execMode.BinaryPath
+	if currentExecPath != binaryPath {
+		// Ensure directory exists
+		if err := os.MkdirAll(filepath.Dir(binaryPath), 0755); err != nil {
+			fmt.Printf("Warning: Could not create binary directory: %v\n", err)
+			binaryPath = currentExecPath // Fall back to current location
+		} else {
+			// Copy binary to destination
+			if err := copyBinary(currentExecPath, binaryPath); err != nil {
+				fmt.Printf("Warning: Could not copy binary to %s: %v\n", binaryPath, err)
+				binaryPath = currentExecPath // Fall back to current location
+			} else {
+				fmt.Printf("Installed binary to %s\n", binaryPath)
+			}
+		}
+	}
+
+	// Set up binary backups for self-protection (with hybrid backup)
 	backupManager := infra.NewBackupManager()
-	if err := backupManager.SetupBackups(execPath, Version, BuildTime); err != nil {
+	if err := backupManager.SetupBackupsWithMode(binaryPath, Version, BuildTime, execMode.Mode); err != nil {
 		fmt.Printf("Warning: Could not setup binary backups: %v\n", err)
 		fmt.Println("         (appmon will run, but binary won't be auto-restored if deleted)")
 	} else {
-		fmt.Printf("Binary backups created (v%s)\n", Version)
+		fmt.Printf("Binary backups created (v%s) with GitHub fallback\n", Version)
 	}
 
-	// Install LaunchAgent for auto-start on login
-	launchAgent := infra.NewLaunchAgentManager()
-	if !launchAgent.IsInstalled() {
-		if err := launchAgent.Install(execPath); err != nil {
-			fmt.Printf("Warning: Could not install LaunchAgent: %v\n", err)
-			fmt.Println("         (appmon will still run, but won't auto-start on login)")
+	// Install LaunchAgent/LaunchDaemon based on execution mode
+	launchdManager := infra.NewLaunchdManager(execMode)
+	if !launchdManager.IsInstalled() {
+		if err := launchdManager.Install(binaryPath); err != nil {
+			fmt.Printf("Warning: Could not install %s: %v\n", execMode.Mode, err)
+			fmt.Println("         (appmon will still run, but won't auto-start)")
 		} else {
-			fmt.Println("Installed LaunchAgent for auto-start on login")
+			if execMode.IsRoot {
+				fmt.Println("Installed LaunchDaemon for system-wide auto-start")
+			} else {
+				fmt.Println("Installed LaunchAgent for auto-start on login")
+			}
 		}
 	}
 
@@ -163,6 +198,8 @@ func runStart(cmd *cobra.Command, args []string) error {
 	time.Sleep(500 * time.Millisecond)
 
 	fmt.Println("\n=== appmon Started ===")
+	fmt.Printf("Mode: %s\n", execMode.Mode)
+	fmt.Printf("Binary: %s\n", binaryPath)
 	fmt.Println("Status: PROTECTED")
 	fmt.Println("\nBlocked applications:")
 
@@ -173,15 +210,40 @@ func runStart(cmd *cobra.Command, args []string) error {
 
 	fmt.Println("\nDaemons are running in the background.")
 	fmt.Println("They will restart automatically if killed.")
+	if execMode.IsRoot {
+		fmt.Println("System features available: hosts file, firewall (future)")
+	}
 	fmt.Println("=====================")
 
 	return nil
 }
 
+// copyBinary copies the binary file to destination
+func copyBinary(src, dst string) error {
+	sourceFile, err := os.Open(src)
+	if err != nil {
+		return err
+	}
+	defer sourceFile.Close()
+
+	destFile, err := os.Create(dst)
+	if err != nil {
+		return err
+	}
+	defer destFile.Close()
+
+	if _, err = io.Copy(destFile, sourceFile); err != nil {
+		return err
+	}
+
+	// Make executable
+	return os.Chmod(dst, 0755)
+}
+
 func runStatus(cmd *cobra.Command, args []string) error {
 	pm := infra.NewProcessManager()
 	registry := infra.NewFileRegistry(pm)
-	launchAgent := infra.NewLaunchAgentManager()
+	backupManager := infra.NewBackupManager()
 
 	fmt.Println("\n=== appmon Status ===")
 
@@ -209,8 +271,24 @@ func runStatus(cmd *cobra.Command, args []string) error {
 		fmt.Println("Status: NOT RUNNING")
 	}
 
-	// LaunchAgent status
-	fmt.Println("\nAuto-start on login:", boolToStatus(launchAgent.IsInstalled()))
+	// Check backup config for execution mode
+	backupConfig, err := backupManager.GetConfig()
+	if err == nil {
+		execMode := backupConfig.ExecMode
+		if execMode == "" {
+			execMode = "user"
+		}
+		fmt.Printf("\nExecution mode: %s\n", execMode)
+		fmt.Printf("Binary path: %s\n", backupConfig.MainBinaryPath)
+		fmt.Printf("Plist path: %s\n", backupConfig.PlistPath)
+
+		// Check if plist exists
+		if _, err := os.Stat(backupConfig.PlistPath); err == nil {
+			fmt.Println("Auto-start: enabled")
+		} else {
+			fmt.Println("Auto-start: disabled (plist missing)")
+		}
+	}
 
 	// Last heartbeat
 	if entry.LastHeartbeat > 0 {

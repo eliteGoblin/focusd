@@ -4,13 +4,16 @@ import (
 	"bytes"
 	"os"
 	"os/exec"
+	"os/user"
 	"path/filepath"
+	"strconv"
 	"text/template"
 
 	"github.com/user/focusd/app_mon/internal/domain"
 )
 
-const plistTemplate = `<?xml version="1.0" encoding="UTF-8"?>
+// LaunchAgent plist template (runs as user)
+const launchAgentTemplate = `<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
@@ -46,6 +49,37 @@ const plistTemplate = `<?xml version="1.0" encoding="UTF-8"?>
 </dict>
 </plist>`
 
+// LaunchDaemon plist template (runs as root)
+const launchDaemonTemplate = `<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>{{.Label}}</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>{{.ExecutablePath}}</string>
+        <string>start</string>
+    </array>
+
+    <key>RunAtLoad</key>
+    <true/>
+
+    <key>KeepAlive</key>
+    <true/>
+
+    <key>StandardOutPath</key>
+    <string>{{.LogPath}}</string>
+
+    <key>StandardErrorPath</key>
+    <string>{{.ErrorLogPath}}</string>
+
+    <key>ThrottleInterval</key>
+    <integer>10</integer>
+</dict>
+</plist>`
+
 const (
 	launchAgentLabel = "com.focusd.appmon"
 	logDir           = "/var/tmp"
@@ -58,29 +92,48 @@ type plistConfig struct {
 	ErrorLogPath   string
 }
 
-// LaunchAgentManagerImpl implements domain.LaunchAgentManager.
-type LaunchAgentManagerImpl struct {
-	launchAgentsDir string
-	plistPath       string
+// LaunchdManagerImpl implements domain.LaunchAgentManager for both modes.
+type LaunchdManagerImpl struct {
+	mode      ExecMode
+	plistDir  string
+	plistPath string
 }
 
-// NewLaunchAgentManager creates a new LaunchAgent manager.
+// NewLaunchAgentManager creates a new LaunchAgent manager (user mode).
 func NewLaunchAgentManager() domain.LaunchAgentManager {
 	home, _ := os.UserHomeDir()
 	launchAgentsDir := filepath.Join(home, "Library/LaunchAgents")
 	plistPath := filepath.Join(launchAgentsDir, launchAgentLabel+".plist")
 
-	return &LaunchAgentManagerImpl{
-		launchAgentsDir: launchAgentsDir,
-		plistPath:       plistPath,
+	return &LaunchdManagerImpl{
+		mode:      ExecModeUser,
+		plistDir:  launchAgentsDir,
+		plistPath: plistPath,
 	}
 }
 
-// Install creates and loads the LaunchAgent plist.
-func (m *LaunchAgentManagerImpl) Install(execPath string) error {
-	// Ensure LaunchAgents directory exists
-	if err := os.MkdirAll(m.launchAgentsDir, 0755); err != nil {
+// NewLaunchdManager creates a launchd manager based on execution mode.
+func NewLaunchdManager(config *ExecModeConfig) domain.LaunchAgentManager {
+	return &LaunchdManagerImpl{
+		mode:      config.Mode,
+		plistDir:  config.PlistDir,
+		plistPath: config.PlistPath,
+	}
+}
+
+// Install creates and loads the plist (LaunchAgent or LaunchDaemon).
+func (m *LaunchdManagerImpl) Install(execPath string) error {
+	// Ensure plist directory exists
+	if err := os.MkdirAll(m.plistDir, 0755); err != nil {
 		return err
+	}
+
+	// Select template based on mode
+	var tmplStr string
+	if m.mode == ExecModeSystem {
+		tmplStr = launchDaemonTemplate
+	} else {
+		tmplStr = launchAgentTemplate
 	}
 
 	// Generate plist content
@@ -91,7 +144,7 @@ func (m *LaunchAgentManagerImpl) Install(execPath string) error {
 		ErrorLogPath:   filepath.Join(logDir, "appmon.error.log"),
 	}
 
-	tmpl, err := template.New("plist").Parse(plistTemplate)
+	tmpl, err := template.New("plist").Parse(tmplStr)
 	if err != nil {
 		return err
 	}
@@ -106,12 +159,12 @@ func (m *LaunchAgentManagerImpl) Install(execPath string) error {
 		return err
 	}
 
-	// Load the LaunchAgent
+	// Load the plist
 	return m.load()
 }
 
-// Uninstall unloads and removes the LaunchAgent plist.
-func (m *LaunchAgentManagerImpl) Uninstall() error {
+// Uninstall unloads and removes the plist.
+func (m *LaunchdManagerImpl) Uninstall() error {
 	// Unload first (ignore errors if not loaded)
 	_ = m.unload()
 
@@ -119,28 +172,59 @@ func (m *LaunchAgentManagerImpl) Uninstall() error {
 	return os.Remove(m.plistPath)
 }
 
-// IsInstalled checks if LaunchAgent is installed.
-func (m *LaunchAgentManagerImpl) IsInstalled() bool {
+// IsInstalled checks if plist is installed.
+func (m *LaunchdManagerImpl) IsInstalled() bool {
 	_, err := os.Stat(m.plistPath)
 	return err == nil
 }
 
 // GetPlistPath returns the plist file path.
-func (m *LaunchAgentManagerImpl) GetPlistPath() string {
+func (m *LaunchdManagerImpl) GetPlistPath() string {
 	return m.plistPath
 }
 
-// load loads the LaunchAgent using launchctl.
-func (m *LaunchAgentManagerImpl) load() error {
+// load loads the plist using launchctl.
+func (m *LaunchdManagerImpl) load() error {
+	if m.mode == ExecModeSystem {
+		// LaunchDaemon: use bootstrap for system domain
+		cmd := exec.Command("launchctl", "load", m.plistPath)
+		return cmd.Run()
+	}
+
+	// LaunchAgent: load for current user
 	cmd := exec.Command("launchctl", "load", m.plistPath)
 	return cmd.Run()
 }
 
-// unload unloads the LaunchAgent using launchctl.
-func (m *LaunchAgentManagerImpl) unload() error {
+// unload unloads the plist using launchctl.
+func (m *LaunchdManagerImpl) unload() error {
 	cmd := exec.Command("launchctl", "unload", m.plistPath)
 	return cmd.Run()
 }
 
-// Ensure LaunchAgentManagerImpl implements domain.LaunchAgentManager.
-var _ domain.LaunchAgentManager = (*LaunchAgentManagerImpl)(nil)
+// GetMode returns the current execution mode.
+func (m *LaunchdManagerImpl) GetMode() ExecMode {
+	return m.mode
+}
+
+// getUID returns the UID of the current user or SUDO_USER if running with sudo.
+func getUID() int {
+	// If running as root via sudo, get the original user's UID
+	if sudoUID := os.Getenv("SUDO_UID"); sudoUID != "" {
+		if uid, err := strconv.Atoi(sudoUID); err == nil {
+			return uid
+		}
+	}
+
+	// Otherwise use current user
+	if u, err := user.Current(); err == nil {
+		if uid, err := strconv.Atoi(u.Uid); err == nil {
+			return uid
+		}
+	}
+
+	return os.Getuid()
+}
+
+// Ensure LaunchdManagerImpl implements domain.LaunchAgentManager.
+var _ domain.LaunchAgentManager = (*LaunchdManagerImpl)(nil)
