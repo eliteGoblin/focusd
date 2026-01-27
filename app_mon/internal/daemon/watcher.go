@@ -78,7 +78,7 @@ func NewWatcher(
 }
 
 // Run starts the watcher daemon loop.
-// This blocks until context is cancelled.
+// This blocks until context is canceled.
 func (w *Watcher) Run(ctx context.Context) error {
 	// Register ourselves in the registry
 	if err := w.registry.Register(w.daemon); err != nil {

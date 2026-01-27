@@ -94,7 +94,7 @@ func (bm *BackupManager) SetupBackups(mainBinaryPath, version, buildTime string)
 		}
 
 		// Make executable
-		os.Chmod(backupPath, 0700)
+		_ = os.Chmod(backupPath, 0700)
 		successfulBackups = append(successfulBackups, backupPath)
 	}
 
@@ -154,7 +154,7 @@ func (bm *BackupManager) VerifyAndRestore() (restored bool, err error) {
 	}
 
 	// Check if main binary exists
-	if _, err := os.Stat(config.MainBinaryPath); os.IsNotExist(err) {
+	if _, statErr := os.Stat(config.MainBinaryPath); os.IsNotExist(statErr) {
 		// Binary MISSING → restore from backup
 		return bm.restoreFromBackup(config)
 	}
@@ -197,12 +197,12 @@ func (bm *BackupManager) restoreFromBackup(config *BackupConfig) (bool, error) {
 		}
 
 		// Found good backup, restore it
-		os.MkdirAll(filepath.Dir(config.MainBinaryPath), 0755)
+		_ = os.MkdirAll(filepath.Dir(config.MainBinaryPath), 0755)
 
 		if err := copyFile(backupPath, config.MainBinaryPath); err != nil {
 			continue
 		}
-		os.Chmod(config.MainBinaryPath, 0755)
+		_ = os.Chmod(config.MainBinaryPath, 0755)
 		return true, nil
 	}
 	return false, fmt.Errorf("all backups corrupted or missing")

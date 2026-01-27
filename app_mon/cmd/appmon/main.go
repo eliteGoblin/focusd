@@ -256,7 +256,7 @@ func runScan(cmd *cobra.Command, args []string) error {
 
 	// Initialize components
 	logger, _ := zap.NewDevelopment()
-	defer logger.Sync()
+	defer func() { _ = logger.Sync() }()
 
 	pm := infra.NewProcessManager()
 	fs := infra.NewFileSystemManager()
@@ -323,7 +323,7 @@ func runDaemon(cmd *cobra.Command, args []string) error {
 
 	// Set up logger (writes to /var/tmp/appmon.log)
 	logger := createLogger()
-	defer logger.Sync()
+	defer func() { _ = logger.Sync() }()
 
 	// Set process name for obfuscation
 	daemon.SetProcessName(daemonName)

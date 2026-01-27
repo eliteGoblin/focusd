@@ -7,6 +7,7 @@ import (
 	"syscall"
 
 	"github.com/shirou/gopsutil/v3/process"
+
 	"github.com/user/focusd/app_mon/internal/domain"
 )
 

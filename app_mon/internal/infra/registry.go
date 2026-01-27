@@ -62,7 +62,7 @@ func (r *FileRegistry) Register(daemon domain.Daemon) error {
 	if err := syscall.Flock(int(lockFile.Fd()), syscall.LOCK_EX); err != nil {
 		return fmt.Errorf("failed to acquire lock: %w", err)
 	}
-	defer syscall.Flock(int(lockFile.Fd()), syscall.LOCK_UN)
+	defer func() { _ = syscall.Flock(int(lockFile.Fd()), syscall.LOCK_UN) }()
 
 	entry, _ := r.GetAll() // May not exist yet
 	if entry == nil {

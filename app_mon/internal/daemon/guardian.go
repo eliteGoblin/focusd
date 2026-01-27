@@ -51,7 +51,7 @@ func NewGuardian(
 }
 
 // Run starts the guardian daemon loop.
-// This blocks until context is cancelled.
+// This blocks until context is canceled.
 func (g *Guardian) Run(ctx context.Context) error {
 	// Register ourselves in the registry
 	if err := g.registry.Register(g.daemon); err != nil {
