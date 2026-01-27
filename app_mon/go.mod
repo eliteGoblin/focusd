@@ -1,4 +1,4 @@
-module github.com/user/focusd/app_mon
+module github.com/eliteGoblin/focusd/app_mon
 
 go 1.23.0
 

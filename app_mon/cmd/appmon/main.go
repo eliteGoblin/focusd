@@ -15,11 +15,11 @@ import (
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
 
-	"github.com/user/focusd/app_mon/internal/daemon"
-	"github.com/user/focusd/app_mon/internal/domain"
-	"github.com/user/focusd/app_mon/internal/infra"
-	"github.com/user/focusd/app_mon/internal/policy"
-	"github.com/user/focusd/app_mon/internal/usecase"
+	"github.com/eliteGoblin/focusd/app_mon/internal/daemon"
+	"github.com/eliteGoblin/focusd/app_mon/internal/domain"
+	"github.com/eliteGoblin/focusd/app_mon/internal/infra"
+	"github.com/eliteGoblin/focusd/app_mon/internal/policy"
+	"github.com/eliteGoblin/focusd/app_mon/internal/usecase"
 )
 
 var (

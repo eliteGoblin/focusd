@@ -10,11 +10,11 @@ import (
 
 	"go.uber.org/zap"
 
-	"github.com/user/focusd/app_mon/internal/domain"
-	"github.com/user/focusd/app_mon/internal/infra"
-	"github.com/user/focusd/app_mon/internal/policy"
-	"github.com/user/focusd/app_mon/internal/usecase"
-	"github.com/user/focusd/app_mon/test/fixtures"
+	"github.com/eliteGoblin/focusd/app_mon/internal/domain"
+	"github.com/eliteGoblin/focusd/app_mon/internal/infra"
+	"github.com/eliteGoblin/focusd/app_mon/internal/policy"
+	"github.com/eliteGoblin/focusd/app_mon/internal/usecase"
+	"github.com/eliteGoblin/focusd/app_mon/test/fixtures"
 )
 
 func TestEnforcer_DeletesSteamPaths(t *testing.T) {

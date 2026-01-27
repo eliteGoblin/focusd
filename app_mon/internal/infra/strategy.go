@@ -7,7 +7,7 @@ import (
 	"runtime"
 	"strings"
 
-	"github.com/user/focusd/app_mon/internal/domain"
+	"github.com/eliteGoblin/focusd/app_mon/internal/domain"
 )
 
 // BrewStrategy handles Homebrew cask uninstallation (macOS)

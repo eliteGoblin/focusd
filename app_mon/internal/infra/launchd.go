@@ -7,7 +7,7 @@ import (
 	"path/filepath"
 	"text/template"
 
-	"github.com/user/focusd/app_mon/internal/domain"
+	"github.com/eliteGoblin/focusd/app_mon/internal/domain"
 )
 
 // LaunchAgent plist template (runs as user)

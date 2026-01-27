@@ -6,7 +6,7 @@ import (
 	"path/filepath"
 	"time"
 
-	"github.com/user/focusd/app_mon/internal/domain"
+	"github.com/eliteGoblin/focusd/app_mon/internal/domain"
 )
 
 // Dota2Policy implements AppPolicy for blocking Dota 2.

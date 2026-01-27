@@ -9,7 +9,7 @@ import (
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 
-	"github.com/user/focusd/app_mon/internal/infra"
+	"github.com/eliteGoblin/focusd/app_mon/internal/infra"
 )
 
 var _ = Describe("Backup Manager", func() {

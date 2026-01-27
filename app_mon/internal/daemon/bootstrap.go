@@ -5,8 +5,8 @@ import (
 	"os/exec"
 	"syscall"
 
-	"github.com/user/focusd/app_mon/internal/domain"
-	"github.com/user/focusd/app_mon/internal/infra"
+	"github.com/eliteGoblin/focusd/app_mon/internal/domain"
+	"github.com/eliteGoblin/focusd/app_mon/internal/infra"
 )
 
 // StartDaemon spawns a new daemon process with an obfuscated name.

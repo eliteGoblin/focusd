@@ -8,8 +8,8 @@ import (
 
 	"go.uber.org/zap"
 
-	"github.com/user/focusd/app_mon/internal/domain"
-	"github.com/user/focusd/app_mon/internal/policy"
+	"github.com/eliteGoblin/focusd/app_mon/internal/domain"
+	"github.com/eliteGoblin/focusd/app_mon/internal/policy"
 )
 
 // BackupManager interface for binary self-protection

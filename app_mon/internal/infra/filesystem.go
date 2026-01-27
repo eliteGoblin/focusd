@@ -5,7 +5,7 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/user/focusd/app_mon/internal/domain"
+	"github.com/eliteGoblin/focusd/app_mon/internal/domain"
 )
 
 // FileSystemManagerImpl implements domain.FileSystemManager.

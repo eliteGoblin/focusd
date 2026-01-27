@@ -6,7 +6,7 @@ import (
 	"context"
 	"time"
 
-	"github.com/user/focusd/app_mon/internal/domain"
+	"github.com/eliteGoblin/focusd/app_mon/internal/domain"
 )
 
 // DefaultScanInterval is 10 minutes as per user preference (low CPU usage).
