@@ -1,80 +1,88 @@
 # FocusD - Freedom from Distraction
 
-> Breaking free from the slot machines in our pockets.
+> A multi-layer defense system against addictive apps and websites on macOS.
 
-## Philosophy
+## Why
 
-Phones and websites are designed like slot machines - engineered to capture attention and create anxiety. They harm our ability to focus deeply and damage intimate relationships. This toolset helps reclaim control.
+Modern apps are designed like slot machines - engineered to capture attention and create compulsive usage. FocusD creates multiple layers of protection to help you stay focused.
 
-## Chrome Focus
+## Multi-Layer Defense
 
-**Status:** Production-ready | **Version:** 0.1.0
-
-A self-enforcing Chrome extension manager that prevents disabling productivity extensions.
-
-**Key Features:**
-- Force-installs Chrome extensions via enterprise policies
-- Auto-restores policy if deleted (background daemon)
-- Motivational barriers to prevent impulsive disabling
-- Temporary disable with auto-re-enable (max 1 hour)
-- Process name obfuscation for self-protection
-
-**[📖 Full Documentation →](chrome/README.md)**
-
-**Quick Start:**
-```bash
-cd chrome
-./install.sh
-sudo cf on
+```
+┌─────────────────────────────────────────────────────────────┐
+│  Layer 1: DNS Blocking (NextDNS)                            │
+│  - Blocks gaming domains at network level                   │
+│  - Works on ALL devices (Mac, iPhone, iPad)                 │
+│  - Can't be bypassed without router access                  │
+└─────────────────────────────────────────────────────────────┘
+                            │
+┌─────────────────────────────────────────────────────────────┐
+│  Layer 2: App Blocking (appmon)                             │
+│  - Kills Steam/Dota2 processes automatically                │
+│  - Deletes app files if reinstalled                         │
+│  - Self-protecting dual-daemon architecture                 │
+└─────────────────────────────────────────────────────────────┘
 ```
 
 ---
 
-## Why These Tools Exist
+## Layer 1: DNS Blocking (NextDNS)
 
-Modern technology companies use psychological manipulation to maximize engagement:
+Blocks gaming domains at the network level for all devices on your network.
 
-- **Variable rewards** (like slot machines) keep us checking notifications
-- **Infinite scroll** removes natural stopping points
-- **FOMO mechanics** create anxiety about missing content
-- **Social validation** (likes, views) triggers dopamine loops
+**Blocked domains:**
+- `steampowered.com`, `steamcommunity.com`, `steamstatic.com`
+- All Steam CDN and authentication servers
 
-**Consequences:**
-- Inability to focus on deep work
-- Increased anxiety and stress
-- Damaged personal relationships
-- Loss of autonomy and self-control
+**Setup:** [NextDNS Setup Guide](artifacts/managed_dns/next_dns.md)
 
-These tools are designed to help you **opt out** of that system.
+---
+
+## Layer 2: App Blocking (appmon)
+
+Automatically kills processes and deletes files for blocked apps (Steam, Dota2).
+
+**Features:**
+- Kills blocked processes every 10 minutes
+- Deletes app bundles and game files
+- Self-protecting dual-daemon (watcher + guardian)
+- Auto-starts on login via LaunchAgent
+- No stop command (intentional friction)
+
+**Quick Start:**
+```bash
+cd app_mon
+make build
+./build/appmon start
+```
+
+**Documentation:** [app_mon README](app_mon/README.md)
+
+---
+
+## Platform Support
+
+| Platform | Status |
+|----------|--------|
+| macOS | Supported |
+| Windows | Planned |
+| Linux | Not planned |
+
+---
 
 ## Project Structure
 
 ```
 focusd/
-├── chrome/              # Chrome Focus tool
-│   ├── README.md       # User documentation
-│   ├── DESIGN.md       # Architecture & design decisions
-│   ├── CHANGELOG.md    # Version history
-│   ├── version.yml     # Release metadata
-│   ├── install.sh      # One-command installer
-│   ├── chrome_focus.py # Main CLI
-│   ├── daemon.py       # Background watcher
-│   ├── plugins.yml     # Extension configuration
-│   └── cf              # Wrapper script
-├── requirements/        # Requirements & specifications
-│   └── chrome/
-│       └── plugins.md
-└── CLAUDE.md           # Developer context
+├── app_mon/                    # App blocking daemon
+├── artifacts/
+│   └── managed_dns/
+│       └── next_dns.md         # NextDNS setup guide
+├── requirements/               # Feature specifications
+└── archive/                    # Deprecated tools
+    └── chrome/                 # Chrome extension enforcer (deprecated)
 ```
-
-## Contributing
-
-This is a personal productivity tool. If you find it useful, feel free to fork and adapt it to your needs.
 
 ## License
 
 MIT
-
----
-
-**Remember:** The goal isn't to eliminate technology - it's to use it intentionally, not compulsively.
