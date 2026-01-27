@@ -88,6 +88,22 @@ var versionCmd = &cobra.Command{
 	Run:   runVersion,
 }
 
+var updateCmd = &cobra.Command{
+	Use:   "update",
+	Short: "Update appmon to the latest version",
+	Long: `Downloads and installs the latest version of appmon from GitHub releases.
+The update process includes:
+1. Check for newer version
+2. Download new binary
+3. Stop running daemons
+4. Replace binary and update backups
+5. Restart daemons
+6. Verify daemons are healthy
+
+If daemons fail to start after update, automatically rolls back to previous version.`,
+	RunE: runUpdate,
+}
+
 // Hidden daemon command - used for self-exec when spawning daemons
 var daemonCmd = &cobra.Command{
 	Use:    "daemon",
@@ -99,18 +115,21 @@ var (
 	daemonRole string
 	daemonName string
 	jsonOutput bool
+	checkOnly  bool
 )
 
 func init() {
 	daemonCmd.Flags().StringVar(&daemonRole, "role", "", "Daemon role (watcher/guardian)")
 	daemonCmd.Flags().StringVar(&daemonName, "name", "", "Obfuscated process name")
 	versionCmd.Flags().BoolVar(&jsonOutput, "json", false, "Output version info as JSON")
+	updateCmd.Flags().BoolVar(&checkOnly, "check", false, "Only check for updates, don't install")
 
 	rootCmd.AddCommand(startCmd)
 	rootCmd.AddCommand(statusCmd)
 	rootCmd.AddCommand(listCmd)
 	rootCmd.AddCommand(scanCmd)
 	rootCmd.AddCommand(versionCmd)
+	rootCmd.AddCommand(updateCmd)
 	rootCmd.AddCommand(daemonCmd)
 }
 
@@ -514,6 +533,70 @@ func createLogger() *zap.Logger {
 		logger, _ = zap.NewProduction()
 	}
 	return logger
+}
+
+func runUpdate(cmd *cobra.Command, args []string) error {
+	logger, _ := zap.NewProduction()
+	defer func() { _ = logger.Sync() }()
+
+	updater := infra.NewUpdater(Version, logger)
+
+	// Check-only mode
+	if checkOnly {
+		current, latest, available, err := updater.CheckUpdate()
+		if err != nil {
+			return fmt.Errorf("failed to check for updates: %w", err)
+		}
+
+		fmt.Printf("Current version: %s\n", current)
+		fmt.Printf("Latest version:  %s\n", latest)
+
+		if available {
+			fmt.Println("Update available!")
+		} else {
+			fmt.Println("Already up to date.")
+		}
+		return nil
+	}
+
+	// Perform update
+	fmt.Println("\n=== appmon Update ===")
+
+	current, latest, available, err := updater.CheckUpdate()
+	if err != nil {
+		return fmt.Errorf("failed to check for updates: %w", err)
+	}
+
+	fmt.Printf("Current version: %s\n", current)
+	fmt.Printf("Latest version:  %s\n", latest)
+
+	if !available {
+		fmt.Println("\nAlready up to date.")
+		return nil
+	}
+
+	fmt.Println()
+	fmt.Println("Downloading new version...")
+
+	result, err := updater.PerformUpdate()
+	if err != nil {
+		return fmt.Errorf("update failed: %w", err)
+	}
+
+	if result.RolledBack {
+		fmt.Printf("\n✗ Update failed, rolled back to %s\n", result.PreviousVer)
+		fmt.Printf("  Reason: %s\n", result.RollbackReason)
+		return fmt.Errorf("update rolled back: %s", result.RollbackReason)
+	}
+
+	if result.Success {
+		fmt.Printf("\n✓ Update successful!\n")
+		fmt.Printf("  Version: %s\n", result.NewVer)
+		fmt.Println("  All daemons running")
+	}
+
+	fmt.Println("=====================")
+	return nil
 }
 
 func runVersion(cmd *cobra.Command, args []string) {
