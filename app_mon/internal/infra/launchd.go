@@ -4,9 +4,7 @@ import (
 	"bytes"
 	"os"
 	"os/exec"
-	"os/user"
 	"path/filepath"
-	"strconv"
 	"text/template"
 
 	"github.com/user/focusd/app_mon/internal/domain"
@@ -205,25 +203,6 @@ func (m *LaunchdManagerImpl) unload() error {
 // GetMode returns the current execution mode.
 func (m *LaunchdManagerImpl) GetMode() ExecMode {
 	return m.mode
-}
-
-// getUID returns the UID of the current user or SUDO_USER if running with sudo.
-func getUID() int {
-	// If running as root via sudo, get the original user's UID
-	if sudoUID := os.Getenv("SUDO_UID"); sudoUID != "" {
-		if uid, err := strconv.Atoi(sudoUID); err == nil {
-			return uid
-		}
-	}
-
-	// Otherwise use current user
-	if u, err := user.Current(); err == nil {
-		if uid, err := strconv.Atoi(u.Uid); err == nil {
-			return uid
-		}
-	}
-
-	return os.Getuid()
 }
 
 // Ensure LaunchdManagerImpl implements domain.LaunchAgentManager.
