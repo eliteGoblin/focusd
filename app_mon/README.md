@@ -1,5 +1,11 @@
 # App Mon
 
+[![Build Status](https://github.com/eliteGoblin/focusd/actions/workflows/app_mon.yml/badge.svg)](https://github.com/eliteGoblin/focusd/actions/workflows/app_mon.yml)
+[![codecov](https://codecov.io/gh/eliteGoblin/focusd/branch/master/graph/badge.svg)](https://codecov.io/gh/eliteGoblin/focusd)
+[![Go Report Card](https://goreportcard.com/badge/github.com/eliteGoblin/focusd)](https://goreportcard.com/report/github.com/eliteGoblin/focusd)
+[![Go Version](https://img.shields.io/github/go-mod/go-version/eliteGoblin/focusd?filename=app_mon%2Fgo.mod)](https://go.dev/)
+[![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+
 A self-enforcing application monitor that blocks distracting apps like Steam and Dota 2 on macOS.
 
 ## Features
