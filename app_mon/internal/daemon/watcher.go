@@ -33,8 +33,8 @@ func DefaultWatcherConfig() WatcherConfig {
 		EnforcementInterval:  policy.DefaultScanInterval, // 10 minutes
 		HeartbeatInterval:    30 * time.Second,
 		PartnerCheckInterval: 60 * time.Second,
-		PlistCheckInterval:   60 * time.Second,  // Check plist every minute
-		BinaryCheckInterval:  60 * time.Second,  // Check binary integrity every minute
+		PlistCheckInterval:   60 * time.Second, // Check plist every minute
+		BinaryCheckInterval:  60 * time.Second, // Check binary integrity every minute
 	}
 }
 
