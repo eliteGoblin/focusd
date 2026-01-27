@@ -23,9 +23,10 @@ import (
 )
 
 var (
-	// Version info (set via ldflags)
-	Version   = "0.2.0"
-	Commit    = "dev"
+	// Version info (set via ldflags during release build)
+	// go build -ldflags "-X main.Version=x.y.z -X main.Commit=abc123 -X main.BuildTime=2024-01-01"
+	Version   = "dev"
+	Commit    = "unknown"
 	BuildTime = "unknown"
 )
 
