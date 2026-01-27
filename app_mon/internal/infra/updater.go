@@ -161,8 +161,7 @@ func (u *Updater) PerformUpdate() (*UpdateResult, error) {
 
 	// Step 7: Update all backup copies
 	u.log("updating backup copies")
-	mode := ExecMode(u.execMode.Mode)
-	if err := u.backupManager.SetupBackupsWithMode(binaryPath, latest, "", mode); err != nil {
+	if err := u.backupManager.SetupBackupsWithMode(binaryPath, latest, "", u.execMode.Mode); err != nil {
 		u.log("warning: failed to update backups", zap.Error(err))
 		// Continue - main binary is updated, backups can be fixed later
 	}
@@ -332,7 +331,7 @@ func (u *Updater) rollback(rollbackPath, binaryPath string) error {
 	_ = os.Chmod(binaryPath, 0755)
 
 	// Update backups with restored binary
-	_ = u.backupManager.SetupBackupsWithMode(binaryPath, u.currentVersion, "", ExecMode(u.execMode.Mode))
+	_ = u.backupManager.SetupBackupsWithMode(binaryPath, u.currentVersion, "", u.execMode.Mode)
 
 	// Restart daemons
 	if err := u.StartDaemons(); err != nil {
