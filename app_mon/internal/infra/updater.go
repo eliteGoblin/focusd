@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"time"
 
@@ -124,7 +125,7 @@ func (u *Updater) PerformUpdate() (*UpdateResult, error) {
 	if err != nil {
 		return nil, fmt.Errorf("failed to create rollback backup: %w", err)
 	}
-	defer os.Remove(rollbackPath) // Clean up rollback file after success
+	defer os.RemoveAll(filepath.Dir(rollbackPath)) // Clean up rollback dir after success
 
 	u.log("rollback backup created", zap.String("path", rollbackPath))
 
@@ -141,17 +142,26 @@ func (u *Updater) PerformUpdate() (*UpdateResult, error) {
 	// Step 5: Stop daemons
 	u.log("stopping daemons")
 	if err := u.StopDaemons(); err != nil {
-		u.log("warning: failed to stop daemons", zap.Error(err))
-		// Continue anyway - daemons may not be running
+		// Check if it's a registry error (critical) vs signaling error (non-critical)
+		if isRegistryError(err) {
+			return nil, fmt.Errorf("failed to access daemon registry: %w", err)
+		}
+		u.log("warning: failed to stop some daemons", zap.Error(err))
+		// Continue - signaling errors are non-critical, daemons may not be running
 	}
 
 	// Step 6: Replace main binary (atomic)
 	u.log("installing new binary", zap.String("path", binaryPath))
 	if err := copyFile(tmpBinaryPath, binaryPath); err != nil {
-		// Restore from rollback
+		// Restore from rollback and restart daemons
 		u.log("install failed, rolling back", zap.Error(err))
 		if rbErr := copyFile(rollbackPath, binaryPath); rbErr != nil {
 			return nil, fmt.Errorf("critical: install failed and rollback failed: install=%w, rollback=%v", err, rbErr)
+		}
+		_ = os.Chmod(binaryPath, 0755)
+		// Restart daemons with original binary
+		if startErr := u.StartDaemons(); startErr != nil {
+			u.log("warning: failed to restart daemons after install rollback", zap.Error(startErr))
 		}
 		result.RolledBack = true
 		result.RollbackReason = fmt.Sprintf("install failed: %v", err)
@@ -162,8 +172,13 @@ func (u *Updater) PerformUpdate() (*UpdateResult, error) {
 	// Step 7: Update all backup copies
 	u.log("updating backup copies")
 	if err := u.backupManager.SetupBackupsWithMode(binaryPath, latest, "", u.execMode.Mode); err != nil {
-		u.log("warning: failed to update backups", zap.Error(err))
-		// Continue - main binary is updated, backups can be fixed later
+		u.log("backup update failed, rolling back", zap.Error(err))
+		result.RolledBack = true
+		result.RollbackReason = fmt.Sprintf("failed to update backups: %v", err)
+		if rbErr := u.rollback(rollbackPath, binaryPath); rbErr != nil {
+			return nil, fmt.Errorf("critical: backup update failed and rollback failed: backup=%w, rollback=%v", err, rbErr)
+		}
+		return result, nil
 	}
 
 	// Step 8: Restart daemons
@@ -272,8 +287,8 @@ func (u *Updater) VerifyDaemonsHealthy(timeout time.Duration) error {
 	for time.Now().Before(deadline) {
 		entry, err := u.registry.GetAll()
 		if err == nil && entry != nil {
-			watcherAlive := u.pm.IsRunning(entry.WatcherPID)
-			guardianAlive := u.pm.IsRunning(entry.GuardianPID)
+			watcherAlive := entry.WatcherPID > 0 && u.pm.IsRunning(entry.WatcherPID)
+			guardianAlive := entry.GuardianPID > 0 && u.pm.IsRunning(entry.GuardianPID)
 
 			if watcherAlive && guardianAlive {
 				return nil // Both daemons running
@@ -331,15 +346,20 @@ func (u *Updater) rollback(rollbackPath, binaryPath string) error {
 	_ = os.Chmod(binaryPath, 0755)
 
 	// Update backups with restored binary
-	_ = u.backupManager.SetupBackupsWithMode(binaryPath, u.currentVersion, "", u.execMode.Mode)
+	if err := u.backupManager.SetupBackupsWithMode(binaryPath, u.currentVersion, "", u.execMode.Mode); err != nil {
+		u.log("warning: failed to update backups during rollback", zap.Error(err))
+		// Continue - binary is restored, backups can be fixed manually
+	}
 
 	// Restart daemons
 	if err := u.StartDaemons(); err != nil {
 		return fmt.Errorf("failed to restart daemons after rollback: %w", err)
 	}
 
-	// Wait for daemons to start
-	time.Sleep(2 * time.Second)
+	// Verify daemons are healthy after rollback
+	if err := u.VerifyDaemonsHealthy(DefaultHealthCheckTimeout); err != nil {
+		return fmt.Errorf("daemons not healthy after rollback: %w", err)
+	}
 
 	return nil
 }
@@ -381,16 +401,33 @@ type execCmd struct {
 }
 
 func (c *execCmd) start() error {
+	// Open /dev/null for stdin, stdout, stderr
+	devNull, err := os.OpenFile("/dev/null", os.O_RDWR, 0)
+	if err != nil {
+		return fmt.Errorf("failed to open /dev/null: %w", err)
+	}
+	defer devNull.Close()
+
 	// Use syscall.ForkExec to spawn a fully detached process
 	attr := &syscall.ProcAttr{
 		Dir:   "/",
 		Env:   os.Environ(),
-		Files: []uintptr{0, 0, 0}, // stdin, stdout, stderr
+		Files: []uintptr{devNull.Fd(), devNull.Fd(), devNull.Fd()}, // stdin, stdout, stderr -> /dev/null
 		Sys: &syscall.SysProcAttr{
 			Setsid: true,
 		},
 	}
 
-	_, err := syscall.ForkExec(c.path, c.args, attr)
+	_, err = syscall.ForkExec(c.path, c.args, attr)
 	return err
+}
+
+// isRegistryError checks if an error is related to registry access (critical)
+// vs signaling errors (non-critical)
+func isRegistryError(err error) bool {
+	if err == nil {
+		return false
+	}
+	// Registry errors start with "failed to get registry"
+	return strings.HasPrefix(err.Error(), "failed to get registry")
 }

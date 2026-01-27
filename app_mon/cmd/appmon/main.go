@@ -576,7 +576,15 @@ func runUpdate(cmd *cobra.Command, args []string) error {
 	}
 
 	fmt.Println()
-	fmt.Println("Downloading new version...")
+	fmt.Println("Starting update process...")
+	fmt.Println("  • Creating rollback backup")
+	fmt.Println("  • Downloading new version")
+	fmt.Println("  • Stopping daemons")
+	fmt.Println("  • Installing binary")
+	fmt.Println("  • Updating backups")
+	fmt.Println("  • Restarting daemons")
+	fmt.Println("  • Verifying health")
+	fmt.Println()
 
 	result, err := updater.PerformUpdate()
 	if err != nil {
