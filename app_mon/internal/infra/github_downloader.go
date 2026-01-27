@@ -19,8 +19,8 @@ const (
 	githubOwner      = "eliteGoblin"
 	githubRepo       = "focusd"
 	githubAPIURL     = "https://api.github.com/repos/%s/%s/releases/latest"
-	githubAPITimeout = 30 * time.Second  // Timeout for API calls
-	downloadTimeout  = 5 * time.Minute   // Timeout for asset downloads
+	githubAPITimeout = 30 * time.Second // Timeout for API calls
+	downloadTimeout  = 5 * time.Minute  // Timeout for asset downloads
 )
 
 // GitHubRelease represents a GitHub release response.

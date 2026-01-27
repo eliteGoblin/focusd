@@ -3,6 +3,7 @@ package infra
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -246,7 +247,7 @@ func TestCopyFile_AtomicWrite(t *testing.T) {
 	require.NoError(t, err)
 	for _, entry := range entries {
 		name := entry.Name()
-		assert.False(t, filepath.HasPrefix(name, ".appmon-copy-"),
+		assert.False(t, strings.HasPrefix(name, ".appmon-copy-"),
 			"temp file should be cleaned up: %s", name)
 	}
 }
