@@ -3,6 +3,7 @@ package infra
 import (
 	"archive/tar"
 	"compress/gzip"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -53,7 +54,10 @@ func NewGitHubDownloader() *GitHubDownloader {
 func (d *GitHubDownloader) GetLatestRelease() (*GitHubRelease, error) {
 	url := fmt.Sprintf(githubAPIURL, d.owner, d.repo)
 
-	req, err := http.NewRequest("GET", url, nil)
+	ctx, cancel := context.WithTimeout(context.Background(), githubTimeout)
+	defer cancel()
+
+	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create request: %w", err)
 	}
@@ -77,16 +81,6 @@ func (d *GitHubDownloader) GetLatestRelease() (*GitHubRelease, error) {
 	}
 
 	return &release, nil
-}
-
-// getAssetName returns the expected asset name for current platform.
-func (d *GitHubDownloader) getAssetName() string {
-	arch := runtime.GOARCH
-	// Map Go arch to release naming convention
-	if arch == "arm64" {
-		return "appmon_darwin_arm64.tar.gz"
-	}
-	return "appmon_darwin_amd64.tar.gz"
 }
 
 // findAsset finds the matching asset for current platform.
@@ -120,7 +114,15 @@ func (d *GitHubDownloader) DownloadLatest(destPath string) error {
 	}
 
 	// Download the asset
-	resp, err := d.client.Get(asset.BrowserDownloadURL)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	defer cancel()
+
+	req, err := http.NewRequestWithContext(ctx, "GET", asset.BrowserDownloadURL, nil)
+	if err != nil {
+		return fmt.Errorf("failed to create download request: %w", err)
+	}
+
+	resp, err := d.client.Do(req)
 	if err != nil {
 		return fmt.Errorf("failed to download asset: %w", err)
 	}

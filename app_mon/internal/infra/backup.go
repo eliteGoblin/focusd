@@ -282,13 +282,13 @@ func (bm *BackupManager) restoreFromGitHub(config *BackupConfig) (bool, error) {
 	defer os.RemoveAll(filepath.Dir(tmpPath))
 
 	// Ensure destination directory exists
-	if err := os.MkdirAll(filepath.Dir(config.MainBinaryPath), 0755); err != nil {
-		return false, fmt.Errorf("failed to create binary directory: %w", err)
+	if mkdirErr := os.MkdirAll(filepath.Dir(config.MainBinaryPath), 0755); mkdirErr != nil {
+		return false, fmt.Errorf("failed to create binary directory: %w", mkdirErr)
 	}
 
 	// Copy to main binary location
-	if err := copyFile(tmpPath, config.MainBinaryPath); err != nil {
-		return false, fmt.Errorf("failed to copy downloaded binary: %w", err)
+	if copyErr := copyFile(tmpPath, config.MainBinaryPath); copyErr != nil {
+		return false, fmt.Errorf("failed to copy downloaded binary: %w", copyErr)
 	}
 	_ = os.Chmod(config.MainBinaryPath, 0755)
 
@@ -324,11 +324,6 @@ func (bm *BackupManager) restoreFromGitHub(config *BackupConfig) (bool, error) {
 	}
 
 	return true, nil
-}
-
-// restoreFromBackup restores the main binary from a valid backup (legacy method)
-func (bm *BackupManager) restoreFromBackup(config *BackupConfig) (bool, error) {
-	return bm.restoreWithFallback(config)
 }
 
 // queryBinaryVersion runs the binary with "version --json" to get its version

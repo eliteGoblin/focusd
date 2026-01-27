@@ -484,13 +484,6 @@ func createLogger() *zap.Logger {
 	return logger
 }
 
-func boolToStatus(b bool) string {
-	if b {
-		return "enabled"
-	}
-	return "disabled"
-}
-
 func runVersion(cmd *cobra.Command, args []string) {
 	if jsonOutput {
 		fmt.Printf(`{"version":"%s","commit":"%s","build_time":"%s"}`+"\n",
