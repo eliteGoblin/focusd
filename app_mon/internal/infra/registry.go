@@ -10,7 +10,7 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/user/focusd/app_mon/internal/domain"
+	"github.com/eliteGoblin/focusd/app_mon/internal/domain"
 )
 
 const registryDir = "/var/tmp"

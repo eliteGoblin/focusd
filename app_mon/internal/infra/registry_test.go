@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/user/focusd/app_mon/internal/domain"
+	"github.com/eliteGoblin/focusd/app_mon/internal/domain"
 )
 
 // mockProcessManager is a test double for ProcessManager

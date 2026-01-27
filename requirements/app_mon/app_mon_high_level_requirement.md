@@ -26,7 +26,83 @@ But
 * I want a solution even for dev/admin like me it cannot stop easily. I think freedom's can only terminate session once at a week is good enough for me, it's a good balance. 
 * Solution should make easy to add more restriction, than I want to disable some restriction. e.g add a new app/URL is more easily than cancel a block 
 
-# My own thinking of solution 
+# Core Design Philosophy: "Do Not Trust Yourself" Model
+
+## The Problem with Traditional Tools
+
+Most productivity/blocking tools assume a **cooperative user model**:
+- User wants to focus → Tool helps → Works great
+- User wants distraction → User disables tool → Tool defeated
+
+This fails because **future-you is not the same as present-you**. When the urge hits, you become an adversary to your own goals.
+
+## The "Do Not Trust Yourself" Model
+
+Design the system assuming **future-you will try everything to bypass it**:
+
+```
+Present-you (rational):     "I want to focus, block distractions"
+Future-you (impulsive):     "I NEED YouTube/Dota2 RIGHT NOW"
+                                    ↓
+                            Will try to:
+                            - Kill the daemon
+                            - Find and edit config files
+                            - Uninstall the blocker
+                            - Find workarounds
+```
+
+The tool must protect present-you's decisions FROM future-you's impulses.
+
+## Design Patterns for "Do Not Trust Yourself"
+
+| Pattern | Purpose | Example |
+|---------|---------|---------|
+| **Obfuscation** | Can't kill what you can't find | Random daemon names: `dbus-xyz`, `systemd-abc` |
+| **Resurrection** | Killing is futile | Watchdog auto-restores killed processes |
+| **Friction** | Make disabling annoying | Type motivational quote to disable |
+| **Time Limits** | Prevent "just 5 more min" loops | Max 1 hour temporary disable |
+| **Asymmetric Difficulty** | Easy to add restrictions, hard to remove | One command to block, quote + cooldown to unblock |
+| **No Exposed Internals** | Harder to target | Don't show PID, config paths, or implementation details |
+| **Multi-Layer Defense** | Single bypass doesn't defeat system | DNS + hosts + app monitor + policy layers |
+| **Auto-Recovery** | System heals itself | Detect Steam reinstalled → delete again |
+
+## Comparison: Tool vs Commitment Device
+
+| Aspect | Regular Tool (Freedxm) | Commitment Device (FocusD) |
+|--------|------------------------|---------------------------|
+| **Assumption** | User will cooperate | User will try to circumvent |
+| **Kill daemon** | Works, blocking stops | Daemon respawns automatically |
+| **Find process** | Easy: `ps aux \| grep freedxm` | Hard: randomized system-like names |
+| **Disable command** | Just run it | Must type motivational quote |
+| **Edit config** | Plain text, easy | Encrypted or cloud-stored keys |
+| **Philosophy** | "I'll help you" | "I'll protect you from yourself" |
+
+## Why This Matters
+
+Slot machine designers, social media companies, and game studios understand the impulsive brain. They engineer FOR it:
+- Variable reward schedules
+- Infinite scroll
+- "Just one more game" mechanics
+
+Focus tools must engineer AGAINST that same brain. The tool isn't fighting external threats - it's fighting **you**.
+
+## Key Insight from Freedxm Analysis
+
+Freedxm (a Freedom clone for Linux) uses:
+- WebSocket + Chrome DevTools Protocol for browser control
+- Process polling + killall for app blocking
+- gRPC client/server architecture
+
+But it has **zero self-protection**:
+```bash
+killall freedxm  # Done. All blocking disabled.
+```
+
+This is the gap FocusD fills: **same blocking capabilities, but with self-defense**.
+
+---
+
+# My own thinking of solution
 
 I could using differet layer to help me more secure/add more friction, like cyber security principle. each layer it self should achieve the goal, and combination of layer 
 

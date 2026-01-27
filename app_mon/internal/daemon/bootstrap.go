@@ -5,20 +5,40 @@ import (
 	"os/exec"
 	"syscall"
 
-	"github.com/user/focusd/app_mon/internal/domain"
-	"github.com/user/focusd/app_mon/internal/infra"
+	"github.com/eliteGoblin/focusd/app_mon/internal/domain"
+	"github.com/eliteGoblin/focusd/app_mon/internal/infra"
 )
 
 // StartDaemon spawns a new daemon process with an obfuscated name.
 // The daemon is detached from the parent process (runs independently).
+// Uses the installed binary path from ExecModeConfig, not os.Executable(),
+// to ensure daemons run from the expected install location.
 func StartDaemon(role domain.DaemonRole) error {
+	return StartDaemonWithPath(role, "")
+}
+
+// StartDaemonWithPath spawns a daemon from a specific binary path.
+// If binaryPath is empty, uses the installed binary path based on exec mode.
+func StartDaemonWithPath(role domain.DaemonRole, binaryPath string) error {
 	obfuscator := infra.NewObfuscator()
 	daemonName := obfuscator.GenerateName()
 
-	// Get our own executable path
-	executable, err := os.Executable()
-	if err != nil {
-		return err
+	// Determine executable path
+	executable := binaryPath
+	if executable == "" {
+		// Use installed binary path, not os.Executable()
+		// This ensures daemons run from install location, not temp/dev location
+		execMode := infra.DetectExecMode()
+		executable = execMode.BinaryPath
+
+		// Fall back to os.Executable() if installed binary doesn't exist
+		if _, err := os.Stat(executable); os.IsNotExist(err) {
+			var execErr error
+			executable, execErr = os.Executable()
+			if execErr != nil {
+				return execErr
+			}
+		}
 	}
 
 	// Self-exec with daemon mode flag

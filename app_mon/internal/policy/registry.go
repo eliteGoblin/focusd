@@ -3,7 +3,7 @@ package policy
 import (
 	"fmt"
 
-	"github.com/user/focusd/app_mon/internal/domain"
+	"github.com/eliteGoblin/focusd/app_mon/internal/domain"
 )
 
 // Registry holds all app blocking policies.

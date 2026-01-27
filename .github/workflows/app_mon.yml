@@ -11,6 +11,7 @@ on:
     paths:
       - 'app_mon/**'
       - '.github/workflows/app_mon.yml'
+  workflow_dispatch:  # Manual trigger
 
 defaults:
   run:
@@ -85,6 +86,7 @@ jobs:
         uses: codecov/codecov-action@v4
         if: matrix.os == 'ubuntu-latest' && matrix.go-version == '1.23'
         with:
+          token: ${{ secrets.CODECOV_TOKEN }}
           files: app_mon/coverage.out
           flags: unittests
           fail_ci_if_error: false

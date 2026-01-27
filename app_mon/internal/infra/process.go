@@ -8,7 +8,7 @@ import (
 
 	"github.com/shirou/gopsutil/v3/process"
 
-	"github.com/user/focusd/app_mon/internal/domain"
+	"github.com/eliteGoblin/focusd/app_mon/internal/domain"
 )
 
 // ProcessManagerImpl implements domain.ProcessManager using gopsutil.
