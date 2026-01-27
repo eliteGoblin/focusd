@@ -406,7 +406,8 @@ func computeSHA256(path string) (string, error) {
 	return hex.EncodeToString(h.Sum(nil)), nil
 }
 
-// copyFile copies a file from src to dst
+// copyFile copies a file from src to dst using atomic write pattern.
+// Writes to temp file first, syncs, then renames to avoid corruption.
 func copyFile(src, dst string) error {
 	sourceFile, err := os.Open(src)
 	if err != nil {
@@ -414,12 +415,40 @@ func copyFile(src, dst string) error {
 	}
 	defer sourceFile.Close()
 
-	destFile, err := os.Create(dst)
+	// Create temp file in same directory for atomic rename
+	dstDir := filepath.Dir(dst)
+	tmpFile, err := os.CreateTemp(dstDir, ".appmon-copy-*")
 	if err != nil {
 		return err
 	}
-	defer destFile.Close()
+	tmpPath := tmpFile.Name()
 
-	_, err = io.Copy(destFile, sourceFile)
-	return err
+	// Clean up temp file on any error
+	success := false
+	defer func() {
+		if !success {
+			os.Remove(tmpPath)
+		}
+	}()
+
+	// Copy content
+	if _, err = io.Copy(tmpFile, sourceFile); err != nil {
+		tmpFile.Close()
+		return err
+	}
+
+	// Sync to disk before rename
+	if err = tmpFile.Sync(); err != nil {
+		tmpFile.Close()
+		return err
+	}
+	tmpFile.Close()
+
+	// Atomic rename
+	if err = os.Rename(tmpPath, dst); err != nil {
+		return err
+	}
+
+	success = true
+	return nil
 }

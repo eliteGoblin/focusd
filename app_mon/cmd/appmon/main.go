@@ -218,7 +218,8 @@ func runStart(cmd *cobra.Command, args []string) error {
 	return nil
 }
 
-// copyBinary copies the binary file to destination
+// copyBinary copies the binary file to destination using atomic write pattern.
+// Writes to temp file first, syncs, chmods, then renames to avoid corruption.
 func copyBinary(src, dst string) error {
 	sourceFile, err := os.Open(src)
 	if err != nil {
@@ -226,18 +227,47 @@ func copyBinary(src, dst string) error {
 	}
 	defer sourceFile.Close()
 
-	destFile, err := os.Create(dst)
+	// Create temp file in same directory for atomic rename
+	dstDir := filepath.Dir(dst)
+	tmpFile, err := os.CreateTemp(dstDir, ".appmon-tmp-*")
 	if err != nil {
 		return err
 	}
-	defer destFile.Close()
+	tmpPath := tmpFile.Name()
 
-	if _, err = io.Copy(destFile, sourceFile); err != nil {
+	// Clean up temp file on any error
+	success := false
+	defer func() {
+		if !success {
+			os.Remove(tmpPath)
+		}
+	}()
+
+	// Copy content
+	if _, err = io.Copy(tmpFile, sourceFile); err != nil {
+		tmpFile.Close()
 		return err
 	}
 
-	// Make executable
-	return os.Chmod(dst, 0755)
+	// Sync to disk before rename
+	if err = tmpFile.Sync(); err != nil {
+		tmpFile.Close()
+		return err
+	}
+	tmpFile.Close()
+
+	// Make executable before rename
+	if err = os.Chmod(tmpPath, 0755); err != nil {
+		return err
+	}
+
+	// Atomic rename
+	if err = os.Rename(tmpPath, dst); err != nil {
+		return err
+	}
+
+	success = true
+	return nil
 }
 
 func runStatus(cmd *cobra.Command, args []string) error {

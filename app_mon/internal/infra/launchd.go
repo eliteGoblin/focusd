@@ -182,14 +182,11 @@ func (m *LaunchdManagerImpl) GetPlistPath() string {
 }
 
 // load loads the plist using launchctl.
+// Note: `launchctl load` is deprecated but still works on macOS.
+// Modern approach would use `launchctl bootstrap` for system domain
+// and `launchctl bootstrap gui/<uid>` for user domain, but `load`
+// is simpler and sufficient for this use case.
 func (m *LaunchdManagerImpl) load() error {
-	if m.mode == ExecModeSystem {
-		// LaunchDaemon: use bootstrap for system domain
-		cmd := exec.Command("launchctl", "load", m.plistPath)
-		return cmd.Run()
-	}
-
-	// LaunchAgent: load for current user
 	cmd := exec.Command("launchctl", "load", m.plistPath)
 	return cmd.Run()
 }

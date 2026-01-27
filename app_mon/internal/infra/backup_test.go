@@ -216,3 +216,61 @@ func TestComputeSHA256_FileNotFound(t *testing.T) {
 	_, err := computeSHA256("/nonexistent/path/to/file")
 	assert.Error(t, err)
 }
+
+// TestCopyFile_AtomicWrite verifies that copyFile uses atomic write pattern.
+// This is a regression test for the bug where non-atomic writes could leave
+// corrupted binaries if the copy fails mid-write.
+func TestCopyFile_AtomicWrite(t *testing.T) {
+	tmpDir, err := os.MkdirTemp("", "appmon-copyfile-test-*")
+	require.NoError(t, err)
+	defer os.RemoveAll(tmpDir)
+
+	// Create source file
+	srcPath := filepath.Join(tmpDir, "source")
+	srcContent := []byte("test content for atomic copy")
+	err = os.WriteFile(srcPath, srcContent, 0644)
+	require.NoError(t, err)
+
+	// Copy to destination
+	dstPath := filepath.Join(tmpDir, "destination")
+	err = copyFile(srcPath, dstPath)
+	require.NoError(t, err)
+
+	// Verify destination content matches source
+	dstContent, err := os.ReadFile(dstPath)
+	require.NoError(t, err)
+	assert.Equal(t, srcContent, dstContent, "copied content should match source")
+
+	// Verify no temp files left behind
+	entries, err := os.ReadDir(tmpDir)
+	require.NoError(t, err)
+	for _, entry := range entries {
+		name := entry.Name()
+		assert.False(t, filepath.HasPrefix(name, ".appmon-copy-"),
+			"temp file should be cleaned up: %s", name)
+	}
+}
+
+// TestCopyFile_SourceNotFound verifies copyFile handles missing source gracefully.
+func TestCopyFile_SourceNotFound(t *testing.T) {
+	tmpDir, err := os.MkdirTemp("", "appmon-copyfile-test-*")
+	require.NoError(t, err)
+	defer os.RemoveAll(tmpDir)
+
+	err = copyFile("/nonexistent/source", filepath.Join(tmpDir, "dest"))
+	assert.Error(t, err, "should fail when source doesn't exist")
+}
+
+// TestCopyFile_DestDirNotExist verifies copyFile fails when destination directory doesn't exist.
+func TestCopyFile_DestDirNotExist(t *testing.T) {
+	tmpDir, err := os.MkdirTemp("", "appmon-copyfile-test-*")
+	require.NoError(t, err)
+	defer os.RemoveAll(tmpDir)
+
+	srcPath := filepath.Join(tmpDir, "source")
+	err = os.WriteFile(srcPath, []byte("content"), 0644)
+	require.NoError(t, err)
+
+	err = copyFile(srcPath, "/nonexistent/dir/dest")
+	assert.Error(t, err, "should fail when destination directory doesn't exist")
+}

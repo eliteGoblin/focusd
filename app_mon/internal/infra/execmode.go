@@ -22,8 +22,9 @@ type ExecModeConfig struct {
 	BinaryPath string // Where the binary should be installed
 	PlistDir   string // Where the plist file goes
 	PlistPath  string // Full path to plist file
-	BackupDir  string // Where local backups are stored
 	IsRoot     bool   // Whether running as root
+	// Note: BackupDir is intentionally not included here.
+	// BackupManager uses its own obfuscated backup locations for security.
 }
 
 const (
@@ -41,7 +42,6 @@ func DetectExecMode() *ExecModeConfig {
 			BinaryPath: "/usr/local/bin/appmon",
 			PlistDir:   "/Library/LaunchDaemons",
 			PlistPath:  "/Library/LaunchDaemons/" + launchdLabel + ".plist",
-			BackupDir:  "/var/lib/appmon/backups",
 			IsRoot:     true,
 		}
 	}
@@ -51,7 +51,6 @@ func DetectExecMode() *ExecModeConfig {
 		BinaryPath: filepath.Join(home, ".local", "bin", "appmon"),
 		PlistDir:   filepath.Join(home, "Library", "LaunchAgents"),
 		PlistPath:  filepath.Join(home, "Library", "LaunchAgents", launchdLabel+".plist"),
-		BackupDir:  filepath.Join(home, ".local", "share", "appmon", "backups"),
 		IsRoot:     false,
 	}
 }

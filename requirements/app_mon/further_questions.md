@@ -10,7 +10,7 @@
 
 * Disable the system, after motivation, for like 10 minutes, max 20 minutes? it will auto recover. 
 * Consider Yubikey and Cloud Key as option to generate focusd key to add more friction
-* Cloud storage to store released app, refine release process: local test => push to release => install via official releasse => auto protect system. 
+* Cloud storage to store released app, refine release process: local test => push to release => install via official release => auto protect system. 
 
 # Tamper proof 
 

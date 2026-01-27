@@ -1,5 +1,5 @@
 
-# Implemnted feature
+# Implemented feature
 
 Sudo vs nonsudo, auto detect
 

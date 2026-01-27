@@ -16,10 +16,11 @@ import (
 )
 
 const (
-	githubOwner   = "eliteGoblin"
-	githubRepo    = "focusd"
-	githubAPIURL  = "https://api.github.com/repos/%s/%s/releases/latest"
-	githubTimeout = 30 * time.Second
+	githubOwner      = "eliteGoblin"
+	githubRepo       = "focusd"
+	githubAPIURL     = "https://api.github.com/repos/%s/%s/releases/latest"
+	githubAPITimeout = 30 * time.Second  // Timeout for API calls
+	downloadTimeout  = 5 * time.Minute   // Timeout for asset downloads
 )
 
 // GitHubRelease represents a GitHub release response.
@@ -42,9 +43,10 @@ type GitHubDownloader struct {
 }
 
 // NewGitHubDownloader creates a new GitHub downloader.
+// Note: Client has no timeout; timeouts are controlled per-request via context.
 func NewGitHubDownloader() *GitHubDownloader {
 	return &GitHubDownloader{
-		client: &http.Client{Timeout: githubTimeout},
+		client: &http.Client{}, // No client timeout - use context timeouts instead
 		owner:  githubOwner,
 		repo:   githubRepo,
 	}
@@ -54,7 +56,7 @@ func NewGitHubDownloader() *GitHubDownloader {
 func (d *GitHubDownloader) GetLatestRelease() (*GitHubRelease, error) {
 	url := fmt.Sprintf(githubAPIURL, d.owner, d.repo)
 
-	ctx, cancel := context.WithTimeout(context.Background(), githubTimeout)
+	ctx, cancel := context.WithTimeout(context.Background(), githubAPITimeout)
 	defer cancel()
 
 	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
@@ -114,7 +116,7 @@ func (d *GitHubDownloader) DownloadLatest(destPath string) error {
 	}
 
 	// Download the asset
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	ctx, cancel := context.WithTimeout(context.Background(), downloadTimeout)
 	defer cancel()
 
 	req, err := http.NewRequestWithContext(ctx, "GET", asset.BrowserDownloadURL, nil)
