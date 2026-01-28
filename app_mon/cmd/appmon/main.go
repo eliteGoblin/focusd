@@ -156,7 +156,7 @@ func runStart(cmd *cobra.Command, args []string) error {
 				pids, _ := pm.FindByName("appmon")
 				for _, pid := range pids {
 					if pid != pm.GetCurrentPID() {
-						pm.Kill(pid)
+						_ = pm.Kill(pid)
 					}
 				}
 
@@ -170,7 +170,7 @@ func runStart(cmd *cobra.Command, args []string) error {
 
 				// Clear registry (including lock file)
 				registry := infra.NewFileRegistry(pm)
-				registry.Clear()
+				_ = registry.Clear()
 				// Also remove lock file which may have root ownership
 				registryPath := registry.GetRegistryPath()
 				_ = os.Remove(registryPath + ".lock")
@@ -226,9 +226,9 @@ func runStart(cmd *cobra.Command, args []string) error {
 			}
 			// Mode switch requested - kill old daemons and proceed
 			fmt.Printf("Switching from %s to %s mode...\n", entry.Mode, currentMode)
-			pm.Kill(entry.WatcherPID)
-			pm.Kill(entry.GuardianPID)
-			registry.Clear()
+			_ = pm.Kill(entry.WatcherPID)
+			_ = pm.Kill(entry.GuardianPID)
+			_ = registry.Clear()
 			time.Sleep(1 * time.Second) // Wait for processes to die
 		}
 	} else if systemPlistExists && execMode.Mode == infra.ExecModeUser {
@@ -245,15 +245,15 @@ func runStart(cmd *cobra.Command, args []string) error {
 		pids, _ := pm.FindByName("appmon")
 		for _, pid := range pids {
 			if pid != pm.GetCurrentPID() {
-				pm.Kill(pid)
+				_ = pm.Kill(pid)
 			}
 		}
 		// Clear registry (has root ownership from system mode)
-		registry.Clear()
+		_ = registry.Clear()
 		time.Sleep(1 * time.Second)
 	} else if execMode.IsRoot && execMode.Mode == infra.ExecModeUser {
 		// Running with sudo --mode user, but no system plist - just clear any stale registry
-		registry.Clear()
+		_ = registry.Clear()
 	}
 
 	// Determine binary path based on execution mode
