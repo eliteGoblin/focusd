@@ -273,9 +273,6 @@ func runStart(cmd *cobra.Command, args []string) error {
 		// Clear registry (has root ownership from system mode)
 		_ = registry.Clear()
 		time.Sleep(1 * time.Second)
-	} else if execMode.IsRoot && execMode.Mode == infra.ExecModeUser {
-		// Running with sudo --mode user, but no system plist - just clear any stale registry
-		_ = registry.Clear()
 	}
 
 	// Determine binary path based on execution mode

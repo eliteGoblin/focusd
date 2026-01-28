@@ -121,7 +121,7 @@ func NewLaunchdManager(config *ExecModeConfig) domain.LaunchAgentManager {
 }
 
 // generatePlistContent creates plist content for the given exec path.
-func (m *LaunchdManagerImpl) generatePlistContent(execPath string) []byte {
+func (m *LaunchdManagerImpl) generatePlistContent(execPath string) ([]byte, error) {
 	// Select template based on mode
 	var tmplStr string
 	if m.mode == ExecModeSystem {
@@ -140,15 +140,15 @@ func (m *LaunchdManagerImpl) generatePlistContent(execPath string) []byte {
 
 	tmpl, err := template.New("plist").Parse(tmplStr)
 	if err != nil {
-		return nil
+		return nil, fmt.Errorf("failed to parse plist template: %w", err)
 	}
 
 	var buf bytes.Buffer
 	if err := tmpl.Execute(&buf, config); err != nil {
-		return nil
+		return nil, fmt.Errorf("failed to execute plist template: %w", err)
 	}
 
-	return buf.Bytes()
+	return buf.Bytes(), nil
 }
 
 // Install creates and loads the plist (LaunchAgent or LaunchDaemon).
@@ -159,9 +159,9 @@ func (m *LaunchdManagerImpl) Install(execPath string) error {
 	}
 
 	// Generate plist content
-	content := m.generatePlistContent(execPath)
-	if content == nil {
-		return fmt.Errorf("failed to generate plist content")
+	content, err := m.generatePlistContent(execPath)
+	if err != nil {
+		return fmt.Errorf("failed to generate plist content: %w", err)
 	}
 
 	// Write plist file
@@ -201,8 +201,8 @@ func (m *LaunchdManagerImpl) NeedsUpdate(execPath string) bool {
 	}
 
 	// Generate expected content
-	expectedContent := m.generatePlistContent(execPath)
-	if expectedContent == nil {
+	expectedContent, err := m.generatePlistContent(execPath)
+	if err != nil {
 		return true // Can't generate, assume needs update
 	}
 
@@ -215,9 +215,9 @@ func (m *LaunchdManagerImpl) Update(execPath string) error {
 	_ = m.unload()
 
 	// Generate and write new plist content
-	content := m.generatePlistContent(execPath)
-	if content == nil {
-		return fmt.Errorf("failed to generate plist content")
+	content, err := m.generatePlistContent(execPath)
+	if err != nil {
+		return fmt.Errorf("failed to generate plist content: %w", err)
 	}
 
 	if err := os.WriteFile(m.plistPath, content, 0644); err != nil {

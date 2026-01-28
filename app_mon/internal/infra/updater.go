@@ -473,7 +473,12 @@ func (c *execCmd) start() error {
 	if err != nil {
 		return fmt.Errorf("failed to open /dev/null: %w", err)
 	}
-	defer devNull.Close()
+	defer func() {
+		if cerr := devNull.Close(); cerr != nil {
+			// Log error but don't fail - /dev/null close errors are not critical
+			fmt.Fprintf(os.Stderr, "failed to close /dev/null: %v\n", cerr)
+		}
+	}()
 
 	// Use syscall.ForkExec to spawn a fully detached process
 	attr := &syscall.ProcAttr{

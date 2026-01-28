@@ -13,8 +13,8 @@ import (
 
 // mockProcessManager and mockDaemonRegistry are defined in test_helpers_test.go
 
-// TestCheckUpdate_NewerVersionAvailable verifies update detection
-func TestCheckUpdate_NewerVersionAvailable(t *testing.T) {
+// TestUpdater_VersionComparison verifies version comparison logic used by CheckUpdate
+func TestUpdater_VersionComparison(t *testing.T) {
 	tmpDir, err := os.MkdirTemp("", "updater-test-*")
 	require.NoError(t, err)
 	defer os.RemoveAll(tmpDir)
@@ -73,8 +73,13 @@ func TestStopDaemons_NoDaemonsRunning(t *testing.T) {
 	assert.NoError(t, err)
 }
 
-// TestStopDaemons_DaemonsRunning verifies stopping running daemons
+// TestStopDaemons_DaemonsRunning verifies stopping running daemons.
+// SKIPPED: StopDaemons uses real OS signals (via signalProcess), which can
+// unintentionally send SIGTERM to real processes when using fake PIDs in tests.
+// TODO: Make signaling injectable/mockable to enable this test safely.
 func TestStopDaemons_DaemonsRunning(t *testing.T) {
+	t.Skip("disabled: StopDaemons uses real OS signals; this test must not send SIGTERM to arbitrary PIDs")
+
 	pm := newMockProcessManager()
 	pm.SetRunning(1001, true)
 	pm.SetRunning(1002, true)

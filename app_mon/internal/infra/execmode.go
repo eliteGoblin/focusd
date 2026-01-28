@@ -3,6 +3,7 @@ package infra
 
 import (
 	"os"
+	"os/user"
 	"path/filepath"
 )
 
@@ -69,8 +70,9 @@ func (m ExecMode) String() string {
 
 // GetUserModeConfig returns user mode config regardless of current euid.
 // Used when running with sudo but wanting to install in user mode (--mode user).
+// When running under sudo, uses SUDO_USER to get the invoking user's home directory.
 func GetUserModeConfig() *ExecModeConfig {
-	home, _ := os.UserHomeDir()
+	home := getRealUserHome()
 	return &ExecModeConfig{
 		Mode:       ExecModeUser,
 		BinaryPath: filepath.Join(home, ".local", "bin", "appmon"),
@@ -78,4 +80,18 @@ func GetUserModeConfig() *ExecModeConfig {
 		PlistPath:  filepath.Join(home, "Library", "LaunchAgents", launchdLabel+".plist"),
 		IsRoot:     os.Geteuid() == 0, // Still track actual root status for permission operations
 	}
+}
+
+// getRealUserHome returns the real user's home directory, even when running under sudo.
+// Under sudo, os.UserHomeDir() returns /var/root, so we use SUDO_USER to find the real user.
+func getRealUserHome() string {
+	// Check if running under sudo
+	if sudoUser := os.Getenv("SUDO_USER"); sudoUser != "" {
+		if u, err := user.Lookup(sudoUser); err == nil {
+			return u.HomeDir
+		}
+	}
+	// Fall back to default
+	home, _ := os.UserHomeDir()
+	return home
 }
