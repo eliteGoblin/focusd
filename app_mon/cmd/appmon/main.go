@@ -456,6 +456,15 @@ func runStatus(cmd *cobra.Command, args []string) error {
 		fmt.Println("Status: NOT RUNNING")
 	}
 
+	// Show version info
+	fmt.Printf("\nCLI version:    %s\n", Version)
+	if entry.AppVersion != "" {
+		fmt.Printf("Daemon version: %s\n", entry.AppVersion)
+		if entry.AppVersion != Version {
+			fmt.Println("                (differs from CLI - consider restarting)")
+		}
+	}
+
 	// Check backup config for execution mode
 	backupConfig, err := backupManager.GetConfig()
 	if err == nil {
@@ -463,15 +472,13 @@ func runStatus(cmd *cobra.Command, args []string) error {
 		if execMode == "" {
 			execMode = "user"
 		}
-		fmt.Printf("\nExecution mode: %s\n", execMode)
-		fmt.Printf("Binary path: %s\n", backupConfig.MainBinaryPath)
-		fmt.Printf("Plist path: %s\n", backupConfig.PlistPath)
+		fmt.Printf("Execution mode: %s\n", execMode)
 
-		// Check if plist exists
+		// Check if plist exists (don't show path for security)
 		if _, err := os.Stat(backupConfig.PlistPath); err == nil {
-			fmt.Println("Auto-start: enabled")
+			fmt.Println("Auto-start:     enabled")
 		} else {
-			fmt.Println("Auto-start: disabled (plist missing)")
+			fmt.Println("Auto-start:     disabled")
 		}
 	}
 
@@ -598,6 +605,7 @@ func runDaemon(cmd *cobra.Command, args []string) error {
 		Role:           role,
 		ObfuscatedName: daemonName,
 		StartedAt:      time.Now(),
+		AppVersion:     Version,
 	}
 
 	// Initialize infrastructure

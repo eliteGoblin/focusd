@@ -18,6 +18,7 @@ type Daemon struct {
 	Role           DaemonRole
 	ObfuscatedName string
 	StartedAt      time.Time
+	AppVersion     string // Version of the app binary
 }
 
 // RegistryEntry stores the state of both daemons for mutual discovery.
@@ -29,7 +30,8 @@ type RegistryEntry struct {
 	GuardianPID   int    `json:"guardian_pid"`
 	GuardianName  string `json:"guardian_name"`
 	LastHeartbeat int64  `json:"last_heartbeat"`
-	Mode          string `json:"mode,omitempty"` // "user" or "system" - for mode switch detection
+	Mode          string `json:"mode,omitempty"`        // "user" or "system" - for mode switch detection
+	AppVersion    string `json:"app_version,omitempty"` // Version of running daemons
 }
 
 // Policy defines what an app blocker policy contains.
