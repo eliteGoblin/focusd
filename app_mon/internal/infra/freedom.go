@@ -228,9 +228,10 @@ func (f *FreedomProtectorImpl) Protect() (actionTaken bool, err error) {
 		actionTaken = true
 	}
 
-	// Log helper status (we can't fix it, but we can report)
+	// Helper status is reported in GetHealth() but we can't fix it.
+	// Use Debug level to avoid log spam (Protect() runs every 5 seconds).
 	if !f.IsHelperRunning() {
-		f.logWarn("FreedomHelper not running (reinstall Freedom to fix)")
+		f.logDebug("FreedomHelper not running (reinstall Freedom to fix)")
 	}
 
 	return actionTaken, nil
