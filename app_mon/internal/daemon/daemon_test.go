@@ -67,8 +67,8 @@ func (m *mockBackupManager) GetMainBinaryPath() string {
 	return "/test/path/appmon"
 }
 
-// TestFreedomProtector_Integration verifies watcher integrates with FreedomProtector
-func TestFreedomProtector_Integration(t *testing.T) {
+// TestFreedomCheckInterval_DefaultValue verifies the Freedom check interval is configured correctly
+func TestFreedomCheckInterval_DefaultValue(t *testing.T) {
 	// Verify the FreedomCheckInterval is fast enough for quick restart
 	config := DefaultWatcherConfig()
 	assert.Equal(t, 5*time.Second, config.FreedomCheckInterval,

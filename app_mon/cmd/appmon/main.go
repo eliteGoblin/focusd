@@ -494,7 +494,7 @@ func runStatus(cmd *cobra.Command, args []string) error {
 
 	// Freedom protection status
 	fmt.Println("\nFreedom protection:")
-	freedomProtector := infra.NewFreedomProtector(pm, nil) // nil logger for status
+	freedomProtector := infra.NewFreedomProtector(pm, zap.NewNop())
 	health := freedomProtector.GetHealth()
 	if !health.Installed {
 		fmt.Println("  - Not installed (skipped)")

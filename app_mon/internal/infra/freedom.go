@@ -4,6 +4,7 @@ package infra
 import (
 	"os"
 	"os/exec"
+	"strconv"
 	"strings"
 
 	"go.uber.org/zap"
@@ -20,26 +21,72 @@ const (
 	FreedomProxyPort         = 7769
 )
 
+// CommandRunner abstracts command execution for testing
+type CommandRunner interface {
+	Run(name string, args ...string) error
+	Output(name string, args ...string) ([]byte, error)
+}
+
+// RealCommandRunner executes real system commands
+type RealCommandRunner struct{}
+
+// Run executes a command and waits for it to complete
+func (r *RealCommandRunner) Run(name string, args ...string) error {
+	return exec.Command(name, args...).Run()
+}
+
+// Output executes a command and returns its stdout
+func (r *RealCommandRunner) Output(name string, args ...string) ([]byte, error) {
+	return exec.Command(name, args...).Output()
+}
+
+// FileChecker abstracts file system checks for testing
+type FileChecker interface {
+	Exists(path string) bool
+}
+
+// RealFileChecker checks real filesystem
+type RealFileChecker struct{}
+
+// Exists checks if a file/directory exists
+func (r *RealFileChecker) Exists(path string) bool {
+	_, err := os.Stat(path)
+	return err == nil
+}
+
 // FreedomProtectorImpl implements domain.FreedomProtector.
 // It monitors and protects Freedom app, restarting it if killed
 // and restoring Login Items if removed.
 type FreedomProtectorImpl struct {
-	pm     domain.ProcessManager
-	logger *zap.Logger
+	pm          domain.ProcessManager
+	logger      *zap.Logger
+	cmdRunner   CommandRunner
+	fileChecker FileChecker
 }
 
 // NewFreedomProtector creates a new Freedom protector.
 func NewFreedomProtector(pm domain.ProcessManager, logger *zap.Logger) *FreedomProtectorImpl {
 	return &FreedomProtectorImpl{
-		pm:     pm,
-		logger: logger,
+		pm:          pm,
+		logger:      logger,
+		cmdRunner:   &RealCommandRunner{},
+		fileChecker: &RealFileChecker{},
+	}
+}
+
+// NewFreedomProtectorWithDeps creates a protector with injectable dependencies (for testing)
+func NewFreedomProtectorWithDeps(pm domain.ProcessManager, logger *zap.Logger, cmdRunner CommandRunner, fileChecker FileChecker) *FreedomProtectorImpl {
+	return &FreedomProtectorImpl{
+		pm:          pm,
+		logger:      logger,
+		cmdRunner:   cmdRunner,
+		fileChecker: fileChecker,
 	}
 }
 
 // IsInstalled checks if Freedom.app exists at /Applications/Freedom.app
 func (f *FreedomProtectorImpl) IsInstalled() bool {
-	_, err := os.Stat(FreedomAppPath)
-	return err == nil
+	return f.fileChecker.Exists(FreedomAppPath)
 }
 
 // IsAppRunning checks if Freedom main process is running
@@ -63,8 +110,7 @@ func (f *FreedomProtectorImpl) IsAppRunning() bool {
 // This is needed because FindByName does substring matching
 func (f *FreedomProtectorImpl) isExactProcessMatch(pid int, expectedName string) bool {
 	// Use ps to get exact process name
-	cmd := exec.Command("ps", "-p", string(rune(pid)), "-o", "comm=")
-	output, err := cmd.Output()
+	output, err := f.cmdRunner.Output("ps", "-p", strconv.Itoa(pid), "-o", "comm=")
 	if err != nil {
 		// Process might have exited, check via gopsutil
 		pids, _ := f.pm.FindByName(expectedName)
@@ -98,9 +144,8 @@ func (f *FreedomProtectorImpl) IsHelperRunning() bool {
 		return true
 	}
 
-	// Fallback: use ps to check by executable path (works for root processes)
-	cmd := exec.Command("pgrep", "-f", FreedomHelperProcessName)
-	output, err := cmd.Output()
+	// Fallback: use pgrep to check by process name (works for root processes)
+	output, err := f.cmdRunner.Output("pgrep", "-f", FreedomHelperProcessName)
 	if err != nil {
 		return false
 	}
@@ -111,10 +156,9 @@ func (f *FreedomProtectorImpl) IsHelperRunning() bool {
 func (f *FreedomProtectorImpl) IsLoginItemPresent() bool {
 	// Use AppleScript to check Login Items
 	script := `tell application "System Events" to get the name of every login item`
-	cmd := exec.Command("osascript", "-e", script)
-	output, err := cmd.Output()
+	output, err := f.cmdRunner.Output("osascript", "-e", script)
 	if err != nil {
-		f.logger.Debug("failed to check login items", zap.Error(err))
+		f.logDebug("failed to check login items", zap.Error(err))
 		return false
 	}
 	// Output is comma-separated list of login item names
@@ -124,26 +168,24 @@ func (f *FreedomProtectorImpl) IsLoginItemPresent() bool {
 
 // RestartApp launches Freedom.app using `open -a`
 func (f *FreedomProtectorImpl) RestartApp() error {
-	f.logger.Info("restarting Freedom app")
-	cmd := exec.Command("open", "-a", FreedomAppPath)
-	if err := cmd.Run(); err != nil {
-		f.logger.Error("failed to restart Freedom", zap.Error(err))
+	f.logInfo("restarting Freedom app")
+	if err := f.cmdRunner.Run("open", "-a", FreedomAppPath); err != nil {
+		f.logError("failed to restart Freedom", zap.Error(err))
 		return err
 	}
-	f.logger.Info("Freedom app restarted successfully")
+	f.logInfo("Freedom app restarted successfully")
 	return nil
 }
 
 // RestoreLoginItem adds Freedom back to Login Items using AppleScript
 func (f *FreedomProtectorImpl) RestoreLoginItem() error {
-	f.logger.Info("restoring Freedom to Login Items")
+	f.logInfo("restoring Freedom to Login Items")
 	script := `tell application "System Events" to make login item at end with properties {path:"/Applications/Freedom.app", hidden:false}`
-	cmd := exec.Command("osascript", "-e", script)
-	if err := cmd.Run(); err != nil {
-		f.logger.Error("failed to restore login item", zap.Error(err))
+	if err := f.cmdRunner.Run("osascript", "-e", script); err != nil {
+		f.logError("failed to restore login item", zap.Error(err))
 		return err
 	}
-	f.logger.Info("Freedom login item restored successfully")
+	f.logInfo("Freedom login item restored successfully")
 	return nil
 }
 
@@ -164,13 +206,13 @@ func (f *FreedomProtectorImpl) GetHealth() domain.FreedomHealth {
 func (f *FreedomProtectorImpl) Protect() (actionTaken bool, err error) {
 	// Skip if Freedom not installed
 	if !f.IsInstalled() {
-		f.logger.Debug("Freedom not installed, skipping protection")
+		f.logDebug("Freedom not installed, skipping protection")
 		return false, nil
 	}
 
 	// Check and restart app if killed
 	if !f.IsAppRunning() {
-		f.logger.Info("Freedom app not running, restarting...")
+		f.logInfo("Freedom app not running, restarting...")
 		if err := f.RestartApp(); err != nil {
 			return false, err
 		}
@@ -179,7 +221,7 @@ func (f *FreedomProtectorImpl) Protect() (actionTaken bool, err error) {
 
 	// Check and restore login item if removed
 	if !f.IsLoginItemPresent() {
-		f.logger.Info("Freedom login item missing, restoring...")
+		f.logInfo("Freedom login item missing, restoring...")
 		if err := f.RestoreLoginItem(); err != nil {
 			return actionTaken, err
 		}
@@ -188,10 +230,35 @@ func (f *FreedomProtectorImpl) Protect() (actionTaken bool, err error) {
 
 	// Log helper status (we can't fix it, but we can report)
 	if !f.IsHelperRunning() {
-		f.logger.Warn("FreedomHelper not running (reinstall Freedom to fix)")
+		f.logWarn("FreedomHelper not running (reinstall Freedom to fix)")
 	}
 
 	return actionTaken, nil
+}
+
+// Logging helpers that handle nil logger
+func (f *FreedomProtectorImpl) logDebug(msg string, fields ...zap.Field) {
+	if f.logger != nil {
+		f.logger.Debug(msg, fields...)
+	}
+}
+
+func (f *FreedomProtectorImpl) logInfo(msg string, fields ...zap.Field) {
+	if f.logger != nil {
+		f.logger.Info(msg, fields...)
+	}
+}
+
+func (f *FreedomProtectorImpl) logWarn(msg string, fields ...zap.Field) {
+	if f.logger != nil {
+		f.logger.Warn(msg, fields...)
+	}
+}
+
+func (f *FreedomProtectorImpl) logError(msg string, fields ...zap.Field) {
+	if f.logger != nil {
+		f.logger.Error(msg, fields...)
+	}
 }
 
 // Ensure FreedomProtectorImpl implements domain.FreedomProtector.
