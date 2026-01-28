@@ -6,6 +6,7 @@ import (
 
 	"github.com/stretchr/testify/assert"
 
+	"github.com/eliteGoblin/focusd/app_mon/internal/domain"
 	"github.com/eliteGoblin/focusd/app_mon/internal/policy"
 )
 
@@ -18,6 +19,7 @@ func TestDefaultWatcherConfig(t *testing.T) {
 	assert.Equal(t, 60*time.Second, config.PartnerCheckInterval)
 	assert.Equal(t, 60*time.Second, config.PlistCheckInterval)
 	assert.Equal(t, 60*time.Second, config.BinaryCheckInterval)
+	assert.Equal(t, 5*time.Second, config.FreedomCheckInterval)
 }
 
 // TestDefaultGuardianConfig verifies default guardian configuration
@@ -37,6 +39,7 @@ func TestWatcherConfig_AllFieldsSet(t *testing.T) {
 	assert.NotZero(t, config.PartnerCheckInterval, "PartnerCheckInterval should be set")
 	assert.NotZero(t, config.PlistCheckInterval, "PlistCheckInterval should be set")
 	assert.NotZero(t, config.BinaryCheckInterval, "BinaryCheckInterval should be set")
+	assert.NotZero(t, config.FreedomCheckInterval, "FreedomCheckInterval should be set")
 }
 
 // TestGuardianConfig_AllFieldsSet verifies all guardian config fields have values
@@ -63,3 +66,45 @@ func (m *mockBackupManager) VerifyAndRestore() (bool, error) {
 func (m *mockBackupManager) GetMainBinaryPath() string {
 	return "/test/path/appmon"
 }
+
+// TestFreedomCheckInterval_DefaultValue verifies the Freedom check interval is configured correctly
+func TestFreedomCheckInterval_DefaultValue(t *testing.T) {
+	// Verify the FreedomCheckInterval is fast enough for quick restart
+	config := DefaultWatcherConfig()
+	assert.Equal(t, 5*time.Second, config.FreedomCheckInterval,
+		"Freedom check should be every 5 seconds for fast restart")
+}
+
+// mockFreedomProtector for testing watcher integration
+type mockFreedomProtector struct {
+	protectCalled int
+	actionTaken   bool
+	err           error
+}
+
+func (m *mockFreedomProtector) IsInstalled() bool        { return true }
+func (m *mockFreedomProtector) IsAppRunning() bool       { return true }
+func (m *mockFreedomProtector) IsProxyRunning() bool     { return true }
+func (m *mockFreedomProtector) IsHelperRunning() bool    { return true }
+func (m *mockFreedomProtector) IsLoginItemPresent() bool { return true }
+func (m *mockFreedomProtector) RestartApp() error        { return nil }
+func (m *mockFreedomProtector) RestoreLoginItem() error  { return nil }
+
+func (m *mockFreedomProtector) GetHealth() domain.FreedomHealth {
+	return domain.FreedomHealth{
+		Installed:        true,
+		AppRunning:       true,
+		ProxyRunning:     true,
+		HelperRunning:    true,
+		LoginItemPresent: true,
+		ProxyPort:        7769,
+	}
+}
+
+func (m *mockFreedomProtector) Protect() (bool, error) {
+	m.protectCalled++
+	return m.actionTaken, m.err
+}
+
+// Ensure mock implements the interface
+var _ domain.FreedomProtector = (*mockFreedomProtector)(nil)

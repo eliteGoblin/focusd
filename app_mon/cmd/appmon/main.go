@@ -492,6 +492,37 @@ func runStatus(cmd *cobra.Command, args []string) error {
 		fmt.Printf("  - %s\n", p.Name())
 	}
 
+	// Freedom protection status
+	fmt.Println("\nFreedom protection:")
+	freedomProtector := infra.NewFreedomProtector(pm, zap.NewNop())
+	health := freedomProtector.GetHealth()
+	if !health.Installed {
+		fmt.Println("  - Not installed (skipped)")
+	} else {
+		// Build status line based on what we can protect
+		// Note: FreedomProxy only runs during active blocking sessions, so we don't report it as an issue
+		if health.AppRunning && health.LoginItemPresent {
+			proxyStatus := ""
+			if health.ProxyRunning {
+				proxyStatus = ", proxy active"
+			}
+			if health.HelperRunning {
+				fmt.Printf("  ✓ Freedom.app running%s, login item present\n", proxyStatus)
+			} else {
+				fmt.Printf("  ⚠ Freedom.app running%s, but helper missing (reinstall Freedom to fix)\n", proxyStatus)
+			}
+		} else {
+			var issues []string
+			if !health.AppRunning {
+				issues = append(issues, "app not running")
+			}
+			if !health.LoginItemPresent {
+				issues = append(issues, "login item missing")
+			}
+			fmt.Printf("  ⚠ Degraded: %s (will auto-fix)\n", strings.Join(issues, ", "))
+		}
+	}
+
 	fmt.Println("=====================")
 	return nil
 }
@@ -639,6 +670,9 @@ func runDaemon(cmd *cobra.Command, args []string) error {
 	// Initialize backup manager for self-protection
 	backupManager := infra.NewBackupManager()
 
+	// Initialize Freedom protector (best effort - nil-safe if not installed)
+	freedomProtector := infra.NewFreedomProtector(pm, logger)
+
 	// Run appropriate daemon
 	switch role {
 	case domain.RoleWatcher:
@@ -649,6 +683,7 @@ func runDaemon(cmd *cobra.Command, args []string) error {
 			pm,
 			launchdManager,
 			backupManager,
+			freedomProtector,
 			d,
 			logger,
 		)
