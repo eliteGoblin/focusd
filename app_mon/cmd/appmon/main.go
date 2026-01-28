@@ -9,6 +9,8 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"strconv"
+	"strings"
 	"syscall"
 	"time"
 
@@ -222,9 +224,27 @@ func runStart(cmd *cobra.Command, args []string) error {
 			// Check if mode matches
 			currentMode := string(execMode.Mode)
 			if entry.Mode == currentMode || entry.Mode == "" {
-				// Same mode (or legacy entry without mode) - already running
-				fmt.Println("appmon is already running (fully protected)")
-				return nil
+				// Same mode - compare versions before deciding
+				installedVersion := getInstalledVersion(execMode.BinaryPath)
+
+				if isNewerVersion(Version, installedVersion) {
+					// Current binary is newer - upgrade
+					fmt.Printf("Upgrading from %s to %s...\n", installedVersion, Version)
+					_ = pm.Kill(entry.WatcherPID)
+					_ = pm.Kill(entry.GuardianPID)
+					_ = registry.Clear()
+					time.Sleep(1 * time.Second)
+					// Continue to install and restart
+				} else if Version == installedVersion {
+					// Same version - already up to date
+					fmt.Println("appmon is already running (fully protected)")
+					return nil
+				} else {
+					// Installed is newer - don't downgrade
+					fmt.Printf("Already running newer version %s (not downgrading from %s)\n",
+						installedVersion, Version)
+					return nil
+				}
 			}
 			// Mode switch requested - kill old daemons and proceed
 			fmt.Printf("Switching from %s to %s mode...\n", entry.Mode, currentMode)
@@ -779,4 +799,59 @@ func runVersion(cmd *cobra.Command, args []string) {
 		fmt.Printf("appmon %s (commit: %s, built: %s)\n",
 			Version, Commit, BuildTime)
 	}
+}
+
+// getInstalledVersion returns the version of the binary at the given path.
+// Returns empty string if binary doesn't exist or version can't be determined.
+func getInstalledVersion(binaryPath string) string {
+	if _, err := os.Stat(binaryPath); os.IsNotExist(err) {
+		return ""
+	}
+
+	cmd := exec.Command(binaryPath, "version")
+	output, err := cmd.Output()
+	if err != nil {
+		return ""
+	}
+
+	// Parse "appmon X.Y.Z (...)" format
+	parts := strings.Fields(string(output))
+	if len(parts) >= 2 {
+		return parts[1]
+	}
+	return ""
+}
+
+// isNewerVersion returns true if current is newer than installed
+func isNewerVersion(current, installed string) bool {
+	if installed == "" {
+		return true // No installed version → current is "newer"
+	}
+
+	currentParts := strings.Split(current, ".")
+	installedParts := strings.Split(installed, ".")
+
+	maxLen := len(currentParts)
+	if len(installedParts) > maxLen {
+		maxLen = len(installedParts)
+	}
+
+	for i := 0; i < maxLen; i++ {
+		var currentNum, installedNum int
+
+		if i < len(currentParts) {
+			currentNum, _ = strconv.Atoi(currentParts[i])
+		}
+		if i < len(installedParts) {
+			installedNum, _ = strconv.Atoi(installedParts[i])
+		}
+
+		if currentNum > installedNum {
+			return true
+		}
+		if currentNum < installedNum {
+			return false
+		}
+	}
+	return false // Equal versions
 }
