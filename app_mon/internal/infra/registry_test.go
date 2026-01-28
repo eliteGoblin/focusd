@@ -9,37 +9,7 @@ import (
 	"github.com/eliteGoblin/focusd/app_mon/internal/domain"
 )
 
-// mockProcessManager is a test double for ProcessManager
-type mockProcessManager struct {
-	runningPIDs map[int]bool
-}
-
-func newMockProcessManager() *mockProcessManager {
-	return &mockProcessManager{
-		runningPIDs: make(map[int]bool),
-	}
-}
-
-func (m *mockProcessManager) FindByName(pattern string) ([]int, error) {
-	return nil, nil
-}
-
-func (m *mockProcessManager) Kill(pid int) error {
-	delete(m.runningPIDs, pid)
-	return nil
-}
-
-func (m *mockProcessManager) IsRunning(pid int) bool {
-	return m.runningPIDs[pid]
-}
-
-func (m *mockProcessManager) GetCurrentPID() int {
-	return os.Getpid()
-}
-
-func (m *mockProcessManager) SetRunning(pid int, running bool) {
-	m.runningPIDs[pid] = running
-}
+// mockProcessManager is defined in test_helpers_test.go
 
 func TestFileRegistry_RegisterAndGetAll(t *testing.T) {
 	// Create temp directory for test

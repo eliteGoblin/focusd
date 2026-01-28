@@ -2,6 +2,7 @@ package infra
 
 import (
 	"bytes"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -119,13 +120,8 @@ func NewLaunchdManager(config *ExecModeConfig) domain.LaunchAgentManager {
 	}
 }
 
-// Install creates and loads the plist (LaunchAgent or LaunchDaemon).
-func (m *LaunchdManagerImpl) Install(execPath string) error {
-	// Ensure plist directory exists
-	if err := os.MkdirAll(m.plistDir, 0755); err != nil {
-		return err
-	}
-
+// generatePlistContent creates plist content for the given exec path.
+func (m *LaunchdManagerImpl) generatePlistContent(execPath string) ([]byte, error) {
 	// Select template based on mode
 	var tmplStr string
 	if m.mode == ExecModeSystem {
@@ -144,16 +140,32 @@ func (m *LaunchdManagerImpl) Install(execPath string) error {
 
 	tmpl, err := template.New("plist").Parse(tmplStr)
 	if err != nil {
-		return err
+		return nil, fmt.Errorf("failed to parse plist template: %w", err)
 	}
 
 	var buf bytes.Buffer
 	if err := tmpl.Execute(&buf, config); err != nil {
+		return nil, fmt.Errorf("failed to execute plist template: %w", err)
+	}
+
+	return buf.Bytes(), nil
+}
+
+// Install creates and loads the plist (LaunchAgent or LaunchDaemon).
+func (m *LaunchdManagerImpl) Install(execPath string) error {
+	// Ensure plist directory exists
+	if err := os.MkdirAll(m.plistDir, 0755); err != nil {
 		return err
 	}
 
+	// Generate plist content
+	content, err := m.generatePlistContent(execPath)
+	if err != nil {
+		return fmt.Errorf("failed to generate plist content: %w", err)
+	}
+
 	// Write plist file
-	if err := os.WriteFile(m.plistPath, buf.Bytes(), 0644); err != nil {
+	if err := os.WriteFile(m.plistPath, content, 0644); err != nil {
 		return err
 	}
 
@@ -174,6 +186,68 @@ func (m *LaunchdManagerImpl) Uninstall() error {
 func (m *LaunchdManagerImpl) IsInstalled() bool {
 	_, err := os.Stat(m.plistPath)
 	return err == nil
+}
+
+// NeedsUpdate checks if plist exists but has different content than expected.
+func (m *LaunchdManagerImpl) NeedsUpdate(execPath string) bool {
+	if !m.IsInstalled() {
+		return false // Doesn't exist, needs install not update
+	}
+
+	// Read current plist
+	currentContent, err := os.ReadFile(m.plistPath)
+	if err != nil {
+		return true // Can't read, assume needs update
+	}
+
+	// Generate expected content
+	expectedContent, err := m.generatePlistContent(execPath)
+	if err != nil {
+		return true // Can't generate, assume needs update
+	}
+
+	return !bytes.Equal(currentContent, expectedContent)
+}
+
+// Update unloads, updates plist content, and reloads.
+func (m *LaunchdManagerImpl) Update(execPath string) error {
+	// Unload first (ignore errors if not loaded)
+	_ = m.unload()
+
+	// Generate and write new plist content
+	content, err := m.generatePlistContent(execPath)
+	if err != nil {
+		return fmt.Errorf("failed to generate plist content: %w", err)
+	}
+
+	if err := os.WriteFile(m.plistPath, content, 0644); err != nil {
+		return err
+	}
+
+	// Reload
+	return m.load()
+}
+
+// CleanupOtherMode removes plist from the other mode location if it exists.
+// This handles mode migration (user↔system) by cleaning up stale configs.
+func (m *LaunchdManagerImpl) CleanupOtherMode() error {
+	var otherPath string
+	if m.mode == ExecModeUser {
+		// We're user mode, cleanup system mode if exists
+		otherPath = "/Library/LaunchDaemons/" + launchAgentLabel + ".plist"
+	} else {
+		// We're system mode, cleanup user mode if exists
+		// Use getRealUserHome() to get actual user's home when running under sudo
+		home := getRealUserHome()
+		otherPath = filepath.Join(home, "Library/LaunchAgents", launchAgentLabel+".plist")
+	}
+
+	if _, err := os.Stat(otherPath); err == nil {
+		// Other mode plist exists - unload and remove
+		_ = exec.Command("launchctl", "unload", otherPath).Run()
+		return os.Remove(otherPath)
+	}
+	return nil
 }
 
 // GetPlistPath returns the plist file path.

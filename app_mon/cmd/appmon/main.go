@@ -6,8 +6,11 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"strconv"
+	"strings"
 	"syscall"
 	"time"
 
@@ -88,6 +91,22 @@ var versionCmd = &cobra.Command{
 	Run:   runVersion,
 }
 
+var updateCmd = &cobra.Command{
+	Use:   "update",
+	Short: "Update appmon to the latest version",
+	Long: `Downloads and installs the latest version of appmon from GitHub releases.
+The update process includes:
+1. Check for newer version
+2. Download new binary
+3. Stop running daemons
+4. Replace binary and update backups
+5. Restart daemons
+6. Verify daemons are healthy
+
+If daemons fail to start after update, automatically rolls back to previous version.`,
+	RunE: runUpdate,
+}
+
 // Hidden daemon command - used for self-exec when spawning daemons
 var daemonCmd = &cobra.Command{
 	Use:    "daemon",
@@ -96,21 +115,30 @@ var daemonCmd = &cobra.Command{
 }
 
 var (
-	daemonRole string
-	daemonName string
-	jsonOutput bool
+	daemonRole      string
+	daemonName      string
+	daemonMode      string // mode passed to daemon subprocess
+	jsonOutput      bool
+	checkOnly       bool
+	modeFlag        string // --mode user|system override for start command
+	localBinaryPath string // --local-binary for testing updates with local binary
 )
 
 func init() {
 	daemonCmd.Flags().StringVar(&daemonRole, "role", "", "Daemon role (watcher/guardian)")
 	daemonCmd.Flags().StringVar(&daemonName, "name", "", "Obfuscated process name")
+	daemonCmd.Flags().StringVar(&daemonMode, "mode", "", "Execution mode (user/system)")
 	versionCmd.Flags().BoolVar(&jsonOutput, "json", false, "Output version info as JSON")
+	updateCmd.Flags().BoolVar(&checkOnly, "check", false, "Only check for updates, don't install")
+	updateCmd.Flags().StringVar(&localBinaryPath, "local-binary", "", "Path to local binary for testing (skips GitHub download)")
+	startCmd.Flags().StringVar(&modeFlag, "mode", "", "Override execution mode (user|system)")
 
 	rootCmd.AddCommand(startCmd)
 	rootCmd.AddCommand(statusCmd)
 	rootCmd.AddCommand(listCmd)
 	rootCmd.AddCommand(scanCmd)
 	rootCmd.AddCommand(versionCmd)
+	rootCmd.AddCommand(updateCmd)
 	rootCmd.AddCommand(daemonCmd)
 }
 
@@ -118,8 +146,59 @@ func runStart(cmd *cobra.Command, args []string) error {
 	// Detect execution mode (sudo vs non-sudo)
 	execMode := infra.DetectExecMode()
 
+	// Handle --mode flag override
+	if modeFlag != "" {
+		switch modeFlag {
+		case "user":
+			if execMode.IsRoot {
+				// Running as root but want user mode
+				// This is a cleanup operation - stop system mode and let user restart in user mode
+				fmt.Println("Cleaning up system mode to switch to user mode...")
+				pm := infra.NewProcessManager()
+
+				// Kill all appmon daemons
+				pids, _ := pm.FindByName("appmon")
+				for _, pid := range pids {
+					if pid != pm.GetCurrentPID() {
+						_ = pm.Kill(pid)
+					}
+				}
+
+				// Remove system plist
+				systemPlist := "/Library/LaunchDaemons/com.focusd.appmon.plist"
+				if _, err := os.Stat(systemPlist); err == nil {
+					_ = exec.Command("launchctl", "unload", systemPlist).Run()
+					_ = os.Remove(systemPlist)
+					fmt.Println("Removed system LaunchDaemon")
+				}
+
+				// Clear registry (including lock file)
+				registry := infra.NewFileRegistry(pm)
+				_ = registry.Clear()
+				// Also remove lock file which may have root ownership
+				registryPath := registry.GetRegistryPath()
+				_ = os.Remove(registryPath + ".lock")
+
+				fmt.Println("\nSystem mode cleaned up successfully.")
+				fmt.Println("Now run without sudo to start user mode:")
+				fmt.Println("  ./appmon start")
+				return nil
+			}
+			// Already running as user, just use default detection
+		case "system":
+			if !execMode.IsRoot {
+				fmt.Println("Error: --mode system requires sudo")
+				fmt.Println("Run: sudo ./appmon start --mode system")
+				return fmt.Errorf("system mode requires root privileges")
+			}
+			// Already root, use system mode (default)
+		default:
+			return fmt.Errorf("invalid --mode value: %s (use 'user' or 'system')", modeFlag)
+		}
+	}
+
 	fmt.Printf("Execution mode: %s\n", execMode.Mode)
-	if execMode.IsRoot {
+	if execMode.Mode == infra.ExecModeSystem {
 		fmt.Println("Running as root - will install as LaunchDaemon (system-wide)")
 	} else {
 		fmt.Println("Running as user - will install as LaunchAgent (user-space)")
@@ -129,16 +208,71 @@ func runStart(cmd *cobra.Command, args []string) error {
 	pm := infra.NewProcessManager()
 	registry := infra.NewFileRegistry(pm)
 
-	// Check if already running
+	// Check if system mode is running (for mode switch detection)
+	systemPlistExists := false
+	if _, err := os.Stat("/Library/LaunchDaemons/com.focusd.appmon.plist"); err == nil {
+		systemPlistExists = true
+	}
+
+	// Check if already running - handle mode switching
 	entry, _ := registry.GetAll()
 	if entry != nil {
 		watcherAlive := pm.IsRunning(entry.WatcherPID)
 		guardianAlive := pm.IsRunning(entry.GuardianPID)
 
 		if watcherAlive && guardianAlive {
-			fmt.Println("appmon is already running (fully protected)")
+			// Check if mode matches
+			currentMode := string(execMode.Mode)
+			if entry.Mode == currentMode || entry.Mode == "" {
+				// Same mode - compare versions before deciding
+				installedVersion := getInstalledVersion(execMode.BinaryPath)
+
+				if isNewerVersion(Version, installedVersion) {
+					// Current binary is newer - upgrade
+					fmt.Printf("Upgrading from %s to %s...\n", installedVersion, Version)
+					_ = pm.Kill(entry.WatcherPID)
+					_ = pm.Kill(entry.GuardianPID)
+					_ = registry.Clear()
+					time.Sleep(1 * time.Second)
+					// Continue to install and restart
+				} else if Version == installedVersion {
+					// Same version - already up to date
+					fmt.Println("appmon is already running (fully protected)")
+					return nil
+				} else {
+					// Installed is newer - don't downgrade
+					fmt.Printf("Already running newer version %s (not downgrading from %s)\n",
+						installedVersion, Version)
+					return nil
+				}
+			}
+			// Mode switch requested - kill old daemons and proceed
+			fmt.Printf("Switching from %s to %s mode...\n", entry.Mode, currentMode)
+			_ = pm.Kill(entry.WatcherPID)
+			_ = pm.Kill(entry.GuardianPID)
+			_ = registry.Clear()
+			time.Sleep(1 * time.Second) // Wait for processes to die
+		}
+	} else if systemPlistExists && execMode.Mode == infra.ExecModeUser {
+		// Registry not readable but system plist exists - system mode is running
+		if !execMode.IsRoot {
+			// User mode without sudo - can't switch from system mode
+			fmt.Println("Error: appmon is running in system mode.")
+			fmt.Println("To switch to user mode, run: sudo ./appmon start --mode user")
 			return nil
 		}
+		// Running with sudo and --mode user - kill system daemons and clear registry
+		fmt.Println("Switching from system to user mode...")
+		// Kill any running system daemons by finding them
+		pids, _ := pm.FindByName("appmon")
+		for _, pid := range pids {
+			if pid != pm.GetCurrentPID() {
+				_ = pm.Kill(pid)
+			}
+		}
+		// Clear registry (has root ownership from system mode)
+		_ = registry.Clear()
+		time.Sleep(1 * time.Second)
 	}
 
 	// Determine binary path based on execution mode
@@ -175,9 +309,16 @@ func runStart(cmd *cobra.Command, args []string) error {
 		fmt.Printf("Binary backups created (v%s) with GitHub fallback\n", Version)
 	}
 
-	// Install LaunchAgent/LaunchDaemon based on execution mode
+	// Install LaunchAgent/LaunchDaemon based on execution mode (idempotent)
 	launchdManager := infra.NewLaunchdManager(execMode)
+
+	// Cleanup plist from wrong mode (handles user↔system migration)
+	if err := launchdManager.CleanupOtherMode(); err != nil {
+		fmt.Printf("Warning: Could not cleanup other mode plist: %v\n", err)
+	}
+
 	if !launchdManager.IsInstalled() {
+		// Fresh install
 		if err := launchdManager.Install(binaryPath); err != nil {
 			fmt.Printf("Warning: Could not install %s: %v\n", execMode.Mode, err)
 			fmt.Println("         (appmon will still run, but won't auto-start)")
@@ -188,10 +329,20 @@ func runStart(cmd *cobra.Command, args []string) error {
 				fmt.Println("Installed LaunchAgent for auto-start on login")
 			}
 		}
+	} else if launchdManager.NeedsUpdate(binaryPath) {
+		// Exists but outdated - update in place
+		if err := launchdManager.Update(binaryPath); err != nil {
+			fmt.Printf("Warning: Could not update %s: %v\n", execMode.Mode, err)
+		} else {
+			fmt.Println("Updated plist with new binary path")
+		}
+	} else {
+		// Already installed with correct config - skip
+		fmt.Println("Plist already installed and up-to-date")
 	}
 
-	// Start both daemons
-	if err := daemon.StartBothDaemons(); err != nil {
+	// Start both daemons with the determined mode
+	if err := daemon.StartBothDaemonsWithMode(string(execMode.Mode)); err != nil {
 		return fmt.Errorf("failed to start daemons: %w", err)
 	}
 
@@ -302,6 +453,15 @@ func runStatus(cmd *cobra.Command, args []string) error {
 		fmt.Println("Status: NOT RUNNING")
 	}
 
+	// Show version info
+	fmt.Printf("\nCLI version:    %s\n", Version)
+	if entry.AppVersion != "" {
+		fmt.Printf("Daemon version: %s\n", entry.AppVersion)
+		if entry.AppVersion != Version {
+			fmt.Println("                (differs from CLI - consider restarting)")
+		}
+	}
+
 	// Check backup config for execution mode
 	backupConfig, err := backupManager.GetConfig()
 	if err == nil {
@@ -309,15 +469,13 @@ func runStatus(cmd *cobra.Command, args []string) error {
 		if execMode == "" {
 			execMode = "user"
 		}
-		fmt.Printf("\nExecution mode: %s\n", execMode)
-		fmt.Printf("Binary path: %s\n", backupConfig.MainBinaryPath)
-		fmt.Printf("Plist path: %s\n", backupConfig.PlistPath)
+		fmt.Printf("Execution mode: %s\n", execMode)
 
-		// Check if plist exists
+		// Check if plist exists (don't show path for security)
 		if _, err := os.Stat(backupConfig.PlistPath); err == nil {
-			fmt.Println("Auto-start: enabled")
+			fmt.Println("Auto-start:     enabled")
 		} else {
-			fmt.Println("Auto-start: disabled (plist missing)")
+			fmt.Println("Auto-start:     disabled")
 		}
 	}
 
@@ -444,13 +602,23 @@ func runDaemon(cmd *cobra.Command, args []string) error {
 		Role:           role,
 		ObfuscatedName: daemonName,
 		StartedAt:      time.Now(),
+		AppVersion:     Version,
 	}
 
 	// Initialize infrastructure
 	pm := infra.NewProcessManager()
 	fs := infra.NewFileSystemManager()
 	registry := infra.NewFileRegistry(pm)
-	execMode := infra.DetectExecMode() // Auto-detect: root → LaunchDaemon, user → LaunchAgent
+
+	// Determine execution mode - use explicit flag if provided, otherwise auto-detect
+	var execMode *infra.ExecModeConfig
+	if daemonMode == "user" {
+		execMode = infra.GetUserModeConfig()
+	} else if daemonMode == "system" {
+		execMode = infra.DetectExecMode() // Will return system if running as root
+	} else {
+		execMode = infra.DetectExecMode() // Auto-detect: root → LaunchDaemon, user → LaunchAgent
+	}
 	launchdManager := infra.NewLaunchdManager(execMode)
 	policyStore := policy.NewPolicyStore()
 	strategyManager := infra.NewStrategyManager()
@@ -516,6 +684,118 @@ func createLogger() *zap.Logger {
 	return logger
 }
 
+func runUpdate(cmd *cobra.Command, args []string) error {
+	logger, _ := zap.NewProduction()
+	defer func() { _ = logger.Sync() }()
+
+	updater := infra.NewUpdater(Version, logger)
+
+	// Check-only mode (not compatible with --local-binary)
+	if checkOnly {
+		if localBinaryPath != "" {
+			return fmt.Errorf("--check and --local-binary cannot be used together")
+		}
+		current, latest, available, err := updater.CheckUpdate()
+		if err != nil {
+			return fmt.Errorf("failed to check for updates: %w", err)
+		}
+
+		fmt.Printf("Current version: %s\n", current)
+		fmt.Printf("Latest version:  %s\n", latest)
+
+		if available {
+			fmt.Println("Update available!")
+		} else {
+			fmt.Println("Already up to date.")
+		}
+		return nil
+	}
+
+	// Local binary update mode
+	if localBinaryPath != "" {
+		fmt.Println("\n=== appmon Update (Local Binary) ===")
+		fmt.Printf("Current version: %s\n", Version)
+		fmt.Printf("Local binary:    %s\n", localBinaryPath)
+
+		fmt.Println()
+		fmt.Println("Starting update process...")
+		fmt.Println("  • Creating rollback backup")
+		fmt.Println("  • Stopping daemons")
+		fmt.Println("  • Installing binary")
+		fmt.Println("  • Updating backups")
+		fmt.Println("  • Restarting daemons")
+		fmt.Println("  • Verifying health")
+		fmt.Println()
+
+		result, err := updater.PerformUpdateFromLocal(localBinaryPath)
+		if err != nil {
+			return fmt.Errorf("update failed: %w", err)
+		}
+
+		if result.RolledBack {
+			fmt.Printf("\n✗ Update failed, rolled back to %s\n", result.PreviousVer)
+			fmt.Printf("  Reason: %s\n", result.RollbackReason)
+			return fmt.Errorf("update rolled back: %s", result.RollbackReason)
+		}
+
+		if result.Success {
+			fmt.Printf("\n✓ Update successful!\n")
+			fmt.Printf("  Version: %s\n", result.NewVer)
+			fmt.Println("  All daemons running")
+		}
+
+		fmt.Println("=====================================")
+		return nil
+	}
+
+	// GitHub update mode (default)
+	fmt.Println("\n=== appmon Update ===")
+
+	current, latest, available, err := updater.CheckUpdate()
+	if err != nil {
+		return fmt.Errorf("failed to check for updates: %w", err)
+	}
+
+	fmt.Printf("Current version: %s\n", current)
+	fmt.Printf("Latest version:  %s\n", latest)
+
+	if !available {
+		fmt.Println("\nAlready up to date.")
+		return nil
+	}
+
+	fmt.Println()
+	fmt.Println("Starting update process...")
+	fmt.Println("  • Creating rollback backup")
+	fmt.Println("  • Downloading new version")
+	fmt.Println("  • Stopping daemons")
+	fmt.Println("  • Installing binary")
+	fmt.Println("  • Updating backups")
+	fmt.Println("  • Restarting daemons")
+	fmt.Println("  • Verifying health")
+	fmt.Println()
+
+	result, err := updater.PerformUpdate()
+	if err != nil {
+		return fmt.Errorf("update failed: %w", err)
+	}
+
+	if result.RolledBack {
+		fmt.Printf("\n✗ Update failed, rolled back to %s\n", result.PreviousVer)
+		fmt.Printf("  Reason: %s\n", result.RollbackReason)
+		return fmt.Errorf("update rolled back: %s", result.RollbackReason)
+	}
+
+	if result.Success {
+		fmt.Printf("\n✓ Update successful!\n")
+		fmt.Printf("  Version: %s\n", result.NewVer)
+		fmt.Println("  All daemons running")
+	}
+
+	fmt.Println("=====================")
+	return nil
+}
+
 func runVersion(cmd *cobra.Command, args []string) {
 	if jsonOutput {
 		fmt.Printf(`{"version":"%s","commit":"%s","build_time":"%s"}`+"\n",
@@ -524,4 +804,59 @@ func runVersion(cmd *cobra.Command, args []string) {
 		fmt.Printf("appmon %s (commit: %s, built: %s)\n",
 			Version, Commit, BuildTime)
 	}
+}
+
+// getInstalledVersion returns the version of the binary at the given path.
+// Returns empty string if binary doesn't exist or version can't be determined.
+func getInstalledVersion(binaryPath string) string {
+	if _, err := os.Stat(binaryPath); os.IsNotExist(err) {
+		return ""
+	}
+
+	cmd := exec.Command(binaryPath, "version")
+	output, err := cmd.Output()
+	if err != nil {
+		return ""
+	}
+
+	// Parse "appmon X.Y.Z (...)" format
+	parts := strings.Fields(string(output))
+	if len(parts) >= 2 {
+		return parts[1]
+	}
+	return ""
+}
+
+// isNewerVersion returns true if current is newer than installed
+func isNewerVersion(current, installed string) bool {
+	if installed == "" {
+		return true // No installed version → current is "newer"
+	}
+
+	currentParts := strings.Split(current, ".")
+	installedParts := strings.Split(installed, ".")
+
+	maxLen := len(currentParts)
+	if len(installedParts) > maxLen {
+		maxLen = len(installedParts)
+	}
+
+	for i := 0; i < maxLen; i++ {
+		var currentNum, installedNum int
+
+		if i < len(currentParts) {
+			currentNum, _ = strconv.Atoi(currentParts[i])
+		}
+		if i < len(installedParts) {
+			installedNum, _ = strconv.Atoi(installedParts[i])
+		}
+
+		if currentNum > installedNum {
+			return true
+		}
+		if currentNum < installedNum {
+			return false
+		}
+	}
+	return false // Equal versions
 }

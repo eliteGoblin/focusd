@@ -14,12 +14,23 @@ import (
 // Uses the installed binary path from ExecModeConfig, not os.Executable(),
 // to ensure daemons run from the expected install location.
 func StartDaemon(role domain.DaemonRole) error {
-	return StartDaemonWithPath(role, "")
+	return StartDaemonWithPathAndMode(role, "", "")
 }
 
-// StartDaemonWithPath spawns a daemon from a specific binary path.
-// If binaryPath is empty, uses the installed binary path based on exec mode.
+// StartDaemonWithMode spawns a daemon with explicit mode override.
+func StartDaemonWithMode(role domain.DaemonRole, mode string) error {
+	return StartDaemonWithPathAndMode(role, "", mode)
+}
+
+// StartDaemonWithPath spawns a daemon from a specific binary path (deprecated, use StartDaemonWithPathAndMode).
 func StartDaemonWithPath(role domain.DaemonRole, binaryPath string) error {
+	return StartDaemonWithPathAndMode(role, binaryPath, "")
+}
+
+// StartDaemonWithPathAndMode spawns a daemon from a specific binary path with explicit mode.
+// If binaryPath is empty, uses the installed binary path based on exec mode.
+// If mode is empty, daemon will auto-detect based on euid.
+func StartDaemonWithPathAndMode(role domain.DaemonRole, binaryPath string, mode string) error {
 	obfuscator := infra.NewObfuscator()
 	daemonName := obfuscator.GenerateName()
 
@@ -28,7 +39,12 @@ func StartDaemonWithPath(role domain.DaemonRole, binaryPath string) error {
 	if executable == "" {
 		// Use installed binary path, not os.Executable()
 		// This ensures daemons run from install location, not temp/dev location
-		execMode := infra.DetectExecMode()
+		var execMode *infra.ExecModeConfig
+		if mode == "user" {
+			execMode = infra.GetUserModeConfig()
+		} else {
+			execMode = infra.DetectExecMode()
+		}
 		executable = execMode.BinaryPath
 
 		// Fall back to os.Executable() if installed binary doesn't exist
@@ -41,11 +57,15 @@ func StartDaemonWithPath(role domain.DaemonRole, binaryPath string) error {
 		}
 	}
 
+	// Build command arguments
+	args := []string{"daemon", "--role", string(role), "--name", daemonName}
+	if mode != "" {
+		args = append(args, "--mode", mode)
+	}
+
 	// Self-exec with daemon mode flag
-	// Hidden "daemon" command: appmon daemon --role watcher --name com.apple.xxx
-	cmd := exec.Command(executable, "daemon",
-		"--role", string(role),
-		"--name", daemonName)
+	// Hidden "daemon" command: appmon daemon --role watcher --name com.apple.xxx --mode user
+	cmd := exec.Command(executable, args...)
 
 	// Detach from parent process
 	cmd.SysProcAttr = &syscall.SysProcAttr{
@@ -62,13 +82,18 @@ func StartDaemonWithPath(role domain.DaemonRole, binaryPath string) error {
 
 // StartBothDaemons starts both watcher and guardian daemons.
 func StartBothDaemons() error {
+	return StartBothDaemonsWithMode("")
+}
+
+// StartBothDaemonsWithMode starts both daemons with explicit mode.
+func StartBothDaemonsWithMode(mode string) error {
 	// Start watcher first
-	if err := StartDaemon(domain.RoleWatcher); err != nil {
+	if err := StartDaemonWithMode(domain.RoleWatcher, mode); err != nil {
 		return err
 	}
 
 	// Start guardian
-	if err := StartDaemon(domain.RoleGuardian); err != nil {
+	if err := StartDaemonWithMode(domain.RoleGuardian, mode); err != nil {
 		return err
 	}
 
