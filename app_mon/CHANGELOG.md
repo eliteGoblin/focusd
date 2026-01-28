@@ -5,6 +5,27 @@ All notable changes to appmon will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.0] - 2026-01-29
+
+### Features
+- **Freedom app protection**: Monitor and protect Freedom.app from being killed or disabled
+  - Auto-restart Freedom.app within 5 seconds if killed
+  - Auto-restore Login Items if removed
+  - Reports helper status (can't fix, but warns user)
+  - Graceful skip when Freedom.app not installed
+- **Freedom health in status**: `appmon status` now shows Freedom protection status
+  - Shows app running, proxy active, helper running, login item present
+  - Warns when helper is missing (reinstall Freedom to fix)
+
+### Architecture
+- **Testable design**: Extracted `CommandRunner` and `FileChecker` interfaces for dependency injection
+- **~98% test coverage** for Freedom protection module
+- **Nil-safe logging**: Helper methods prevent panic when logger is nil
+
+### Bug Fixes
+- **PID conversion bug**: Fixed `string(rune(pid))` → `strconv.Itoa(pid)` for correct PID string conversion
+- **Log spam**: Changed helper-missing log from WARN to Debug (runs every 5 seconds)
+
 ## [0.3.0] - 2026-01-28
 
 ### Features
