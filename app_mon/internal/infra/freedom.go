@@ -13,11 +13,11 @@ import (
 
 // Freedom app constants
 const (
-	FreedomAppPath            = "/Applications/Freedom.app"
-	FreedomProcessName        = "Freedom"
-	FreedomProxyProcessName   = "FreedomProxy"
-	FreedomHelperProcessName  = "com.80pct.FreedomHelper"
-	FreedomProxyPort          = 7769
+	FreedomAppPath           = "/Applications/Freedom.app"
+	FreedomProcessName       = "Freedom"
+	FreedomProxyProcessName  = "FreedomProxy"
+	FreedomHelperProcessName = "com.80pct.FreedomHelper"
+	FreedomProxyPort         = 7769
 )
 
 // FreedomProtectorImpl implements domain.FreedomProtector.

@@ -82,13 +82,13 @@ type mockFreedomProtector struct {
 	err           error
 }
 
-func (m *mockFreedomProtector) IsInstalled() bool       { return true }
-func (m *mockFreedomProtector) IsAppRunning() bool      { return true }
-func (m *mockFreedomProtector) IsProxyRunning() bool    { return true }
-func (m *mockFreedomProtector) IsHelperRunning() bool   { return true }
+func (m *mockFreedomProtector) IsInstalled() bool        { return true }
+func (m *mockFreedomProtector) IsAppRunning() bool       { return true }
+func (m *mockFreedomProtector) IsProxyRunning() bool     { return true }
+func (m *mockFreedomProtector) IsHelperRunning() bool    { return true }
 func (m *mockFreedomProtector) IsLoginItemPresent() bool { return true }
-func (m *mockFreedomProtector) RestartApp() error       { return nil }
-func (m *mockFreedomProtector) RestoreLoginItem() error { return nil }
+func (m *mockFreedomProtector) RestartApp() error        { return nil }
+func (m *mockFreedomProtector) RestoreLoginItem() error  { return nil }
 
 func (m *mockFreedomProtector) GetHealth() domain.FreedomHealth {
 	return domain.FreedomHealth{

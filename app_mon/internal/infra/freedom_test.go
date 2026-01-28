@@ -22,10 +22,10 @@ type mockFreedomDeps struct {
 	restoreLoginErr  error
 }
 
-func (m *mockFreedomDeps) IsInstalled() bool       { return m.appExists }
-func (m *mockFreedomDeps) IsAppRunning() bool      { return m.appRunning }
-func (m *mockFreedomDeps) IsProxyRunning() bool    { return m.proxyRunning }
-func (m *mockFreedomDeps) IsHelperRunning() bool   { return m.helperRunning }
+func (m *mockFreedomDeps) IsInstalled() bool        { return m.appExists }
+func (m *mockFreedomDeps) IsAppRunning() bool       { return m.appRunning }
+func (m *mockFreedomDeps) IsProxyRunning() bool     { return m.proxyRunning }
+func (m *mockFreedomDeps) IsHelperRunning() bool    { return m.helperRunning }
 func (m *mockFreedomDeps) IsLoginItemPresent() bool { return m.loginItemPresent }
 
 func (m *mockFreedomDeps) RestartApp() error {
