@@ -25,6 +25,7 @@ type WatcherConfig struct {
 	PartnerCheckInterval time.Duration // How often to check guardian
 	PlistCheckInterval   time.Duration // How often to check LaunchAgent plist
 	BinaryCheckInterval  time.Duration // How often to check binary integrity
+	FreedomCheckInterval time.Duration // How often to check Freedom app (default 5s)
 }
 
 // DefaultWatcherConfig returns default watcher configuration.
@@ -35,6 +36,7 @@ func DefaultWatcherConfig() WatcherConfig {
 		PartnerCheckInterval: 60 * time.Second,
 		PlistCheckInterval:   60 * time.Second, // Check plist every minute
 		BinaryCheckInterval:  60 * time.Second, // Check binary integrity every minute
+		FreedomCheckInterval: 5 * time.Second,  // Check Freedom every 5 seconds (fast restart)
 	}
 }
 
@@ -43,15 +45,17 @@ func DefaultWatcherConfig() WatcherConfig {
 // It also monitors the guardian daemon and restarts it if needed.
 // It also protects the LaunchAgent plist file, restoring it if deleted.
 // It also protects the binary itself, restoring from backup if deleted/corrupted.
+// It also protects Freedom app, restarting it if killed.
 type Watcher struct {
-	config         WatcherConfig
-	enforcer       domain.Enforcer
-	registry       domain.DaemonRegistry
-	processManager domain.ProcessManager
-	launchAgent    domain.LaunchAgentManager
-	backupManager  BackupManager
-	logger         *zap.Logger
-	daemon         domain.Daemon
+	config           WatcherConfig
+	enforcer         domain.Enforcer
+	registry         domain.DaemonRegistry
+	processManager   domain.ProcessManager
+	launchAgent      domain.LaunchAgentManager
+	backupManager    BackupManager
+	freedomProtector domain.FreedomProtector
+	logger           *zap.Logger
+	daemon           domain.Daemon
 }
 
 // NewWatcher creates a new watcher daemon.
@@ -62,18 +66,20 @@ func NewWatcher(
 	pm domain.ProcessManager,
 	launchAgent domain.LaunchAgentManager,
 	backupManager BackupManager,
+	freedomProtector domain.FreedomProtector,
 	daemon domain.Daemon,
 	logger *zap.Logger,
 ) *Watcher {
 	return &Watcher{
-		config:         config,
-		enforcer:       enforcer,
-		registry:       registry,
-		processManager: pm,
-		launchAgent:    launchAgent,
-		backupManager:  backupManager,
-		daemon:         daemon,
-		logger:         logger,
+		config:           config,
+		enforcer:         enforcer,
+		registry:         registry,
+		processManager:   pm,
+		launchAgent:      launchAgent,
+		backupManager:    backupManager,
+		freedomProtector: freedomProtector,
+		daemon:           daemon,
+		logger:           logger,
 	}
 }
 
@@ -99,12 +105,16 @@ func (w *Watcher) Run(ctx context.Context) error {
 	// Check binary integrity on startup
 	w.ensureBinaryIntegrity()
 
+	// Protect Freedom on startup
+	w.protectFreedom()
+
 	// Set up tickers
 	enforceTicker := time.NewTicker(w.config.EnforcementInterval)
 	heartbeatTicker := time.NewTicker(w.config.HeartbeatInterval)
 	partnerCheckTicker := time.NewTicker(w.config.PartnerCheckInterval)
 	plistCheckTicker := time.NewTicker(w.config.PlistCheckInterval)
 	binaryCheckTicker := time.NewTicker(w.config.BinaryCheckInterval)
+	freedomCheckTicker := time.NewTicker(w.config.FreedomCheckInterval)
 
 	defer func() {
 		enforceTicker.Stop()
@@ -112,6 +122,7 @@ func (w *Watcher) Run(ctx context.Context) error {
 		partnerCheckTicker.Stop()
 		plistCheckTicker.Stop()
 		binaryCheckTicker.Stop()
+		freedomCheckTicker.Stop()
 	}()
 
 	for {
@@ -136,6 +147,9 @@ func (w *Watcher) Run(ctx context.Context) error {
 
 		case <-binaryCheckTicker.C:
 			w.ensureBinaryIntegrity()
+
+		case <-freedomCheckTicker.C:
+			w.protectFreedom()
 		}
 	}
 }
@@ -237,5 +251,23 @@ func (w *Watcher) ensureBinaryIntegrity() {
 
 	if restored {
 		w.logger.Info("binary was missing/corrupted, restored from backup")
+	}
+}
+
+// protectFreedom ensures Freedom app is running and login item is present.
+// This is "best effort" protection - if Freedom isn't installed, we skip silently.
+func (w *Watcher) protectFreedom() {
+	if w.freedomProtector == nil {
+		return
+	}
+
+	actionTaken, err := w.freedomProtector.Protect()
+	if err != nil {
+		w.logger.Warn("Freedom protection failed", zap.Error(err))
+		return
+	}
+
+	if actionTaken {
+		w.logger.Info("Freedom protection action taken")
 	}
 }

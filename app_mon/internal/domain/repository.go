@@ -134,3 +134,51 @@ type StrategyManager interface {
 	// Returns the strategy name that succeeded, or empty if none
 	UninstallApp(appName string) (string, error)
 }
+
+// FreedomHealth represents the current health status of Freedom app protection.
+type FreedomHealth struct {
+	// Installed indicates if Freedom.app exists at expected path
+	Installed bool
+	// AppRunning indicates if Freedom main process is running
+	AppRunning bool
+	// ProxyRunning indicates if FreedomProxy process is running
+	ProxyRunning bool
+	// HelperRunning indicates if com.80pct.FreedomHelper is running
+	HelperRunning bool
+	// LoginItemPresent indicates if Freedom is in Login Items
+	LoginItemPresent bool
+	// ProxyPort is the port FreedomProxy listens on (7769)
+	ProxyPort int
+}
+
+// FreedomProtector monitors and protects Freedom app.
+// It ensures Freedom stays running and Login Items are preserved.
+type FreedomProtector interface {
+	// IsInstalled checks if Freedom.app exists at /Applications/Freedom.app
+	IsInstalled() bool
+
+	// IsAppRunning checks if Freedom main process is running
+	IsAppRunning() bool
+
+	// IsProxyRunning checks if FreedomProxy process is running
+	IsProxyRunning() bool
+
+	// IsHelperRunning checks if com.80pct.FreedomHelper is running
+	IsHelperRunning() bool
+
+	// IsLoginItemPresent checks if Freedom is in Login Items
+	IsLoginItemPresent() bool
+
+	// RestartApp launches Freedom.app using `open -a`
+	RestartApp() error
+
+	// RestoreLoginItem adds Freedom back to Login Items using AppleScript
+	RestoreLoginItem() error
+
+	// GetHealth returns comprehensive health status
+	GetHealth() FreedomHealth
+
+	// Protect runs a protection cycle: restart app if needed, restore login item if needed
+	// Returns true if any action was taken
+	Protect() (actionTaken bool, err error)
+}
