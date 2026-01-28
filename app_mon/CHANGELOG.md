@@ -5,6 +5,35 @@ All notable changes to appmon will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.0] - 2026-01-28
+
+### Features
+- **Self-update command**: `appmon update` downloads and installs the latest version from GitHub
+  - Automatic rollback on failure (daemon startup failure, health check failure)
+  - Creates rollback backup before update, restores on any error
+  - Step-by-step progress output during update process
+- **Local binary testing**: `appmon update --local-binary ./path/to/binary` for testing updates without GitHub
+- **Idempotent start command**: `appmon start` now handles version comparison
+  - Upgrade: Running older binary auto-updates and restarts daemons
+  - Same version: Prints "already running, up to date"
+  - Downgrade prevention: Refuses to downgrade running newer version
+- **Daemon version tracking**: `appmon status` now shows both CLI and daemon versions
+  - Warning when CLI version differs from running daemon version
+- **Mode switching cleanup**: Automatically removes stale plist from other mode when switching (user↔system)
+
+### Improvements
+- Idempotent plist operations: `NeedsUpdate()`, `Update()`, `CleanupOtherMode()` methods
+- Proper SUDO_USER handling: `getRealUserHome()` correctly resolves user's home under sudo
+- PID > 0 guards in `VerifyDaemonsHealthy()` to prevent signaling PID 0
+- Error propagation in `generatePlistContent()` for better debugging
+- Proper `/dev/null` file descriptor handling for daemon spawning
+- Removed sensitive paths (binary path, plist path) from status output
+
+### Documentation
+- Added health status system requirements (`requirements/app_mon/3_health_status_system.md`)
+- Added encrypted registry & server sync requirements (`requirements/app_mon/4_encrypted_registry_server_sync.md`)
+- Added implementation artifacts for encrypted registry feature
+
 ## [0.2.0] - 2026-01-28
 
 ### Features
