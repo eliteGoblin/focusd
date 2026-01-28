@@ -250,12 +250,6 @@ func (f *FreedomProtectorImpl) logInfo(msg string, fields ...zap.Field) {
 	}
 }
 
-func (f *FreedomProtectorImpl) logWarn(msg string, fields ...zap.Field) {
-	if f.logger != nil {
-		f.logger.Warn(msg, fields...)
-	}
-}
-
 func (f *FreedomProtectorImpl) logError(msg string, fields ...zap.Field) {
 	if f.logger != nil {
 		f.logger.Error(msg, fields...)
