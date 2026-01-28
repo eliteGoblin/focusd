@@ -1,6 +1,6 @@
 # Encrypted Registry & Server Sync
 
-Note: I also want to switch registry into SQLite from current plain text file. and user SQLCipher to store as local registry 
+Note: I also want to switch the registry from the current plain-text file to SQLite and use SQLCipher for the local registry.
 
 **GitHub Issue**: TBD
 

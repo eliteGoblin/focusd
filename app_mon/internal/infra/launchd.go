@@ -237,7 +237,8 @@ func (m *LaunchdManagerImpl) CleanupOtherMode() error {
 		otherPath = "/Library/LaunchDaemons/" + launchAgentLabel + ".plist"
 	} else {
 		// We're system mode, cleanup user mode if exists
-		home, _ := os.UserHomeDir()
+		// Use getRealUserHome() to get actual user's home when running under sudo
+		home := getRealUserHome()
 		otherPath = filepath.Join(home, "Library/LaunchAgents", launchAgentLabel+".plist")
 	}
 
