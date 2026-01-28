@@ -113,12 +113,13 @@ var daemonCmd = &cobra.Command{
 }
 
 var (
-	daemonRole string
-	daemonName string
-	daemonMode string // mode passed to daemon subprocess
-	jsonOutput bool
-	checkOnly  bool
-	modeFlag   string // --mode user|system override for start command
+	daemonRole      string
+	daemonName      string
+	daemonMode      string // mode passed to daemon subprocess
+	jsonOutput      bool
+	checkOnly       bool
+	modeFlag        string // --mode user|system override for start command
+	localBinaryPath string // --local-binary for testing updates with local binary
 )
 
 func init() {
@@ -127,6 +128,7 @@ func init() {
 	daemonCmd.Flags().StringVar(&daemonMode, "mode", "", "Execution mode (user/system)")
 	versionCmd.Flags().BoolVar(&jsonOutput, "json", false, "Output version info as JSON")
 	updateCmd.Flags().BoolVar(&checkOnly, "check", false, "Only check for updates, don't install")
+	updateCmd.Flags().StringVar(&localBinaryPath, "local-binary", "", "Path to local binary for testing (skips GitHub download)")
 	startCmd.Flags().StringVar(&modeFlag, "mode", "", "Override execution mode (user|system)")
 
 	rootCmd.AddCommand(startCmd)
@@ -663,8 +665,11 @@ func runUpdate(cmd *cobra.Command, args []string) error {
 
 	updater := infra.NewUpdater(Version, logger)
 
-	// Check-only mode
+	// Check-only mode (not compatible with --local-binary)
 	if checkOnly {
+		if localBinaryPath != "" {
+			return fmt.Errorf("--check and --local-binary cannot be used together")
+		}
 		current, latest, available, err := updater.CheckUpdate()
 		if err != nil {
 			return fmt.Errorf("failed to check for updates: %w", err)
@@ -681,7 +686,44 @@ func runUpdate(cmd *cobra.Command, args []string) error {
 		return nil
 	}
 
-	// Perform update
+	// Local binary update mode
+	if localBinaryPath != "" {
+		fmt.Println("\n=== appmon Update (Local Binary) ===")
+		fmt.Printf("Current version: %s\n", Version)
+		fmt.Printf("Local binary:    %s\n", localBinaryPath)
+
+		fmt.Println()
+		fmt.Println("Starting update process...")
+		fmt.Println("  • Creating rollback backup")
+		fmt.Println("  • Stopping daemons")
+		fmt.Println("  • Installing binary")
+		fmt.Println("  • Updating backups")
+		fmt.Println("  • Restarting daemons")
+		fmt.Println("  • Verifying health")
+		fmt.Println()
+
+		result, err := updater.PerformUpdateFromLocal(localBinaryPath)
+		if err != nil {
+			return fmt.Errorf("update failed: %w", err)
+		}
+
+		if result.RolledBack {
+			fmt.Printf("\n✗ Update failed, rolled back to %s\n", result.PreviousVer)
+			fmt.Printf("  Reason: %s\n", result.RollbackReason)
+			return fmt.Errorf("update rolled back: %s", result.RollbackReason)
+		}
+
+		if result.Success {
+			fmt.Printf("\n✓ Update successful!\n")
+			fmt.Printf("  Version: %s\n", result.NewVer)
+			fmt.Println("  All daemons running")
+		}
+
+		fmt.Println("=====================================")
+		return nil
+	}
+
+	// GitHub update mode (default)
 	fmt.Println("\n=== appmon Update ===")
 
 	current, latest, available, err := updater.CheckUpdate()

@@ -3,6 +3,7 @@ package infra
 import (
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"syscall"
@@ -139,7 +140,73 @@ func (u *Updater) PerformUpdate() (*UpdateResult, error) {
 
 	u.log("download complete", zap.String("path", tmpBinaryPath))
 
-	// Step 5: Stop daemons
+	// Use shared installation logic
+	return u.performInstall(result, tmpBinaryPath, binaryPath, rollbackPath, latest)
+}
+
+// PerformUpdateFromLocal installs a local binary with rollback support (for testing)
+func (u *Updater) PerformUpdateFromLocal(localBinaryPath string) (*UpdateResult, error) {
+	result := &UpdateResult{
+		PreviousVer: u.currentVersion,
+	}
+
+	// Validate local binary exists and is executable
+	info, err := os.Stat(localBinaryPath)
+	if err != nil {
+		return nil, fmt.Errorf("local binary not found: %w", err)
+	}
+	if info.IsDir() {
+		return nil, fmt.Errorf("local binary path is a directory")
+	}
+
+	// Get version from the local binary
+	newVersion, err := u.getVersionFromBinary(localBinaryPath)
+	if err != nil {
+		u.log("warning: could not get version from local binary", zap.Error(err))
+		newVersion = "unknown"
+	}
+	result.NewVer = newVersion
+
+	u.log("updating from local binary", zap.String("path", localBinaryPath), zap.String("version", newVersion))
+
+	// Get current binary path
+	binaryPath := u.execMode.BinaryPath
+	config, err := u.backupManager.GetConfig()
+	if err == nil && config.MainBinaryPath != "" {
+		binaryPath = config.MainBinaryPath
+	}
+
+	// Create rollback backup
+	rollbackPath, err := u.createRollbackBackup(binaryPath)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create rollback backup: %w", err)
+	}
+	defer os.RemoveAll(filepath.Dir(rollbackPath))
+
+	u.log("rollback backup created", zap.String("path", rollbackPath))
+
+	// Use shared installation logic
+	return u.performInstall(result, localBinaryPath, binaryPath, rollbackPath, newVersion)
+}
+
+// getVersionFromBinary runs the binary with "version" to extract version string
+func (u *Updater) getVersionFromBinary(binaryPath string) (string, error) {
+	cmd := exec.Command(binaryPath, "version")
+	output, err := cmd.Output()
+	if err != nil {
+		return "", err
+	}
+	// Parse "appmon X.Y.Z (...)" format
+	parts := strings.Fields(string(output))
+	if len(parts) >= 2 {
+		return parts[1], nil
+	}
+	return strings.TrimSpace(string(output)), nil
+}
+
+// performInstall handles the common installation logic for both GitHub and local updates
+func (u *Updater) performInstall(result *UpdateResult, srcBinaryPath, dstBinaryPath, rollbackPath, newVersion string) (*UpdateResult, error) {
+	// Stop daemons
 	u.log("stopping daemons")
 	if err := u.StopDaemons(); err != nil {
 		// Check if it's a registry error (critical) vs signaling error (non-critical)
@@ -150,15 +217,15 @@ func (u *Updater) PerformUpdate() (*UpdateResult, error) {
 		// Continue - signaling errors are non-critical, daemons may not be running
 	}
 
-	// Step 6: Replace main binary (atomic)
-	u.log("installing new binary", zap.String("path", binaryPath))
-	if err := copyFile(tmpBinaryPath, binaryPath); err != nil {
+	// Replace main binary (atomic)
+	u.log("installing new binary", zap.String("path", dstBinaryPath))
+	if err := copyFile(srcBinaryPath, dstBinaryPath); err != nil {
 		// Restore from rollback and restart daemons
 		u.log("install failed, rolling back", zap.Error(err))
-		if rbErr := copyFile(rollbackPath, binaryPath); rbErr != nil {
+		if rbErr := copyFile(rollbackPath, dstBinaryPath); rbErr != nil {
 			return nil, fmt.Errorf("critical: install failed and rollback failed: install=%w, rollback=%v", err, rbErr)
 		}
-		_ = os.Chmod(binaryPath, 0755)
+		_ = os.Chmod(dstBinaryPath, 0755)
 		// Restart daemons with original binary
 		if startErr := u.StartDaemons(); startErr != nil {
 			u.log("warning: failed to restart daemons after install rollback", zap.Error(startErr))
@@ -167,45 +234,45 @@ func (u *Updater) PerformUpdate() (*UpdateResult, error) {
 		result.RollbackReason = fmt.Sprintf("install failed: %v", err)
 		return result, nil
 	}
-	_ = os.Chmod(binaryPath, 0755)
+	_ = os.Chmod(dstBinaryPath, 0755)
 
-	// Step 7: Update all backup copies
+	// Update all backup copies
 	u.log("updating backup copies")
-	if err := u.backupManager.SetupBackupsWithMode(binaryPath, latest, "", u.execMode.Mode); err != nil {
+	if err := u.backupManager.SetupBackupsWithMode(dstBinaryPath, newVersion, "", u.execMode.Mode); err != nil {
 		u.log("backup update failed, rolling back", zap.Error(err))
 		result.RolledBack = true
 		result.RollbackReason = fmt.Sprintf("failed to update backups: %v", err)
-		if rbErr := u.rollback(rollbackPath, binaryPath); rbErr != nil {
+		if rbErr := u.rollback(rollbackPath, dstBinaryPath); rbErr != nil {
 			return nil, fmt.Errorf("critical: backup update failed and rollback failed: backup=%w, rollback=%v", err, rbErr)
 		}
 		return result, nil
 	}
 
-	// Step 8: Restart daemons
+	// Restart daemons
 	u.log("starting daemons")
 	if err := u.StartDaemons(); err != nil {
 		u.log("failed to start daemons, rolling back", zap.Error(err))
 		result.RolledBack = true
 		result.RollbackReason = fmt.Sprintf("failed to start daemons: %v", err)
-		if rbErr := u.rollback(rollbackPath, binaryPath); rbErr != nil {
+		if rbErr := u.rollback(rollbackPath, dstBinaryPath); rbErr != nil {
 			return nil, fmt.Errorf("critical: daemon start failed and rollback failed: start=%w, rollback=%v", err, rbErr)
 		}
 		return result, nil
 	}
 
-	// Step 9: Verify daemons are healthy
+	// Verify daemons are healthy
 	u.log("verifying daemon health")
 	if err := u.VerifyDaemonsHealthy(DefaultHealthCheckTimeout); err != nil {
 		u.log("health check failed, rolling back", zap.Error(err))
 		result.RolledBack = true
 		result.RollbackReason = fmt.Sprintf("health check failed: %v", err)
-		if rbErr := u.rollback(rollbackPath, binaryPath); rbErr != nil {
+		if rbErr := u.rollback(rollbackPath, dstBinaryPath); rbErr != nil {
 			return nil, fmt.Errorf("critical: health check failed and rollback failed: health=%w, rollback=%v", err, rbErr)
 		}
 		return result, nil
 	}
 
-	u.log("update successful", zap.String("version", latest))
+	u.log("update successful", zap.String("version", newVersion))
 	result.Success = true
 	return result, nil
 }
