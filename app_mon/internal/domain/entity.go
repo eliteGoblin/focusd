@@ -29,6 +29,7 @@ type RegistryEntry struct {
 	GuardianPID   int    `json:"guardian_pid"`
 	GuardianName  string `json:"guardian_name"`
 	LastHeartbeat int64  `json:"last_heartbeat"`
+	Mode          string `json:"mode,omitempty"` // "user" or "system" - for mode switch detection
 }
 
 // Policy defines what an app blocker policy contains.

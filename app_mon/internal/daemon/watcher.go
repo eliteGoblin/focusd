@@ -183,32 +183,41 @@ func (w *Watcher) checkAndRestartGuardian(ctx context.Context) {
 }
 
 // ensurePlistInstalled checks if LaunchAgent plist exists and restores if deleted.
-// This is self-protection: if someone deletes the plist, we restore it.
+// Also checks if content is correct and updates if needed (idempotent).
+// This is self-protection: if someone deletes or modifies the plist, we restore it.
 func (w *Watcher) ensurePlistInstalled() {
 	if w.launchAgent == nil {
 		return
 	}
 
-	if !w.launchAgent.IsInstalled() {
-		w.logger.Info("LaunchAgent plist missing, restoring...")
-
-		// Use backup manager's main binary path
-		var execPath string
-		if w.backupManager != nil {
-			execPath = w.backupManager.GetMainBinaryPath()
-		} else {
-			var err error
-			execPath, err = os.Executable()
-			if err != nil {
-				w.logger.Error("failed to get executable path", zap.Error(err))
-				return
-			}
+	// Get the expected binary path
+	var execPath string
+	if w.backupManager != nil {
+		execPath = w.backupManager.GetMainBinaryPath()
+	} else {
+		var err error
+		execPath, err = os.Executable()
+		if err != nil {
+			w.logger.Error("failed to get executable path", zap.Error(err))
+			return
 		}
+	}
 
+	if !w.launchAgent.IsInstalled() {
+		// Plist missing - restore it
+		w.logger.Info("LaunchAgent plist missing, restoring...")
 		if err := w.launchAgent.Install(execPath); err != nil {
 			w.logger.Error("failed to restore LaunchAgent plist", zap.Error(err))
 		} else {
 			w.logger.Info("LaunchAgent plist restored successfully")
+		}
+	} else if w.launchAgent.NeedsUpdate(execPath) {
+		// Plist exists but content is wrong - update it
+		w.logger.Info("LaunchAgent plist outdated, updating...")
+		if err := w.launchAgent.Update(execPath); err != nil {
+			w.logger.Error("failed to update LaunchAgent plist", zap.Error(err))
+		} else {
+			w.logger.Info("LaunchAgent plist updated successfully")
 		}
 	}
 }

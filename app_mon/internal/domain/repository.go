@@ -91,6 +91,15 @@ type LaunchAgentManager interface {
 
 	// GetPlistPath returns the plist file path.
 	GetPlistPath() string
+
+	// NeedsUpdate checks if plist exists but has different content than expected.
+	NeedsUpdate(execPath string) bool
+
+	// Update unloads, updates plist content, and reloads.
+	Update(execPath string) error
+
+	// CleanupOtherMode removes plist from the other mode location if exists.
+	CleanupOtherMode() error
 }
 
 // Obfuscator generates system-looking process names.

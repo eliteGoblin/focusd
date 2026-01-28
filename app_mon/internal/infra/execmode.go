@@ -66,3 +66,16 @@ func (m ExecMode) String() string {
 		return "unknown"
 	}
 }
+
+// GetUserModeConfig returns user mode config regardless of current euid.
+// Used when running with sudo but wanting to install in user mode (--mode user).
+func GetUserModeConfig() *ExecModeConfig {
+	home, _ := os.UserHomeDir()
+	return &ExecModeConfig{
+		Mode:       ExecModeUser,
+		BinaryPath: filepath.Join(home, ".local", "bin", "appmon"),
+		PlistDir:   filepath.Join(home, "Library", "LaunchAgents"),
+		PlistPath:  filepath.Join(home, "Library", "LaunchAgents", launchdLabel+".plist"),
+		IsRoot:     os.Geteuid() == 0, // Still track actual root status for permission operations
+	}
+}

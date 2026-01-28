@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"os/signal"
 	"path/filepath"
 	"syscall"
@@ -114,15 +115,19 @@ var daemonCmd = &cobra.Command{
 var (
 	daemonRole string
 	daemonName string
+	daemonMode string // mode passed to daemon subprocess
 	jsonOutput bool
 	checkOnly  bool
+	modeFlag   string // --mode user|system override for start command
 )
 
 func init() {
 	daemonCmd.Flags().StringVar(&daemonRole, "role", "", "Daemon role (watcher/guardian)")
 	daemonCmd.Flags().StringVar(&daemonName, "name", "", "Obfuscated process name")
+	daemonCmd.Flags().StringVar(&daemonMode, "mode", "", "Execution mode (user/system)")
 	versionCmd.Flags().BoolVar(&jsonOutput, "json", false, "Output version info as JSON")
 	updateCmd.Flags().BoolVar(&checkOnly, "check", false, "Only check for updates, don't install")
+	startCmd.Flags().StringVar(&modeFlag, "mode", "", "Override execution mode (user|system)")
 
 	rootCmd.AddCommand(startCmd)
 	rootCmd.AddCommand(statusCmd)
@@ -137,8 +142,59 @@ func runStart(cmd *cobra.Command, args []string) error {
 	// Detect execution mode (sudo vs non-sudo)
 	execMode := infra.DetectExecMode()
 
+	// Handle --mode flag override
+	if modeFlag != "" {
+		switch modeFlag {
+		case "user":
+			if execMode.IsRoot {
+				// Running as root but want user mode
+				// This is a cleanup operation - stop system mode and let user restart in user mode
+				fmt.Println("Cleaning up system mode to switch to user mode...")
+				pm := infra.NewProcessManager()
+
+				// Kill all appmon daemons
+				pids, _ := pm.FindByName("appmon")
+				for _, pid := range pids {
+					if pid != pm.GetCurrentPID() {
+						pm.Kill(pid)
+					}
+				}
+
+				// Remove system plist
+				systemPlist := "/Library/LaunchDaemons/com.focusd.appmon.plist"
+				if _, err := os.Stat(systemPlist); err == nil {
+					_ = exec.Command("launchctl", "unload", systemPlist).Run()
+					_ = os.Remove(systemPlist)
+					fmt.Println("Removed system LaunchDaemon")
+				}
+
+				// Clear registry (including lock file)
+				registry := infra.NewFileRegistry(pm)
+				registry.Clear()
+				// Also remove lock file which may have root ownership
+				registryPath := registry.GetRegistryPath()
+				_ = os.Remove(registryPath + ".lock")
+
+				fmt.Println("\nSystem mode cleaned up successfully.")
+				fmt.Println("Now run without sudo to start user mode:")
+				fmt.Println("  ./appmon start")
+				return nil
+			}
+			// Already running as user, just use default detection
+		case "system":
+			if !execMode.IsRoot {
+				fmt.Println("Error: --mode system requires sudo")
+				fmt.Println("Run: sudo ./appmon start --mode system")
+				return fmt.Errorf("system mode requires root privileges")
+			}
+			// Already root, use system mode (default)
+		default:
+			return fmt.Errorf("invalid --mode value: %s (use 'user' or 'system')", modeFlag)
+		}
+	}
+
 	fmt.Printf("Execution mode: %s\n", execMode.Mode)
-	if execMode.IsRoot {
+	if execMode.Mode == infra.ExecModeSystem {
 		fmt.Println("Running as root - will install as LaunchDaemon (system-wide)")
 	} else {
 		fmt.Println("Running as user - will install as LaunchAgent (user-space)")
@@ -148,16 +204,56 @@ func runStart(cmd *cobra.Command, args []string) error {
 	pm := infra.NewProcessManager()
 	registry := infra.NewFileRegistry(pm)
 
-	// Check if already running
+	// Check if system mode is running (for mode switch detection)
+	systemPlistExists := false
+	if _, err := os.Stat("/Library/LaunchDaemons/com.focusd.appmon.plist"); err == nil {
+		systemPlistExists = true
+	}
+
+	// Check if already running - handle mode switching
 	entry, _ := registry.GetAll()
 	if entry != nil {
 		watcherAlive := pm.IsRunning(entry.WatcherPID)
 		guardianAlive := pm.IsRunning(entry.GuardianPID)
 
 		if watcherAlive && guardianAlive {
-			fmt.Println("appmon is already running (fully protected)")
+			// Check if mode matches
+			currentMode := string(execMode.Mode)
+			if entry.Mode == currentMode || entry.Mode == "" {
+				// Same mode (or legacy entry without mode) - already running
+				fmt.Println("appmon is already running (fully protected)")
+				return nil
+			}
+			// Mode switch requested - kill old daemons and proceed
+			fmt.Printf("Switching from %s to %s mode...\n", entry.Mode, currentMode)
+			pm.Kill(entry.WatcherPID)
+			pm.Kill(entry.GuardianPID)
+			registry.Clear()
+			time.Sleep(1 * time.Second) // Wait for processes to die
+		}
+	} else if systemPlistExists && execMode.Mode == infra.ExecModeUser {
+		// Registry not readable but system plist exists - system mode is running
+		if !execMode.IsRoot {
+			// User mode without sudo - can't switch from system mode
+			fmt.Println("Error: appmon is running in system mode.")
+			fmt.Println("To switch to user mode, run: sudo ./appmon start --mode user")
 			return nil
 		}
+		// Running with sudo and --mode user - kill system daemons and clear registry
+		fmt.Println("Switching from system to user mode...")
+		// Kill any running system daemons by finding them
+		pids, _ := pm.FindByName("appmon")
+		for _, pid := range pids {
+			if pid != pm.GetCurrentPID() {
+				pm.Kill(pid)
+			}
+		}
+		// Clear registry (has root ownership from system mode)
+		registry.Clear()
+		time.Sleep(1 * time.Second)
+	} else if execMode.IsRoot && execMode.Mode == infra.ExecModeUser {
+		// Running with sudo --mode user, but no system plist - just clear any stale registry
+		registry.Clear()
 	}
 
 	// Determine binary path based on execution mode
@@ -194,9 +290,16 @@ func runStart(cmd *cobra.Command, args []string) error {
 		fmt.Printf("Binary backups created (v%s) with GitHub fallback\n", Version)
 	}
 
-	// Install LaunchAgent/LaunchDaemon based on execution mode
+	// Install LaunchAgent/LaunchDaemon based on execution mode (idempotent)
 	launchdManager := infra.NewLaunchdManager(execMode)
+
+	// Cleanup plist from wrong mode (handles user↔system migration)
+	if err := launchdManager.CleanupOtherMode(); err != nil {
+		fmt.Printf("Warning: Could not cleanup other mode plist: %v\n", err)
+	}
+
 	if !launchdManager.IsInstalled() {
+		// Fresh install
 		if err := launchdManager.Install(binaryPath); err != nil {
 			fmt.Printf("Warning: Could not install %s: %v\n", execMode.Mode, err)
 			fmt.Println("         (appmon will still run, but won't auto-start)")
@@ -207,10 +310,20 @@ func runStart(cmd *cobra.Command, args []string) error {
 				fmt.Println("Installed LaunchAgent for auto-start on login")
 			}
 		}
+	} else if launchdManager.NeedsUpdate(binaryPath) {
+		// Exists but outdated - update in place
+		if err := launchdManager.Update(binaryPath); err != nil {
+			fmt.Printf("Warning: Could not update %s: %v\n", execMode.Mode, err)
+		} else {
+			fmt.Println("Updated plist with new binary path")
+		}
+	} else {
+		// Already installed with correct config - skip
+		fmt.Println("Plist already installed and up-to-date")
 	}
 
-	// Start both daemons
-	if err := daemon.StartBothDaemons(); err != nil {
+	// Start both daemons with the determined mode
+	if err := daemon.StartBothDaemonsWithMode(string(execMode.Mode)); err != nil {
 		return fmt.Errorf("failed to start daemons: %w", err)
 	}
 
@@ -469,7 +582,16 @@ func runDaemon(cmd *cobra.Command, args []string) error {
 	pm := infra.NewProcessManager()
 	fs := infra.NewFileSystemManager()
 	registry := infra.NewFileRegistry(pm)
-	execMode := infra.DetectExecMode() // Auto-detect: root → LaunchDaemon, user → LaunchAgent
+
+	// Determine execution mode - use explicit flag if provided, otherwise auto-detect
+	var execMode *infra.ExecModeConfig
+	if daemonMode == "user" {
+		execMode = infra.GetUserModeConfig()
+	} else if daemonMode == "system" {
+		execMode = infra.DetectExecMode() // Will return system if running as root
+	} else {
+		execMode = infra.DetectExecMode() // Auto-detect: root → LaunchDaemon, user → LaunchAgent
+	}
 	launchdManager := infra.NewLaunchdManager(execMode)
 	policyStore := policy.NewPolicyStore()
 	strategyManager := infra.NewStrategyManager()

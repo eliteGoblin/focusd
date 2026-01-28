@@ -79,6 +79,13 @@ func (r *FileRegistry) Register(daemon domain.Daemon) error {
 	}
 	entry.LastHeartbeat = time.Now().Unix()
 
+	// Auto-detect and store execution mode
+	if os.Geteuid() == 0 {
+		entry.Mode = "system"
+	} else {
+		entry.Mode = "user"
+	}
+
 	return r.atomicWrite(entry)
 }
 
