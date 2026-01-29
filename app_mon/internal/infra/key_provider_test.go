@@ -11,9 +11,9 @@ import (
 
 func TestFileKeyProvider(t *testing.T) {
 	tests := []struct {
-		name    string
-		setup   func(t *testing.T, dataDir string)
-		testFn  func(t *testing.T, provider *FileKeyProvider)
+		name   string
+		setup  func(t *testing.T, dataDir string)
+		testFn func(t *testing.T, provider *FileKeyProvider)
 	}{
 		{
 			name: "KeyExists returns false when no key file",

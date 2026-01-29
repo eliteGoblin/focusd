@@ -100,12 +100,12 @@ func TestEncryptedRegistry_Register(t *testing.T) {
 
 func TestEncryptedRegistry_GetPartner(t *testing.T) {
 	tests := []struct {
-		name        string
-		register    []domain.Daemon
-		queryRole   domain.DaemonRole
-		wantPID     int
-		wantName    string
-		wantErr     bool
+		name      string
+		register  []domain.Daemon
+		queryRole domain.DaemonRole
+		wantPID   int
+		wantName  string
+		wantErr   bool
 	}{
 		{
 			name: "watcher gets guardian as partner",
@@ -160,11 +160,11 @@ func TestEncryptedRegistry_GetPartner(t *testing.T) {
 
 func TestEncryptedRegistry_IsPartnerAlive(t *testing.T) {
 	tests := []struct {
-		name       string
-		register   []domain.Daemon
-		running    map[int]bool
-		queryRole  domain.DaemonRole
-		wantAlive  bool
+		name      string
+		register  []domain.Daemon
+		running   map[int]bool
+		queryRole domain.DaemonRole
+		wantAlive bool
 	}{
 		{
 			name: "partner alive when PID running",
@@ -316,8 +316,8 @@ func TestEncryptedRegistry_Clear(t *testing.T) {
 
 func TestEncryptedRegistry_Secrets(t *testing.T) {
 	tests := []struct {
-		name    string
-		testFn  func(t *testing.T, reg *EncryptedRegistry)
+		name   string
+		testFn func(t *testing.T, reg *EncryptedRegistry)
 	}{
 		{
 			name: "set and get secret",

@@ -234,15 +234,8 @@ func runStart(cmd *cobra.Command, args []string) error {
 
 	// Check if system mode is running (for mode switch detection)
 	// Check both old static plist and current randomized label
-	systemPlistExists := false
-	if _, err := os.Stat("/Library/LaunchDaemons/" + infra.DefaultLaunchdLabel + ".plist"); err == nil {
-		systemPlistExists = true
-	}
-	if !systemPlistExists {
-		if _, err := os.Stat("/Library/LaunchDaemons/" + plistLabel + ".plist"); err == nil {
-			systemPlistExists = true
-		}
-	}
+	systemPlistExists := fileExists("/Library/LaunchDaemons/"+infra.DefaultLaunchdLabel+".plist") ||
+		fileExists("/Library/LaunchDaemons/"+plistLabel+".plist")
 
 	// Check if already running - handle mode switching
 	entry, _ := registry.GetAll()
@@ -467,9 +460,9 @@ func runStatus(cmd *cobra.Command, args []string) error {
 	}
 	defer registry.Close()
 
-	// Load randomized plist label for status
+	// Load randomized plist label for status display
 	if plistLabel, labelErr := infra.EnsurePlistLabel(registry); labelErr == nil {
-		execMode = rebuildExecModeWithLabel(execMode, plistLabel)
+		_ = rebuildExecModeWithLabel(execMode, plistLabel)
 	}
 
 	backupManager := infra.NewBackupManager()
@@ -934,6 +927,12 @@ func openEncryptedRegistry(execMode *infra.ExecModeConfig, pm domain.ProcessMana
 		return nil, fmt.Errorf("failed to open encrypted registry: %w", err)
 	}
 	return reg, nil
+}
+
+// fileExists returns true if the path exists.
+func fileExists(path string) bool {
+	_, err := os.Stat(path)
+	return err == nil
 }
 
 // getInstalledVersion returns the version of the binary at the given path.

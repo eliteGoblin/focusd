@@ -197,8 +197,8 @@ func (r *EncryptedRegistry) GetAll() (*domain.RegistryEntry, error) {
 		var name string
 		var heartbeat int64
 		var appVersion string
-		if err := rows.Scan(&role, &pid, &name, &heartbeat, &appVersion); err != nil {
-			return nil, err
+		if scanErr := rows.Scan(&role, &pid, &name, &heartbeat, &appVersion); scanErr != nil {
+			return nil, scanErr
 		}
 		found = true
 		switch domain.DaemonRole(role) {
