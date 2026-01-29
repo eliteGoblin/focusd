@@ -126,10 +126,11 @@ func (bm *BackupManager) SetupBackupsWithMode(mainBinaryPath, version, buildTime
 
 	// Determine plist path based on mode
 	var plistPath string
+	label := GetLaunchdLabel()
 	if mode == ExecModeSystem {
-		plistPath = "/Library/LaunchDaemons/com.focusd.appmon.plist"
+		plistPath = "/Library/LaunchDaemons/" + label + ".plist"
 	} else {
-		plistPath = filepath.Join(bm.homeDir, "Library/LaunchAgents/com.focusd.appmon.plist")
+		plistPath = filepath.Join(bm.homeDir, "Library/LaunchAgents", label+".plist")
 	}
 
 	// Save config

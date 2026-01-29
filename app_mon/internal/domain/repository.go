@@ -135,6 +135,36 @@ type StrategyManager interface {
 	UninstallApp(appName string) (string, error)
 }
 
+// KeyProvider abstracts the source of encryption keys.
+// Phase 1: file-based key. Phase 2: server-generated key.
+type KeyProvider interface {
+	// GetKey returns the encryption key bytes.
+	GetKey() ([]byte, error)
+
+	// StoreKey persists a new encryption key.
+	StoreKey(key []byte) error
+
+	// KeyExists checks if a key has been generated.
+	KeyExists() bool
+}
+
+// SecretStore provides encrypted persistent storage for secrets.
+// Secrets are generated once on install and persist across restarts.
+// Phase 2: secrets can be synced/rebuilt from server.
+type SecretStore interface {
+	// GetSecret retrieves a secret by key.
+	GetSecret(key string) (string, error)
+
+	// SetSecret stores a secret.
+	SetSecret(key, value string) error
+
+	// GetAllSecrets returns all stored secrets.
+	GetAllSecrets() (map[string]string, error)
+
+	// Close releases resources (e.g., database connection).
+	Close() error
+}
+
 // FreedomHealth represents the current health status of Freedom app protection.
 type FreedomHealth struct {
 	// Installed indicates if Freedom.app exists at expected path

@@ -6,7 +6,7 @@ BUILD_DIR=./build
 GO_FILES=$(shell find . -name '*.go' -not -path './vendor/*')
 
 # Version info
-VERSION?=0.4.0
+VERSION?=0.5.0
 COMMIT=$(shell git rev-parse --short HEAD 2>/dev/null || echo "dev")
 BUILD_TIME=$(shell date -u '+%Y-%m-%d_%H:%M:%S')
 LDFLAGS=-ldflags "-X main.Version=$(VERSION) -X main.Commit=$(COMMIT) -X main.BuildTime=$(BUILD_TIME)"
@@ -20,37 +20,37 @@ deps:
 	go mod download
 	go mod tidy
 
-# Build binary
+# Build binary (CGO required for SQLCipher)
 build:
 	@echo "Building $(BINARY_NAME)..."
 	@mkdir -p $(BUILD_DIR)
-	go build $(LDFLAGS) -o $(BUILD_DIR)/$(BINARY_NAME) ./cmd/appmon
+	CGO_ENABLED=1 go build $(LDFLAGS) -o $(BUILD_DIR)/$(BINARY_NAME) ./cmd/appmon
 
-# Build optimized release binary
+# Build optimized release binary (CGO required for SQLCipher)
 build-release:
 	@echo "Building release binary..."
 	@mkdir -p $(BUILD_DIR)
-	CGO_ENABLED=0 go build $(LDFLAGS) -a -installsuffix cgo -o $(BUILD_DIR)/$(BINARY_NAME) ./cmd/appmon
+	CGO_ENABLED=1 go build $(LDFLAGS) -a -o $(BUILD_DIR)/$(BINARY_NAME) ./cmd/appmon
 
 # Build for macOS ARM64 (Apple Silicon)
 build-mac-arm64:
 	@echo "Building for macOS ARM64..."
 	@mkdir -p $(BUILD_DIR)
-	GOOS=darwin GOARCH=arm64 go build $(LDFLAGS) -o $(BUILD_DIR)/$(BINARY_NAME)-darwin-arm64 ./cmd/appmon
+	CGO_ENABLED=1 GOOS=darwin GOARCH=arm64 go build $(LDFLAGS) -o $(BUILD_DIR)/$(BINARY_NAME)-darwin-arm64 ./cmd/appmon
 
 # Build for macOS AMD64 (Intel)
 build-mac-amd64:
 	@echo "Building for macOS AMD64..."
 	@mkdir -p $(BUILD_DIR)
-	GOOS=darwin GOARCH=amd64 go build $(LDFLAGS) -o $(BUILD_DIR)/$(BINARY_NAME)-darwin-amd64 ./cmd/appmon
+	CGO_ENABLED=1 GOOS=darwin GOARCH=amd64 go build $(LDFLAGS) -o $(BUILD_DIR)/$(BINARY_NAME)-darwin-amd64 ./cmd/appmon
 
 # Run all tests
 test: test-unit
 
-# Run unit tests
+# Run unit tests (CGO required for SQLCipher)
 test-unit:
 	@echo "Running unit tests..."
-	go test -v -race -coverprofile=coverage-unit.out ./internal/...
+	CGO_ENABLED=1 go test -v -race -coverprofile=coverage-unit.out ./internal/...
 
 # Run integration tests
 test-integration:
