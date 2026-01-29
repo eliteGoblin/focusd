@@ -118,20 +118,20 @@ or I always create a folder in ~/.appmon? but how does root know which user's ho
 File-based key provides enough friction for MVP threat model (impulsive user).
 Migration path: file → Keychain → server is additive, not breaking.
 
-I nwant you when implemnt: 
+I want you when implement:
 
-Using TDD and clean arch. Use interface to hide implementation detail: whether it's load from file, or later could be load from key chain. Same idea for other implemnation detail. use interface. 
+Using TDD and clean arch. Use interface to hide implementation detail: whether it's load from file, or later could be load from key chain. Same idea for other implementation detail. use interface.
 
 ### Data Model
 
-TBD: 
+TBD:
 
- review the requirement . and initial schema, I want to keep things simple atm. only imlemnt schema strictly necessaary.
+ review the requirement . and initial schema, I want to keep things simple atm. only implement schema strictly necessary.
 
-Prob only focus on: 
+Prob only focus on:
 
-* All info in current registry: randomly generated process name, launchdaemon plist/launch agent. 
-* KISS, only necessaary info atm, don't create for future possible data/schema
+* All info in current registry: randomly generated process name, launchdaemon plist/launch agent.
+* KISS, only necessary info atm, don't create for future possible data/schema
 * I also want DB schema migration implementation: I think I need one, review for me.  since later I might want to add col, create table. I want to do it by code, and keey in git etc. like prod pbest practice for golang server
 
 Q: what if app crash and get restarted, the PID changed, will registry needs to know? IM wonder at this case, how system can still able to keep track of what's "currently running", so it can continue working for like monitor each other if up, and update version correctly. I think update needs know what current running process? 

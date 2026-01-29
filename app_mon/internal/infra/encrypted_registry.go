@@ -44,6 +44,9 @@ func NewEncryptedRegistry(dataDir string, key []byte, pm domain.ProcessManager) 
 		return nil, fmt.Errorf("failed to open encrypted database: %w", err)
 	}
 
+	// SQLite doesn't handle concurrent writers well; serialize access per process.
+	db.SetMaxOpenConns(1)
+
 	// Verify encryption works by running a query
 	if err := db.Ping(); err != nil {
 		db.Close()
@@ -96,7 +99,7 @@ func (r *EncryptedRegistry) createTables() error {
 func (r *EncryptedRegistry) Register(daemon domain.Daemon) error {
 	now := time.Now().Unix()
 
-	// Auto-detect mode
+	// Auto-detect execution mode and persist in meta table for status display.
 	mode := "user"
 	if os.Geteuid() == 0 {
 		mode = "system"
