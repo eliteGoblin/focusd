@@ -184,6 +184,54 @@ func TestEnsureKey(t *testing.T) {
 	}
 }
 
+func TestFileKeyProvider_ErrorPaths(t *testing.T) {
+	tests := []struct {
+		name   string
+		setup  func(t *testing.T, dataDir string) *FileKeyProvider
+		testFn func(t *testing.T, provider *FileKeyProvider)
+	}{
+		{
+			name: "GetKey returns error for corrupted base64",
+			setup: func(t *testing.T, dataDir string) *FileKeyProvider {
+				provider := NewFileKeyProvider(dataDir)
+				// Write invalid base64 to key file
+				require.NoError(t, os.WriteFile(provider.keyPath, []byte("not-valid-base64!!!"), 0600))
+				return provider
+			},
+			testFn: func(t *testing.T, provider *FileKeyProvider) {
+				_, err := provider.GetKey()
+				assert.Error(t, err)
+				assert.Contains(t, err.Error(), "failed to decode key")
+			},
+		},
+		{
+			name: "GetKey returns error for wrong-size decoded key",
+			setup: func(t *testing.T, dataDir string) *FileKeyProvider {
+				provider := NewFileKeyProvider(dataDir)
+				// Store a short key (16 bytes instead of 32) by writing valid base64
+				shortKey := make([]byte, 16)
+				encoded := "AAAAAAAAAAAAAAAAAAAAAA==" // 16 bytes of zeros in base64
+				require.NoError(t, os.WriteFile(provider.keyPath, []byte(encoded), 0600))
+				_ = shortKey
+				return provider
+			},
+			testFn: func(t *testing.T, provider *FileKeyProvider) {
+				_, err := provider.GetKey()
+				assert.Error(t, err)
+				assert.Contains(t, err.Error(), "invalid key size")
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dataDir := t.TempDir()
+			provider := tt.setup(t, dataDir)
+			tt.testFn(t, provider)
+		})
+	}
+}
+
 func TestDataDirPermissions(t *testing.T) {
 	dataDir := t.TempDir()
 	provider := NewFileKeyProvider(dataDir)

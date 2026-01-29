@@ -470,6 +470,75 @@ func TestEncryptedRegistry_Encryption(t *testing.T) {
 	}
 }
 
+func TestEncryptedRegistry_GetAll_IncludesMode(t *testing.T) {
+	reg, _ := newTestRegistry(t)
+
+	// Register a daemon (this also stores mode in meta)
+	require.NoError(t, reg.Register(domain.Daemon{
+		PID: 1234, Role: domain.RoleWatcher, ObfuscatedName: "w", AppVersion: "0.5.0",
+	}))
+
+	entry, err := reg.GetAll()
+	require.NoError(t, err)
+	require.NotNil(t, entry)
+	// Mode is set based on euid; in tests it's "user" (not root)
+	assert.Equal(t, "user", entry.Mode)
+}
+
+func TestEncryptedRegistry_Register_StoresAppVersion(t *testing.T) {
+	reg, _ := newTestRegistry(t)
+
+	require.NoError(t, reg.Register(domain.Daemon{
+		PID: 1234, Role: domain.RoleWatcher, ObfuscatedName: "w", AppVersion: "0.5.0",
+	}))
+
+	// Verify app_version is stored in meta table
+	var version string
+	err := reg.db.QueryRow(`SELECT value FROM meta WHERE key = 'app_version'`).Scan(&version)
+	require.NoError(t, err)
+	assert.Equal(t, "0.5.0", version)
+}
+
+func TestEncryptedRegistry_Register_EmptyAppVersion(t *testing.T) {
+	reg, _ := newTestRegistry(t)
+
+	// Register without app version - should not store empty in meta
+	require.NoError(t, reg.Register(domain.Daemon{
+		PID: 1234, Role: domain.RoleWatcher, ObfuscatedName: "w", AppVersion: "",
+	}))
+
+	// app_version meta should not exist
+	var version string
+	err := reg.db.QueryRow(`SELECT value FROM meta WHERE key = 'app_version'`).Scan(&version)
+	assert.Error(t, err) // sql.ErrNoRows
+}
+
+func TestEncryptedRegistry_Close_Idempotent(t *testing.T) {
+	dataDir := t.TempDir()
+	key, err := GenerateKey()
+	require.NoError(t, err)
+
+	pm := newMockProcessManager()
+	reg, err := NewEncryptedRegistry(dataDir, key, pm)
+	require.NoError(t, err)
+
+	// First close should succeed
+	assert.NoError(t, reg.Close())
+
+	// Second close - db is closed but pointer is still non-nil
+	// This tests the nil check path
+	reg.db = nil
+	assert.NoError(t, reg.Close())
+}
+
+func TestEncryptedRegistry_GetAllSecrets_Empty(t *testing.T) {
+	reg, _ := newTestRegistry(t)
+
+	secrets, err := reg.GetAllSecrets()
+	require.NoError(t, err)
+	assert.Empty(t, secrets)
+}
+
 func TestEncryptedRegistry_GetRegistryPath(t *testing.T) {
 	reg, dataDir := newTestRegistry(t)
 	expected := filepath.Join(dataDir, registryDBName)
