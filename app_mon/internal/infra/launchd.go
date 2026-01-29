@@ -80,8 +80,7 @@ const launchDaemonTemplate = `<?xml version="1.0" encoding="UTF-8"?>
 </plist>`
 
 const (
-	launchAgentLabel = "com.focusd.appmon"
-	logDir           = "/var/tmp"
+	logDir = "/var/tmp"
 )
 
 type plistConfig struct {
@@ -102,7 +101,7 @@ type LaunchdManagerImpl struct {
 func NewLaunchAgentManager() domain.LaunchAgentManager {
 	home, _ := os.UserHomeDir()
 	launchAgentsDir := filepath.Join(home, "Library/LaunchAgents")
-	plistPath := filepath.Join(launchAgentsDir, launchAgentLabel+".plist")
+	plistPath := filepath.Join(launchAgentsDir, GetLaunchdLabel()+".plist")
 
 	return &LaunchdManagerImpl{
 		mode:      ExecModeUser,
@@ -132,7 +131,7 @@ func (m *LaunchdManagerImpl) generatePlistContent(execPath string) ([]byte, erro
 
 	// Generate plist content
 	config := plistConfig{
-		Label:          launchAgentLabel,
+		Label:          GetLaunchdLabel(),
 		ExecutablePath: execPath,
 		LogPath:        filepath.Join(logDir, "appmon.log"),
 		ErrorLogPath:   filepath.Join(logDir, "appmon.error.log"),
@@ -231,15 +230,16 @@ func (m *LaunchdManagerImpl) Update(execPath string) error {
 // CleanupOtherMode removes plist from the other mode location if it exists.
 // This handles mode migration (user↔system) by cleaning up stale configs.
 func (m *LaunchdManagerImpl) CleanupOtherMode() error {
+	label := GetLaunchdLabel()
 	var otherPath string
 	if m.mode == ExecModeUser {
 		// We're user mode, cleanup system mode if exists
-		otherPath = "/Library/LaunchDaemons/" + launchAgentLabel + ".plist"
+		otherPath = "/Library/LaunchDaemons/" + label + ".plist"
 	} else {
 		// We're system mode, cleanup user mode if exists
 		// Use getRealUserHome() to get actual user's home when running under sudo
 		home := getRealUserHome()
-		otherPath = filepath.Join(home, "Library/LaunchAgents", launchAgentLabel+".plist")
+		otherPath = filepath.Join(home, "Library/LaunchAgents", label+".plist")
 	}
 
 	if _, err := os.Stat(otherPath); err == nil {

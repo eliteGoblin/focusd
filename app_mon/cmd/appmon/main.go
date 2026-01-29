@@ -23,6 +23,9 @@ import (
 	"github.com/eliteGoblin/focusd/app_mon/internal/infra"
 	"github.com/eliteGoblin/focusd/app_mon/internal/policy"
 	"github.com/eliteGoblin/focusd/app_mon/internal/usecase"
+
+	// Register SQLCipher driver
+	_ "github.com/mutecomm/go-sqlcipher/v4"
 )
 
 var (
@@ -164,20 +167,28 @@ func runStart(cmd *cobra.Command, args []string) error {
 					}
 				}
 
-				// Remove system plist
-				systemPlist := "/Library/LaunchDaemons/com.focusd.appmon.plist"
-				if _, err := os.Stat(systemPlist); err == nil {
-					_ = exec.Command("launchctl", "unload", systemPlist).Run()
-					_ = os.Remove(systemPlist)
-					fmt.Println("Removed system LaunchDaemon")
+				// Remove system plist(s) - both old static and randomized
+				oldSystemPlist := "/Library/LaunchDaemons/" + infra.DefaultLaunchdLabel + ".plist"
+				if _, err := os.Stat(oldSystemPlist); err == nil {
+					_ = exec.Command("launchctl", "unload", oldSystemPlist).Run()
+					_ = os.Remove(oldSystemPlist)
+					fmt.Println("Removed old system LaunchDaemon")
 				}
 
-				// Clear registry (including lock file)
-				registry := infra.NewFileRegistry(pm)
-				_ = registry.Clear()
-				// Also remove lock file which may have root ownership
-				registryPath := registry.GetRegistryPath()
-				_ = os.Remove(registryPath + ".lock")
+				// Clear encrypted registry and remove randomized system plist
+				systemExecMode := infra.DetectExecMode()
+				if cleanupReg, cleanupErr := openEncryptedRegistry(systemExecMode, pm); cleanupErr == nil {
+					if label, labelErr := infra.EnsurePlistLabel(cleanupReg); labelErr == nil && label != infra.DefaultLaunchdLabel {
+						randomizedPlist := "/Library/LaunchDaemons/" + label + ".plist"
+						if _, err := os.Stat(randomizedPlist); err == nil {
+							_ = exec.Command("launchctl", "unload", randomizedPlist).Run()
+							_ = os.Remove(randomizedPlist)
+							fmt.Println("Removed system LaunchDaemon")
+						}
+					}
+					_ = cleanupReg.Clear()
+					cleanupReg.Close()
+				}
 
 				fmt.Println("\nSystem mode cleaned up successfully.")
 				fmt.Println("Now run without sudo to start user mode:")
@@ -206,12 +217,31 @@ func runStart(cmd *cobra.Command, args []string) error {
 
 	// Initialize components
 	pm := infra.NewProcessManager()
-	registry := infra.NewFileRegistry(pm)
+	registry, err := openEncryptedRegistry(execMode, pm)
+	if err != nil {
+		return fmt.Errorf("failed to initialize registry: %w", err)
+	}
+	defer registry.Close()
+
+	// Ensure randomized plist label exists (generated on first install, persisted)
+	plistLabel, err := infra.EnsurePlistLabel(registry)
+	if err != nil {
+		return fmt.Errorf("failed to ensure plist label: %w", err)
+	}
+
+	// Rebuild ExecModeConfig with the randomized plist label
+	execMode = rebuildExecModeWithLabel(execMode, plistLabel)
 
 	// Check if system mode is running (for mode switch detection)
+	// Check both old static plist and current randomized label
 	systemPlistExists := false
-	if _, err := os.Stat("/Library/LaunchDaemons/com.focusd.appmon.plist"); err == nil {
+	if _, err := os.Stat("/Library/LaunchDaemons/" + infra.DefaultLaunchdLabel + ".plist"); err == nil {
 		systemPlistExists = true
+	}
+	if !systemPlistExists {
+		if _, err := os.Stat("/Library/LaunchDaemons/" + plistLabel + ".plist"); err == nil {
+			systemPlistExists = true
+		}
 	}
 
 	// Check if already running - handle mode switching
@@ -316,6 +346,9 @@ func runStart(cmd *cobra.Command, args []string) error {
 	if err := launchdManager.CleanupOtherMode(); err != nil {
 		fmt.Printf("Warning: Could not cleanup other mode plist: %v\n", err)
 	}
+
+	// Cleanup old static plist from pre-v0.5.0 (com.focusd.appmon)
+	cleanupOldStaticPlist(execMode)
 
 	if !launchdManager.IsInstalled() {
 		// Fresh install
@@ -424,7 +457,21 @@ func copyBinary(src, dst string) error {
 
 func runStatus(cmd *cobra.Command, args []string) error {
 	pm := infra.NewProcessManager()
-	registry := infra.NewFileRegistry(pm)
+	execMode := infra.DetectExecMode()
+	registry, err := openEncryptedRegistry(execMode, pm)
+	if err != nil {
+		fmt.Println("\n=== appmon Status ===")
+		fmt.Println("Status: NOT RUNNING (cannot open registry)")
+		fmt.Println("\nRun 'appmon start' to enable protection.")
+		return nil
+	}
+	defer registry.Close()
+
+	// Load randomized plist label for status
+	if plistLabel, labelErr := infra.EnsurePlistLabel(registry); labelErr == nil {
+		execMode = rebuildExecModeWithLabel(execMode, plistLabel)
+	}
+
 	backupManager := infra.NewBackupManager()
 
 	fmt.Println("\n=== appmon Status ===")
@@ -639,7 +686,6 @@ func runDaemon(cmd *cobra.Command, args []string) error {
 	// Initialize infrastructure
 	pm := infra.NewProcessManager()
 	fs := infra.NewFileSystemManager()
-	registry := infra.NewFileRegistry(pm)
 
 	// Determine execution mode - use explicit flag if provided, otherwise auto-detect
 	var execMode *infra.ExecModeConfig
@@ -650,6 +696,17 @@ func runDaemon(cmd *cobra.Command, args []string) error {
 	} else {
 		execMode = infra.DetectExecMode() // Auto-detect: root → LaunchDaemon, user → LaunchAgent
 	}
+	registry, err := openEncryptedRegistry(execMode, pm)
+	if err != nil {
+		return fmt.Errorf("failed to initialize registry: %w", err)
+	}
+	defer registry.Close()
+
+	// Load randomized plist label for daemon
+	if plistLabel, labelErr := infra.EnsurePlistLabel(registry); labelErr == nil {
+		execMode = rebuildExecModeWithLabel(execMode, plistLabel)
+	}
+
 	launchdManager := infra.NewLaunchdManager(execMode)
 	policyStore := policy.NewPolicyStore()
 	strategyManager := infra.NewStrategyManager()
@@ -839,6 +896,44 @@ func runVersion(cmd *cobra.Command, args []string) {
 		fmt.Printf("appmon %s (commit: %s, built: %s)\n",
 			Version, Commit, BuildTime)
 	}
+}
+
+// cleanupOldStaticPlist removes the pre-v0.5.0 static plist (com.focusd.appmon.plist)
+// if it exists and the new randomized plist is different.
+func cleanupOldStaticPlist(execMode *infra.ExecModeConfig) {
+	oldLabel := infra.DefaultLaunchdLabel
+	currentLabel := infra.GetLaunchdLabel()
+	if oldLabel == currentLabel {
+		return // Not using randomized label yet
+	}
+
+	oldPlistPath := filepath.Join(execMode.PlistDir, oldLabel+".plist")
+	if _, err := os.Stat(oldPlistPath); err == nil {
+		_ = exec.Command("launchctl", "unload", oldPlistPath).Run()
+		_ = os.Remove(oldPlistPath)
+		fmt.Printf("Removed old plist: %s\n", oldLabel)
+	}
+}
+
+// rebuildExecModeWithLabel updates ExecModeConfig to use a randomized plist label.
+func rebuildExecModeWithLabel(config *infra.ExecModeConfig, label string) *infra.ExecModeConfig {
+	config.PlistPath = filepath.Join(config.PlistDir, label+".plist")
+	return config
+}
+
+// openEncryptedRegistry initializes the encrypted registry for the given execution mode.
+// Creates the data directory, generates or loads the encryption key, and opens the DB.
+func openEncryptedRegistry(execMode *infra.ExecModeConfig, pm domain.ProcessManager) (*infra.EncryptedRegistry, error) {
+	keyProvider := infra.NewFileKeyProvider(execMode.DataDir)
+	key, err := infra.EnsureKey(keyProvider)
+	if err != nil {
+		return nil, fmt.Errorf("failed to ensure encryption key: %w", err)
+	}
+	reg, err := infra.NewEncryptedRegistry(execMode.DataDir, key, pm)
+	if err != nil {
+		return nil, fmt.Errorf("failed to open encrypted registry: %w", err)
+	}
+	return reg, nil
 }
 
 // getInstalledVersion returns the version of the binary at the given path.

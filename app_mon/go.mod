@@ -3,6 +3,7 @@ module github.com/eliteGoblin/focusd/app_mon
 go 1.23.0
 
 require (
+	github.com/mutecomm/go-sqlcipher/v4 v4.4.2
 	github.com/onsi/ginkgo/v2 v2.27.5
 	github.com/onsi/gomega v1.39.0
 	github.com/shirou/gopsutil/v3 v3.23.12
