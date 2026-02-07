@@ -101,6 +101,12 @@ System mode:
 └─────────────────────────────────────────────────────────────┘
 ```
 
+Q: I want you to help decide where I put the key and DB file? 
+
+consider I got user mode and root mode, which appmon will be in different place. should I create a folder for appmon and put key and DB along with binary? 
+
+or I always create a folder in ~/.appmon? but how does root know which user's home will be put in? suggest for me. 
+
 ### Why File-Based Key (MVP)
 
 | Approach | Pros | Cons | Decision |
@@ -112,74 +118,27 @@ System mode:
 File-based key provides enough friction for MVP threat model (impulsive user).
 Migration path: file → Keychain → server is additive, not breaking.
 
+I want you when implement:
+
+Using TDD and clean arch. Use interface to hide implementation detail: whether it's load from file, or later could be load from key chain. Same idea for other implementation detail. use interface.
+
 ### Data Model
 
-```sql
--- Device identity (generated on first install)
-CREATE TABLE device (
-    id TEXT PRIMARY KEY,
-    created_at INTEGER,
-    last_boot INTEGER
-);
+TBD:
 
--- Runtime secrets (randomized per install)
-CREATE TABLE secrets (
-    key TEXT PRIMARY KEY,
-    value TEXT
-);
--- Keys: plist_name, process_pattern_watcher, process_pattern_guardian
+ review the requirement . and initial schema, I want to keep things simple atm. only implement schema strictly necessary.
 
--- Daemon state (replaces current JSON registry)
-CREATE TABLE daemons (
-    role TEXT PRIMARY KEY,  -- 'watcher' or 'guardian'
-    pid INTEGER,
-    started_at INTEGER,
-    last_heartbeat INTEGER
-);
+Prob only focus on:
 
--- Backup locations (for self-protection)
-CREATE TABLE backups (
-    id INTEGER PRIMARY KEY,
-    path TEXT,
-    created_at INTEGER,
-    verified_at INTEGER
-);
+* All info in current registry: randomly generated process name, launchdaemon plist/launch agent.
+* KISS, only necessary info atm, don't create for future possible data/schema
+* I also want DB schema migration implementation: I think I need one, review for me.  since later I might want to add col, create table. I want to do it by code, and keey in git etc. like prod pbest practice for golang server
 
--- Local config cache (for Phase 2 server sync)
-CREATE TABLE config (
-    key TEXT PRIMARY KEY,
-    value TEXT,
-    updated_at INTEGER,
-    source TEXT  -- 'local' or 'server'
-);
-```
+Q: what if app crash and get restarted, the PID changed, will registry needs to know? IM wonder at this case, how system can still able to keep track of what's "currently running", so it can continue working for like monitor each other if up, and update version correctly. I think update needs know what current running process? 
+
 
 ### Key Management (Phase 1 - File Based)
 
-```go
-// internal/infra/keymanager.go
-
-// KeyManager handles encryption key storage
-type KeyManager struct {
-    keyPath string  // ~/.appmon/.key
-}
-
-// GetOrCreateKey retrieves existing key or generates new one
-func (k *KeyManager) GetOrCreateKey() ([]byte, error) {
-    // 1. Try read from file
-    // 2. If not exists, generate 256-bit random key
-    // 3. Write to file with 0600 permissions
-    // 4. Return key
-}
-
-// GetKeyPath returns the key file path based on exec mode
-func GetKeyPath(mode ExecMode) string {
-    if mode == ExecModeSystem {
-        return "/var/lib/appmon/.key"
-    }
-    return filepath.Join(os.Getenv("HOME"), ".appmon", ".key")
-}
-```
 
 **Key properties (Phase 1)**:
 - 256-bit random key (AES-256 compatible)
@@ -206,32 +165,18 @@ These are stored in encrypted SQLite, not hardcoded.
 
 ### Migration from Current Registry
 
-```go
-// On first run after upgrade:
-1. Check if old JSON registry exists
-2. If exists:
-   a. Read old registry data
-   b. Create encrypted SQLite
-   c. Migrate data to new schema
-   d. Delete old JSON registry
-   e. Log: "Migrated to encrypted registry"
-3. If not exists:
-   a. Fresh install - create encrypted SQLite
-```
+No need to support migrate, when develop I want you to directly create SQLCipher, using info from the local registry you find. (i.e AI fill the data, )
 
-### Recovery Scenarios
 
-| Scenario | Recovery |
-|----------|----------|
-| SQLite deleted | Generate new secrets, fresh install |
-| Keychain cleared | Generate new key + secrets, fresh install |
-| App reinstalled | Same bundle ID = same Keychain access |
-| OS reinstalled | Fresh install (expected) |
+No need to consider recovery in phase1, I think phase2 server can save backuped SQL db. 
+
+Since these data mostly are cache data can be rebuilt, so even could server implemment the "cleanup request". when daemon talk to server, server will tell them to quit/restart, for these daemon process cannot find the registry. and server will tell daemon to rebuild the local DB and recover. (will leave prob for phase 3 after server is built) 
 
 **Note**: Phase 2 server sync provides better recovery by backing up secrets to server.
 
 ### New Components
 
+jsut use as example: below thoughts
 ```go
 // internal/infra/encrypted_registry.go
 type EncryptedRegistry struct {

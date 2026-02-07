@@ -80,8 +80,7 @@ const launchDaemonTemplate = `<?xml version="1.0" encoding="UTF-8"?>
 </plist>`
 
 const (
-	launchAgentLabel = "com.focusd.appmon"
-	logDir           = "/var/tmp"
+	logDir = "/var/tmp"
 )
 
 type plistConfig struct {
@@ -102,7 +101,7 @@ type LaunchdManagerImpl struct {
 func NewLaunchAgentManager() domain.LaunchAgentManager {
 	home, _ := os.UserHomeDir()
 	launchAgentsDir := filepath.Join(home, "Library/LaunchAgents")
-	plistPath := filepath.Join(launchAgentsDir, launchAgentLabel+".plist")
+	plistPath := filepath.Join(launchAgentsDir, GetLaunchdLabel()+".plist")
 
 	return &LaunchdManagerImpl{
 		mode:      ExecModeUser,
@@ -132,7 +131,7 @@ func (m *LaunchdManagerImpl) generatePlistContent(execPath string) ([]byte, erro
 
 	// Generate plist content
 	config := plistConfig{
-		Label:          launchAgentLabel,
+		Label:          GetLaunchdLabel(),
 		ExecutablePath: execPath,
 		LogPath:        filepath.Join(logDir, "appmon.log"),
 		ErrorLogPath:   filepath.Join(logDir, "appmon.error.log"),
@@ -230,24 +229,49 @@ func (m *LaunchdManagerImpl) Update(execPath string) error {
 
 // CleanupOtherMode removes plist from the other mode location if it exists.
 // This handles mode migration (user↔system) by cleaning up stale configs.
+// Uses glob pattern to find any randomized plist, since the other mode may have
+// a different randomized label stored in its own registry.
 func (m *LaunchdManagerImpl) CleanupOtherMode() error {
-	var otherPath string
+	var otherPattern string
 	if m.mode == ExecModeUser {
 		// We're user mode, cleanup system mode if exists
-		otherPath = "/Library/LaunchDaemons/" + launchAgentLabel + ".plist"
+		// Check both old static label and any randomized labels
+		otherPattern = "/Library/LaunchDaemons/com.*.plist"
 	} else {
 		// We're system mode, cleanup user mode if exists
-		// Use getRealUserHome() to get actual user's home when running under sudo
-		home := getRealUserHome()
-		otherPath = filepath.Join(home, "Library/LaunchAgents", launchAgentLabel+".plist")
+		// Use GetRealUserHome() to get actual user's home when running under sudo
+		home := GetRealUserHome()
+		otherPattern = filepath.Join(home, "Library/LaunchAgents/com.*.plist")
 	}
 
-	if _, err := os.Stat(otherPath); err == nil {
-		// Other mode plist exists - unload and remove
-		_ = exec.Command("launchctl", "unload", otherPath).Run()
-		return os.Remove(otherPath)
+	// Glob for plists matching the pattern
+	matches, err := filepath.Glob(otherPattern)
+	if err != nil {
+		return fmt.Errorf("failed to glob for other mode plists: %w", err)
+	}
+
+	// Cleanup all found plists (unload and remove)
+	for _, plistPath := range matches {
+		// Only cleanup appmon-related plists (com.focusd.appmon or com.apple.*.plist with appmon content)
+		// Check if it's our old static label or contains "appmon" in ProgramArguments
+		if filepath.Base(plistPath) == DefaultLaunchdLabel+".plist" || m.isPlistForAppmon(plistPath) {
+			_ = exec.Command("launchctl", "unload", plistPath).Run()
+			if removeErr := os.Remove(plistPath); removeErr != nil {
+				return removeErr
+			}
+		}
 	}
 	return nil
+}
+
+// isPlistForAppmon checks if a plist file is for appmon by reading its content.
+func (m *LaunchdManagerImpl) isPlistForAppmon(plistPath string) bool {
+	content, err := os.ReadFile(plistPath)
+	if err != nil {
+		return false
+	}
+	// Simple check: does the plist contain "appmon"?
+	return bytes.Contains(content, []byte("appmon"))
 }
 
 // GetPlistPath returns the plist file path.

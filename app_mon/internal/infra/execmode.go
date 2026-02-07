@@ -23,14 +23,30 @@ type ExecModeConfig struct {
 	BinaryPath string // Where the binary should be installed
 	PlistDir   string // Where the plist file goes
 	PlistPath  string // Full path to plist file
+	DataDir    string // Where encrypted registry and key live
 	IsRoot     bool   // Whether running as root
 	// Note: BackupDir is intentionally not included here.
 	// BackupManager uses its own obfuscated backup locations for security.
 }
 
 const (
-	launchdLabel = "com.focusd.appmon"
+	// DefaultLaunchdLabel is the fallback label used before a randomized one is generated.
+	DefaultLaunchdLabel = "com.focusd.appmon"
 )
+
+// launchdLabel is the active label. Defaults to the static name until overridden
+// by a randomized label from the encrypted registry on startup.
+var launchdLabel = DefaultLaunchdLabel
+
+// SetLaunchdLabel overrides the plist label with a randomized one from the secret store.
+func SetLaunchdLabel(label string) {
+	launchdLabel = label
+}
+
+// GetLaunchdLabel returns the currently active plist label.
+func GetLaunchdLabel() string {
+	return launchdLabel
+}
 
 // DetectExecMode determines the execution mode based on effective UID.
 func DetectExecMode() *ExecModeConfig {
@@ -43,6 +59,7 @@ func DetectExecMode() *ExecModeConfig {
 			BinaryPath: "/usr/local/bin/appmon",
 			PlistDir:   "/Library/LaunchDaemons",
 			PlistPath:  "/Library/LaunchDaemons/" + launchdLabel + ".plist",
+			DataDir:    "/var/lib/appmon",
 			IsRoot:     true,
 		}
 	}
@@ -52,6 +69,7 @@ func DetectExecMode() *ExecModeConfig {
 		BinaryPath: filepath.Join(home, ".local", "bin", "appmon"),
 		PlistDir:   filepath.Join(home, "Library", "LaunchAgents"),
 		PlistPath:  filepath.Join(home, "Library", "LaunchAgents", launchdLabel+".plist"),
+		DataDir:    filepath.Join(home, ".appmon"),
 		IsRoot:     false,
 	}
 }
@@ -72,19 +90,20 @@ func (m ExecMode) String() string {
 // Used when running with sudo but wanting to install in user mode (--mode user).
 // When running under sudo, uses SUDO_USER to get the invoking user's home directory.
 func GetUserModeConfig() *ExecModeConfig {
-	home := getRealUserHome()
+	home := GetRealUserHome()
 	return &ExecModeConfig{
 		Mode:       ExecModeUser,
 		BinaryPath: filepath.Join(home, ".local", "bin", "appmon"),
 		PlistDir:   filepath.Join(home, "Library", "LaunchAgents"),
 		PlistPath:  filepath.Join(home, "Library", "LaunchAgents", launchdLabel+".plist"),
+		DataDir:    filepath.Join(home, ".appmon"),
 		IsRoot:     os.Geteuid() == 0, // Still track actual root status for permission operations
 	}
 }
 
-// getRealUserHome returns the real user's home directory, even when running under sudo.
+// GetRealUserHome returns the real user's home directory, even when running under sudo.
 // Under sudo, os.UserHomeDir() returns /var/root, so we use SUDO_USER to find the real user.
-func getRealUserHome() string {
+func GetRealUserHome() string {
 	// Check if running under sudo
 	if sudoUser := os.Getenv("SUDO_USER"); sudoUser != "" {
 		if u, err := user.Lookup(sudoUser); err == nil {
