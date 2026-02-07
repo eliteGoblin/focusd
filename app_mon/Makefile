@@ -6,7 +6,7 @@ BUILD_DIR=./build
 GO_FILES=$(shell find . -name '*.go' -not -path './vendor/*')
 
 # Version info
-VERSION?=0.5.0
+VERSION?=0.5.1
 COMMIT=$(shell git rev-parse --short HEAD 2>/dev/null || echo "dev")
 BUILD_TIME=$(shell date -u '+%Y-%m-%d_%H:%M:%S')
 LDFLAGS=-ldflags "-X main.Version=$(VERSION) -X main.Commit=$(COMMIT) -X main.BuildTime=$(BUILD_TIME)"

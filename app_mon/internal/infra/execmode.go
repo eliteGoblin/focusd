@@ -90,7 +90,7 @@ func (m ExecMode) String() string {
 // Used when running with sudo but wanting to install in user mode (--mode user).
 // When running under sudo, uses SUDO_USER to get the invoking user's home directory.
 func GetUserModeConfig() *ExecModeConfig {
-	home := getRealUserHome()
+	home := GetRealUserHome()
 	return &ExecModeConfig{
 		Mode:       ExecModeUser,
 		BinaryPath: filepath.Join(home, ".local", "bin", "appmon"),
@@ -101,9 +101,9 @@ func GetUserModeConfig() *ExecModeConfig {
 	}
 }
 
-// getRealUserHome returns the real user's home directory, even when running under sudo.
+// GetRealUserHome returns the real user's home directory, even when running under sudo.
 // Under sudo, os.UserHomeDir() returns /var/root, so we use SUDO_USER to find the real user.
-func getRealUserHome() string {
+func GetRealUserHome() string {
 	// Check if running under sudo
 	if sudoUser := os.Getenv("SUDO_USER"); sudoUser != "" {
 		if u, err := user.Lookup(sudoUser); err == nil {

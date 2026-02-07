@@ -215,8 +215,17 @@ func runStart(cmd *cobra.Command, args []string) error {
 		fmt.Println("Running as user - will install as LaunchAgent (user-space)")
 	}
 
-	// Initialize components
+	// Initialize process manager early for cross-mode detection
 	pm := infra.NewProcessManager()
+
+	// Cross-mode daemon detection: check if daemons are running in the OTHER mode
+	// This handles the case where user runs "sudo appmon start" while user mode is running,
+	// or runs "appmon start" while system mode is running.
+	if err := detectAndCleanupOtherModeDaemons(execMode, pm); err != nil {
+		return fmt.Errorf("failed to cleanup other mode daemons: %w", err)
+	}
+
+	// Continue with normal initialization
 	registry, err := openEncryptedRegistry(execMode, pm)
 	if err != nil {
 		return fmt.Errorf("failed to initialize registry: %w", err)
@@ -988,4 +997,58 @@ func isNewerVersion(current, installed string) bool {
 		}
 	}
 	return false // Equal versions
+}
+
+// detectAndCleanupOtherModeDaemons checks if daemons are running in the OTHER mode
+// (user vs system) and cleans them up if found. This prevents two sets of daemons
+// running simultaneously when switching modes without explicit --mode flag.
+func detectAndCleanupOtherModeDaemons(execMode *infra.ExecModeConfig, pm domain.ProcessManager) error {
+	var otherModePlistPattern string
+	var otherModeDescription string
+
+	if execMode.Mode == infra.ExecModeSystem {
+		// Starting system mode - check for user mode plists
+		home := infra.GetRealUserHome()
+		otherModePlistPattern = filepath.Join(home, "Library/LaunchAgents/com.apple.*.plist")
+		otherModeDescription = "user"
+	} else {
+		// Starting user mode - check for system mode plists
+		otherModePlistPattern = "/Library/LaunchDaemons/com.apple.*.plist"
+		otherModeDescription = "system"
+	}
+
+	// Glob for plists matching the pattern
+	matches, err := filepath.Glob(otherModePlistPattern)
+	if err != nil {
+		return fmt.Errorf("failed to glob for other mode plists: %w", err)
+	}
+
+	if len(matches) == 0 {
+		// No other-mode plists found, proceed normally
+		return nil
+	}
+
+	// Found plists from other mode - kill all appmon daemons and cleanup
+	fmt.Printf("Detected %s mode daemons running, switching to %s mode...\n",
+		otherModeDescription, execMode.Mode)
+
+	// Kill all appmon processes except current CLI
+	pids, _ := pm.FindByName("appmon")
+	for _, pid := range pids {
+		if pid != pm.GetCurrentPID() {
+			_ = pm.Kill(pid)
+		}
+	}
+
+	// Unload and remove all found plists
+	for _, plistPath := range matches {
+		_ = exec.Command("launchctl", "unload", plistPath).Run()
+		_ = os.Remove(plistPath)
+	}
+
+	// Give processes time to die
+	time.Sleep(1 * time.Second)
+
+	fmt.Printf("Cleaned up %d %s mode plist(s)\n", len(matches), otherModeDescription)
+	return nil
 }
