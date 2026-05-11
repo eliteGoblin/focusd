@@ -159,6 +159,46 @@ func TestRelocator_CleanStale_MissingDirIsNotError(t *testing.T) {
 	}
 }
 
+func TestRelocateCopy_AtomicallyWritesExecutable(t *testing.T) {
+	// Hard link is preferred by Relocate; this exercises the copy fallback
+	// directly so cross-filesystem and link-failure paths stay covered.
+	srcDir := t.TempDir()
+	dstDir := t.TempDir()
+	src := writeFakeBinary(t, srcDir, "appmon", "binary-content")
+	dst := filepath.Join(dstDir, "com.apple.copy.target")
+
+	if err := relocateCopy(src, dst); err != nil {
+		t.Fatalf("relocateCopy: %v", err)
+	}
+
+	got, err := os.ReadFile(dst)
+	if err != nil {
+		t.Fatalf("read dst: %v", err)
+	}
+	if string(got) != "binary-content" {
+		t.Fatalf("content mismatch: got %q", string(got))
+	}
+
+	info, err := os.Stat(dst)
+	if err != nil {
+		t.Fatalf("stat dst: %v", err)
+	}
+	if info.Mode().Perm()&0100 == 0 {
+		t.Fatalf("dst should be executable, got %v", info.Mode())
+	}
+}
+
+func TestRelocateCopy_FailsOnMissingSource(t *testing.T) {
+	dstDir := t.TempDir()
+	dst := filepath.Join(dstDir, "target")
+	if err := relocateCopy(filepath.Join(t.TempDir(), "nope"), dst); err == nil {
+		t.Fatal("expected error on missing source, got nil")
+	}
+	if _, err := os.Stat(dst); !os.IsNotExist(err) {
+		t.Fatalf("dst should not exist after failed copy, stat err = %v", err)
+	}
+}
+
 func TestRelocator_FindProcessesUsingDir_SeesOurOwnExecution(t *testing.T) {
 	// `go test` itself runs from a binary outside our relocator dir, so a
 	// dir we just created should report no PIDs.
