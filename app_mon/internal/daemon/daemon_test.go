@@ -7,14 +7,15 @@ import (
 	"github.com/stretchr/testify/assert"
 
 	"github.com/eliteGoblin/focusd/app_mon/internal/domain"
-	"github.com/eliteGoblin/focusd/app_mon/internal/policy"
 )
 
 // TestDefaultWatcherConfig verifies default watcher configuration
 func TestDefaultWatcherConfig(t *testing.T) {
 	config := DefaultWatcherConfig()
 
-	assert.Equal(t, policy.DefaultScanInterval, config.EnforcementInterval)
+	// EnforcementInterval matches the LaunchAgent's StartInterval (5 min)
+	// so steam/dota2 get scanned at the same cadence as the cron respawn.
+	assert.Equal(t, 5*time.Minute, config.EnforcementInterval)
 	assert.Equal(t, 30*time.Second, config.HeartbeatInterval)
 	assert.Equal(t, 60*time.Second, config.PartnerCheckInterval)
 	assert.Equal(t, 60*time.Second, config.PlistCheckInterval)

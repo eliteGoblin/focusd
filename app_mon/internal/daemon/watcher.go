@@ -9,7 +9,7 @@ import (
 	"go.uber.org/zap"
 
 	"github.com/eliteGoblin/focusd/app_mon/internal/domain"
-	"github.com/eliteGoblin/focusd/app_mon/internal/policy"
+	"github.com/eliteGoblin/focusd/app_mon/internal/infra"
 )
 
 // BackupManager interface for binary self-protection
@@ -29,9 +29,13 @@ type WatcherConfig struct {
 }
 
 // DefaultWatcherConfig returns default watcher configuration.
+//
+// EnforcementInterval is 5 min: matches the LaunchAgent's StartInterval so
+// blocked apps (Steam, Dota 2) get scanned and killed/deleted within that
+// window whether the daemons stay healthy or get respawned by launchd.
 func DefaultWatcherConfig() WatcherConfig {
 	return WatcherConfig{
-		EnforcementInterval:  policy.DefaultScanInterval, // 10 minutes
+		EnforcementInterval:  5 * time.Minute,
 		HeartbeatInterval:    30 * time.Second,
 		PartnerCheckInterval: 60 * time.Second,
 		PlistCheckInterval:   60 * time.Second, // Check plist every minute
@@ -105,6 +109,15 @@ func (w *Watcher) Run(ctx context.Context) error {
 	// Check binary integrity on startup
 	w.ensureBinaryIntegrity()
 
+	// Sweep stale relocated daemon binaries on startup
+	w.sweepStaleRelocations()
+
+	// Reap any daemon processes running from our relocator dir that aren't
+	// in the registry. This is how we recover from update rollbacks,
+	// crashed parents, or racing spawns — the encrypted registry is the
+	// single source of truth for which daemons are "ours".
+	w.reapOrphans()
+
 	// Protect Freedom on startup
 	w.protectFreedom()
 
@@ -147,6 +160,8 @@ func (w *Watcher) Run(ctx context.Context) error {
 
 		case <-binaryCheckTicker.C:
 			w.ensureBinaryIntegrity()
+			w.sweepStaleRelocations()
+			w.reapOrphans()
 
 		case <-freedomCheckTicker.C:
 			w.protectFreedom()
@@ -199,21 +214,37 @@ func (w *Watcher) checkAndRestartGuardian(ctx context.Context) {
 // ensurePlistInstalled checks if LaunchAgent plist exists and restores if deleted.
 // Also checks if content is correct and updates if needed (idempotent).
 // This is self-protection: if someone deletes or modifies the plist, we restore it.
+//
+// The plist's ProgramArguments[0] points to a relocated "launch stub" with a
+// randomized basename so Login Items shows an obfuscated name rather than
+// "appmon". If the stub can't be (re)built, fall back to the main binary
+// path — auto-start still works, just without that layer of obfuscation.
 func (w *Watcher) ensurePlistInstalled() {
 	if w.launchAgent == nil {
 		return
 	}
 
-	// Get the expected binary path
-	var execPath string
+	// Resolve the canonical main-binary path.
+	var mainBinary string
 	if w.backupManager != nil {
-		execPath = w.backupManager.GetMainBinaryPath()
+		mainBinary = w.backupManager.GetMainBinaryPath()
 	} else {
 		var err error
-		execPath, err = os.Executable()
+		mainBinary, err = os.Executable()
 		if err != nil {
 			w.logger.Error("failed to get executable path", zap.Error(err))
 			return
+		}
+	}
+
+	// Prefer the launch stub so Login Items doesn't display "appmon".
+	execPath := mainBinary
+	if store, ok := w.registry.(domain.SecretStore); ok {
+		if stub, err := infra.EnsureLaunchStub(mainBinary, infra.GetRealUserHome(), store); err == nil {
+			execPath = stub
+		} else {
+			w.logger.Warn("failed to ensure launch stub, falling back to main binary",
+				zap.Error(err))
 		}
 	}
 
@@ -251,6 +282,67 @@ func (w *Watcher) ensureBinaryIntegrity() {
 
 	if restored {
 		w.logger.Info("binary was missing/corrupted, restored from backup")
+	}
+}
+
+// sweepStaleRelocations removes orphaned binary copies from the relocator
+// cache directory. Each daemon spawn creates a fresh copy/link, so repeated
+// crash-restart cycles accumulate stale files. The watcher's own exec path
+// and the launch stub are explicitly preserved; everything else older than
+// minAge is removed. Unlinking a binary while a process holds it open is
+// safe on macOS — the kernel keeps the inode alive until the process exits,
+// and peer-restart always spawns through a fresh relocation anyway.
+func (w *Watcher) sweepStaleRelocations() {
+	relocator := infra.NewRelocator(infra.GetRealUserHome())
+	keep := []string{}
+
+	if exe, err := os.Executable(); err == nil {
+		keep = append(keep, exe)
+	}
+	if store, ok := w.registry.(domain.SecretStore); ok {
+		if stub, err := store.GetSecret(infra.SecretKeyLaunchStub); err == nil && stub != "" {
+			keep = append(keep, stub)
+		}
+	}
+
+	if err := relocator.CleanStale(keep, 2*time.Minute); err != nil {
+		w.logger.Debug("relocation sweep failed", zap.Error(err))
+	}
+}
+
+// reapOrphans kills any process exec'd from our relocator directory whose
+// PID is not recorded in the encrypted registry as a live daemon. This is
+// the cleanup-on-source-of-truth mechanism: the registry decides who's
+// "ours", and anything else running from our cache dir is an orphan —
+// from a failed update rollback, a racing spawn, or an old session whose
+// parent died. Reaping orphans keeps killall-resistant peer-restart
+// converging on exactly one watcher and one guardian.
+//
+// Safe even at high frequency: we never kill our own PID or our partner.
+func (w *Watcher) reapOrphans() {
+	relocator := infra.NewRelocator(infra.GetRealUserHome())
+	pids, err := relocator.FindProcessesUsingDir()
+	if err != nil {
+		w.logger.Debug("orphan reap: ps failed", zap.Error(err))
+		return
+	}
+
+	keep := map[int]struct{}{os.Getpid(): {}}
+	if entry, err := w.registry.GetAll(); err == nil && entry != nil {
+		if entry.WatcherPID > 0 {
+			keep[entry.WatcherPID] = struct{}{}
+		}
+		if entry.GuardianPID > 0 {
+			keep[entry.GuardianPID] = struct{}{}
+		}
+	}
+
+	for _, pid := range pids {
+		if _, ok := keep[pid]; ok {
+			continue
+		}
+		w.logger.Info("reaping orphan daemon", zap.Int("pid", pid))
+		_ = w.processManager.Kill(pid)
 	}
 }
 

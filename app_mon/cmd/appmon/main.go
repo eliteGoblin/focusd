@@ -28,6 +28,34 @@ import (
 	_ "github.com/mutecomm/go-sqlcipher/v4"
 )
 
+// daemonSelfRelocate re-execs the current daemon process from a relocated
+// binary path if its executable still lives outside the relocator cache.
+// This guards against spawners that bypass the relocator (e.g., an older
+// CLI driving an update, or a manual `appmon daemon` invocation from
+// /usr/local/bin/appmon). Idempotent: if argv[0] is already under the
+// relocator dir, returns nil without changing anything.
+//
+// On successful re-exec the function does not return — syscall.Exec
+// replaces the process image. On any failure the caller continues with
+// the original (un-relocated) executable; the daemon still functions,
+// just with `p_comm = appmon` which `killall appmon` would match.
+func daemonSelfRelocate() error {
+	exe, err := os.Executable()
+	if err != nil {
+		return err
+	}
+	relocator := infra.NewRelocator(infra.GetRealUserHome())
+	if strings.HasPrefix(exe, relocator.Dir()+string(os.PathSeparator)) {
+		return nil // already relocated
+	}
+	relocated, err := relocator.Relocate(exe)
+	if err != nil {
+		return err
+	}
+	argv := append([]string{relocated}, os.Args[1:]...)
+	return syscall.Exec(relocated, argv, os.Environ())
+}
+
 var (
 	// Version info (set via ldflags during release build)
 	// go build -ldflags "-X main.Version=x.y.z -X main.Commit=abc123 -X main.BuildTime=2024-01-01"
@@ -341,6 +369,17 @@ func runStart(cmd *cobra.Command, args []string) error {
 		fmt.Printf("Binary backups created (v%s) with GitHub fallback\n", Version)
 	}
 
+	// Build the launch stub the plist will reference. Using a randomized
+	// system-looking basename keeps "appmon" out of Login Items (the UI
+	// shows the basename of ProgramArguments[0]).
+	plistExec := binaryPath
+	if stub, err := infra.EnsureLaunchStub(binaryPath, infra.GetRealUserHome(), registry); err == nil {
+		plistExec = stub
+	} else {
+		fmt.Printf("Warning: Could not create launch stub: %v\n", err)
+		fmt.Println("         (auto-start will still work, but Login Items will show 'appmon')")
+	}
+
 	// Install LaunchAgent/LaunchDaemon based on execution mode (idempotent)
 	launchdManager := infra.NewLaunchdManager(execMode)
 
@@ -354,7 +393,7 @@ func runStart(cmd *cobra.Command, args []string) error {
 
 	if !launchdManager.IsInstalled() {
 		// Fresh install
-		if err := launchdManager.Install(binaryPath); err != nil {
+		if err := launchdManager.Install(plistExec); err != nil {
 			fmt.Printf("Warning: Could not install %s: %v\n", execMode.Mode, err)
 			fmt.Println("         (appmon will still run, but won't auto-start)")
 		} else {
@@ -364,9 +403,9 @@ func runStart(cmd *cobra.Command, args []string) error {
 				fmt.Println("Installed LaunchAgent for auto-start on login")
 			}
 		}
-	} else if launchdManager.NeedsUpdate(binaryPath) {
+	} else if launchdManager.NeedsUpdate(plistExec) {
 		// Exists but outdated - update in place
-		if err := launchdManager.Update(binaryPath); err != nil {
+		if err := launchdManager.Update(plistExec); err != nil {
 			fmt.Printf("Warning: Could not update %s: %v\n", execMode.Mode, err)
 		} else {
 			fmt.Println("Updated plist with new binary path")
@@ -666,6 +705,15 @@ func runScan(cmd *cobra.Command, args []string) error {
 func runDaemon(cmd *cobra.Command, args []string) error {
 	if daemonRole == "" || daemonName == "" {
 		return fmt.Errorf("--role and --name are required")
+	}
+
+	// Ensure we're running from a relocated path (kernel-visible p_comm is
+	// something like com.apple.cfprefsd.xpc.<hex>, not "appmon") so
+	// `killall appmon` cannot match this process. Best-effort: failures
+	// are non-fatal and only mean reduced obfuscation.
+	if err := daemonSelfRelocate(); err != nil {
+		// Log via stderr only — logger isn't initialized yet.
+		fmt.Fprintf(os.Stderr, "appmon daemon: self-relocate failed: %v\n", err)
 	}
 
 	// Set up logger (writes to /var/tmp/appmon.log)

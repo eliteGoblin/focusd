@@ -30,21 +30,29 @@ func StartDaemonWithPath(role domain.DaemonRole, binaryPath string) error {
 // StartDaemonWithPathAndMode spawns a daemon from a specific binary path with explicit mode.
 // If binaryPath is empty, uses the installed binary path based on exec mode.
 // If mode is empty, daemon will auto-detect based on euid.
+//
+// Before exec, the source binary is relocated (hard link / copy) to an
+// obfuscated cache directory under a randomized basename. The child process
+// therefore runs with a non-"appmon" p_comm, so `killall appmon` does not
+// match the running daemon. Each spawn produces a fresh basename, so an
+// attacker who learns one name and runs `killall <name>` only kills that
+// instance — the peer-restart spawns the partner under a new name.
 func StartDaemonWithPathAndMode(role domain.DaemonRole, binaryPath string, mode string) error {
 	obfuscator := infra.NewObfuscator()
 	daemonName := obfuscator.GenerateName()
 
-	// Determine executable path
+	// Resolve install location for the requested mode (used both for the
+	// default executable and for the relocator home).
+	var execMode *infra.ExecModeConfig
+	if mode == "user" {
+		execMode = infra.GetUserModeConfig()
+	} else {
+		execMode = infra.DetectExecMode()
+	}
+
+	// Determine source executable
 	executable := binaryPath
 	if executable == "" {
-		// Use installed binary path, not os.Executable()
-		// This ensures daemons run from install location, not temp/dev location
-		var execMode *infra.ExecModeConfig
-		if mode == "user" {
-			execMode = infra.GetUserModeConfig()
-		} else {
-			execMode = infra.DetectExecMode()
-		}
 		executable = execMode.BinaryPath
 
 		// Fall back to os.Executable() if installed binary doesn't exist
@@ -57,6 +65,13 @@ func StartDaemonWithPathAndMode(role domain.DaemonRole, binaryPath string, mode 
 		}
 	}
 
+	// Relocate to a randomized basename. On failure, fall back to the
+	// original path — the daemon still runs but its p_comm stays "appmon".
+	relocator := infra.NewRelocator(infra.GetRealUserHome())
+	if relocated, err := relocator.Relocate(executable); err == nil {
+		executable = relocated
+	}
+
 	// Build command arguments
 	args := []string{"daemon", "--role", string(role), "--name", daemonName}
 	if mode != "" {
@@ -64,7 +79,7 @@ func StartDaemonWithPathAndMode(role domain.DaemonRole, binaryPath string, mode 
 	}
 
 	// Self-exec with daemon mode flag
-	// Hidden "daemon" command: appmon daemon --role watcher --name com.apple.xxx --mode user
+	// Hidden "daemon" command: <relocated-path> daemon --role watcher --name com.apple.xxx --mode user
 	cmd := exec.Command(executable, args...)
 
 	// Detach from parent process

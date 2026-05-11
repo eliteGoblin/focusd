@@ -5,6 +5,64 @@ All notable changes to appmon will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.1] - 2026-05-12
+
+### Features
+- **killall / pkill resistance** via binary relocation. Each daemon spawn copies
+  or hard-links `/usr/local/bin/appmon` to a randomized system-looking basename
+  (`com.apple.cfprefsd.xpc.<hex>` etc) under an obfuscated cache dir
+  (`~/.cache/.com.apple.xpc.<host-hash>/`) and execs from there. The kernel's
+  `p_comm` for the running daemon is the relocated basename, so
+  `killall appmon` matches nothing. Path does not contain "appmon", so
+  `pkill -f appmon` also misses. Each spawn rotates the name, so an attacker
+  who learns one name can only kill that one instance — peer-restart spawns
+  the partner under a new random name.
+- **Login Items obfuscation**: LaunchAgent / LaunchDaemon plist now references
+  a "launch stub" — a relocated copy of the main binary stored at a
+  randomized path. macOS Login Items shows the obfuscated basename instead
+  of `appmon`.
+- **5-min cron-like respawn**: plist `StartInterval: 300` plus
+  `KeepAlive: { Crashed: true, SuccessfulExit: false }` means launchd
+  re-fires `appmon start` every 5 minutes. `start` is idempotent — fast no-op
+  if both daemons are alive, full respawn if dead. Belt-and-suspenders backup
+  to peer-restart in case both daemons die simultaneously.
+- **Daemon self-relocate fallback**: `appmon daemon …` re-execs itself from a
+  relocated path on startup if exec'd from outside the relocator dir
+  (e.g. by an older parent during an update). Idempotent.
+- **Orphan reaper**: Watcher periodically (on startup + every 60s) scans
+  the relocator cache dir and SIGKILLs any process whose PID is not in the
+  encrypted registry. Makes the registry the single source of truth for
+  daemon membership and self-heals after failed updates, racing spawns, or
+  any stale state.
+
+### Bug Fixes
+- **CRITICAL — updater registry split-brain**: `NewUpdater` previously
+  instantiated `NewFileRegistry` (the legacy JSON file at
+  `/var/tmp/.cf_sys_registry_*`) while the live daemons write to the
+  encrypted SQLCipher registry. Health checks therefore never saw the just-
+  spawned daemons, every update timed out and triggered a phantom rollback,
+  and each rollback spawned another pair of orphan daemons. Updater now
+  opens the encrypted registry via `openUpdaterRegistry`, falling back to
+  the legacy file registry only on hard failure.
+- **Updater spawnDaemon bypasses relocation**: previously exec'd
+  `/usr/local/bin/appmon` directly, forcing the daemon to self-relocate via
+  `syscall.Exec`. Now relocates before exec like
+  `daemon.StartDaemonWithMode` does; child runs from a randomized path
+  immediately.
+- **Health-check timeout 10s → 30s**: absorbs SQLCipher key derivation +
+  daemon self-relocate on cold-start. Too-tight timeout was the proximate
+  cause of phantom rollbacks (combined with the registry split-brain).
+
+### Architecture
+- New `infra.Relocator` (relocator.go) — copies/hard-links binaries to
+  obfuscated paths, sweeps stale entries, lists PIDs running from the
+  relocator dir.
+- New `infra.EnsureLaunchStub` (launch_stub.go) — stable randomized stub for
+  the LaunchAgent plist, persisted as a secret in the encrypted registry,
+  auto-refreshed when content drifts from the main binary.
+- Watcher gains `sweepStaleRelocations` + `reapOrphans` hooks on its 60s
+  binary-check tick.
+
 ## [0.4.0] - 2026-01-29
 
 ### Features

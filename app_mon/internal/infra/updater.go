@@ -15,8 +15,12 @@ import (
 )
 
 const (
-	// DefaultHealthCheckTimeout is how long to wait for daemons after update
-	DefaultHealthCheckTimeout = 10 * time.Second
+	// DefaultHealthCheckTimeout is how long to wait for daemons after update.
+	// Generous to absorb SQLCipher key derivation and the daemon
+	// self-relocate re-exec on slow first runs; if it's too tight the
+	// updater triggers a rollback that itself spawns daemons, leaving
+	// orphans behind.
+	DefaultHealthCheckTimeout = 30 * time.Second
 	// DaemonCheckInterval is how often to check daemon status
 	DaemonCheckInterval = 500 * time.Millisecond
 )
@@ -41,20 +45,57 @@ type Updater struct {
 	logger         *zap.Logger
 }
 
-// NewUpdater creates a new Updater instance
+// NewUpdater creates a new Updater instance using the encrypted SQLCipher
+// registry — the same registry the live daemons read and write. Using a
+// different registry here (the old NewFileRegistry path) silently desyncs
+// the updater from the daemons: health checks would never see the just-
+// spawned daemons, every update would time out and roll back, and each
+// rollback would spawn another pair of orphan daemons.
+//
+// On failure to open the encrypted registry (e.g., missing data dir, key
+// permission errors), falls back to the legacy file registry so the
+// command at least returns a real error instead of crashing — but the
+// caller almost certainly has bigger problems to address first.
 func NewUpdater(currentVersion string, logger *zap.Logger) *Updater {
 	execMode := DetectExecMode()
 	pm := NewProcessManager()
 
+	var registry domain.DaemonRegistry = openUpdaterRegistry(execMode, pm, logger)
+
 	return &Updater{
 		downloader:     NewGitHubDownloader(),
 		backupManager:  NewBackupManager(),
-		registry:       NewFileRegistry(pm),
+		registry:       registry,
 		pm:             pm,
 		execMode:       execMode,
 		currentVersion: currentVersion,
 		logger:         logger,
 	}
+}
+
+// openUpdaterRegistry opens the encrypted registry for the given mode, or
+// falls back to the legacy file registry on any failure. The encrypted
+// registry is the source of truth — keep this aligned with the path used
+// in cmd/appmon (runStart's openEncryptedRegistry helper).
+func openUpdaterRegistry(execMode *ExecModeConfig, pm domain.ProcessManager, logger *zap.Logger) domain.DaemonRegistry {
+	keyProvider := NewFileKeyProvider(execMode.DataDir)
+	key, err := EnsureKey(keyProvider)
+	if err != nil {
+		if logger != nil {
+			logger.Warn("updater: encrypted registry unavailable, using file registry",
+				zap.Error(err))
+		}
+		return NewFileRegistry(pm)
+	}
+	enc, err := NewEncryptedRegistry(execMode.DataDir, key, pm)
+	if err != nil {
+		if logger != nil {
+			logger.Warn("updater: encrypted registry unavailable, using file registry",
+				zap.Error(err))
+		}
+		return NewFileRegistry(pm)
+	}
+	return enc
 }
 
 // NewUpdaterWithDeps creates an Updater with injected dependencies (for testing)
@@ -440,17 +481,34 @@ func (u *Updater) signalProcess(pid int, sig syscall.Signal) error {
 	return proc.Signal(sig)
 }
 
-// spawnDaemon starts a daemon process
+// spawnDaemon starts a daemon process. The source binary is relocated to a
+// randomized basename under the relocator cache before exec, so the spawned
+// process's p_comm does not contain "appmon" — `killall appmon` cannot
+// match it. This mirrors what daemon.StartDaemonWithMode does in the
+// non-updater spawn path; both paths must stay aligned, otherwise the
+// updater would leave behind processes the watcher will reap as orphans.
 func (u *Updater) spawnDaemon(binaryPath, role string) error {
 	obfuscator := NewObfuscator()
 	daemonName := obfuscator.GenerateName()
 
-	// Use os/exec to spawn detached process
-	cmd := &execCmd{
-		path: binaryPath,
-		args: []string{binaryPath, "daemon", "--role", role, "--name", daemonName},
+	execPath := binaryPath
+	relocator := NewRelocator(GetRealUserHome())
+	if relocated, err := relocator.Relocate(binaryPath); err == nil {
+		execPath = relocated
+	} else if u.logger != nil {
+		u.logger.Warn("spawnDaemon: relocation failed, using install path",
+			zap.Error(err))
 	}
 
+	args := []string{execPath, "daemon", "--role", role, "--name", daemonName}
+	if u.execMode != nil && u.execMode.Mode != "" {
+		args = append(args, "--mode", string(u.execMode.Mode))
+	}
+
+	cmd := &execCmd{
+		path: execPath,
+		args: args,
+	}
 	return cmd.start()
 }
 

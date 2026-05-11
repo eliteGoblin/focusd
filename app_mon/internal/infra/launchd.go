@@ -11,7 +11,19 @@ import (
 	"github.com/eliteGoblin/focusd/app_mon/internal/domain"
 )
 
-// LaunchAgent plist template (runs as user)
+// LaunchAgent plist template (runs as user).
+//
+// Cron-like respawn:
+//   - RunAtLoad: fire on user login
+//   - StartInterval: fire every 300s, regardless of process health
+//   - KeepAlive.Crashed: restart on non-zero exit / signal
+//   - KeepAlive.SuccessfulExit=false: do NOT loop after a clean exit (the
+//     `start` command exits cleanly when daemons are healthy)
+//
+// `appmon start` is idempotent — it returns early when both daemons are
+// alive, and respawns them otherwise. So the 5-min interval acts as a
+// belt-and-suspenders backup to the watcher↔guardian peer-restart loop:
+// even if both daemons die at once, the next tick brings everything back.
 const launchAgentTemplate = `<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
@@ -28,10 +40,15 @@ const launchAgentTemplate = `<?xml version="1.0" encoding="UTF-8"?>
     <key>RunAtLoad</key>
     <true/>
 
+    <key>StartInterval</key>
+    <integer>300</integer>
+
     <key>KeepAlive</key>
     <dict>
         <key>Crashed</key>
         <true/>
+        <key>SuccessfulExit</key>
+        <false/>
     </dict>
 
     <key>StandardOutPath</key>
@@ -48,7 +65,8 @@ const launchAgentTemplate = `<?xml version="1.0" encoding="UTF-8"?>
 </dict>
 </plist>`
 
-// LaunchDaemon plist template (runs as root)
+// LaunchDaemon plist template (runs as root). Same cron-like semantics as
+// the user-mode LaunchAgent above.
 const launchDaemonTemplate = `<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
@@ -65,8 +83,16 @@ const launchDaemonTemplate = `<?xml version="1.0" encoding="UTF-8"?>
     <key>RunAtLoad</key>
     <true/>
 
+    <key>StartInterval</key>
+    <integer>300</integer>
+
     <key>KeepAlive</key>
-    <true/>
+    <dict>
+        <key>Crashed</key>
+        <true/>
+        <key>SuccessfulExit</key>
+        <false/>
+    </dict>
 
     <key>StandardOutPath</key>
     <string>{{.LogPath}}</string>
