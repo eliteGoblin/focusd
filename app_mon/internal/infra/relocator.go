@@ -115,8 +115,9 @@ func (r *Relocator) FindProcessesUsingDir() ([]int, error) {
 	}
 	prefix := r.dir + string(os.PathSeparator)
 
-	var pids []int
-	for _, line := range strings.Split(string(out), "\n") {
+	lines := strings.Split(string(out), "\n")
+	pids := make([]int, 0, len(lines))
+	for _, line := range lines {
 		line = strings.TrimLeft(line, " \t")
 		if line == "" {
 			continue
