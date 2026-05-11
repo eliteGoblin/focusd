@@ -201,10 +201,14 @@ func TestCreateRollbackBackup(t *testing.T) {
 	assert.Equal(t, content, backupContent)
 }
 
-// TestUpdater_Constants verifies timeout constants are reasonable
+// TestUpdater_Constants verifies timeout constants are reasonable.
+// HealthCheckTimeout was widened from 10s → 30s after we observed
+// SQLCipher key derivation + the daemon self-relocate re-exec exceeding
+// 10s on first-run cold cache, which triggered a phantom rollback that
+// itself spawned daemons and left orphans behind.
 func TestUpdater_Constants(t *testing.T) {
-	assert.Equal(t, 10*time.Second, DefaultHealthCheckTimeout,
-		"health check timeout should be 10 seconds")
+	assert.Equal(t, 30*time.Second, DefaultHealthCheckTimeout,
+		"health check timeout should be 30 seconds")
 	assert.Equal(t, 500*time.Millisecond, DaemonCheckInterval,
 		"daemon check interval should be 500ms")
 }

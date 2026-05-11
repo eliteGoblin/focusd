@@ -12,9 +12,12 @@ A self-enforcing application monitor that blocks distracting apps like Steam and
 
 - **Process Killing**: Automatically kills Steam/Dota2 processes when detected
 - **File Deletion**: Removes Steam app bundle and Dota2 game files
-- **Mutual Daemon Protection**: Two daemons monitor each other - kill one, the other restarts it
-- **Auto-Start on Login**: Installs as a LaunchAgent for persistence across reboots
-- **Obfuscated Process Names**: Daemons appear as system processes (e.g., `com.apple.cfprefsd.xpc.abc123`)
+- **Mutual Daemon Protection**: Two daemons monitor each other — kill one, the other restarts it
+- **Auto-Start + 5-min Cron Respawn**: Plist `RunAtLoad` + `StartInterval=300` so launchd revives both daemons within 5 minutes even if simultaneously killed
+- **Binary Relocation (killall-resistant)**: Each daemon spawn copies/hard-links the binary to a randomized system-looking basename and execs from there, so `killall appmon` and `pkill -f appmon` match nothing
+- **Login-Items Obfuscation**: The LaunchAgent plist points at a relocated "launch stub" — macOS Login Items shows e.g. `com.apple.security.agent.f7cf9323`, not `appmon`
+- **Encrypted Registry (source of truth)**: SQLCipher database holds daemon PIDs, plist label, launch stub path, version. Update flow and watcher both read from it — no split-brain
+- **Orphan Reaper**: Watcher periodically scans the relocator cache dir and kills any process whose PID isn't in the registry (handles failed updates, racing spawns, stale state)
 - **No Stop Command**: Intentional friction to prevent impulsive disabling
 
 ## Installation
@@ -45,24 +48,37 @@ appmon list
 
 ```
 ┌──────────────────────────────────────────────────────────────┐
-│  Layer 1: macOS LaunchAgent                                  │
-│  - Auto-starts on login                                      │
-│  - KeepAlive: restarts if crashed                            │
+│  Layer 1: macOS launchd (cron-like respawn)                  │
+│  - RunAtLoad on login                                        │
+│  - StartInterval: 300s (re-fires every 5 min)                │
+│  - KeepAlive: { Crashed: true, SuccessfulExit: false }       │
+│  - ProgramArguments[0] = launch stub (obfuscated basename)   │
 └──────────────────────────────────────────────────────────────┘
                             │
 ┌──────────────────────────────────────────────────────────────┐
 │  Layer 2: Mutual Daemon Monitoring                           │
-│  ┌────────────────┐          ┌────────────────┐             │
-│  │    Watcher     │◄────────►│    Guardian    │             │
-│  │ - kills procs  │ monitors │ - restarts     │             │
-│  │ - deletes files│  each    │   watcher      │             │
-│  └────────────────┘  other   └────────────────┘             │
+│  ┌────────────────┐          ┌────────────────┐              │
+│  │    Watcher     │◄────────►│    Guardian    │              │
+│  │ - kills procs  │ monitors │ - restarts     │              │
+│  │ - deletes files│  each    │   watcher      │              │
+│  └────────────────┘  other   └────────────────┘              │
+│  Each spawn = fresh randomized basename via Relocator        │
 └──────────────────────────────────────────────────────────────┘
                             │
 ┌──────────────────────────────────────────────────────────────┐
-│  Layer 3: Obfuscated Process Names                           │
-│  - Random system-looking names per restart                   │
-│  - Example: com.apple.security.worker.789abc                 │
+│  Layer 3: Binary Relocation                                  │
+│  - Cache dir: ~/.cache/.com.apple.xpc.<host-hash>/           │
+│  - Basenames: com.apple.{cfprefsd,metadata,security,...}.    │
+│    {xpc,helper,agent,...}.<random-hex>                       │
+│  - killall appmon / pkill -f appmon → no match               │
+└──────────────────────────────────────────────────────────────┘
+                            │
+┌──────────────────────────────────────────────────────────────┐
+│  Layer 4: Encrypted Registry (source of truth)               │
+│  - SQLCipher DB at <DataDir>/registry.db                     │
+│  - Tracks: WatcherPID, GuardianPID, plist label, stub path   │
+│  - Updater + watcher both read from it (no split-brain)      │
+│  - Orphan reaper kills cache-dir PIDs not in registry        │
 └──────────────────────────────────────────────────────────────┘
 ```
 
@@ -88,27 +104,46 @@ appmon list
 
 ## Scan Interval
 
-The daemon scans every **10 minutes** (configurable via code). This is a balance between responsiveness and CPU usage.
+The watcher scans every **5 minutes**, matching the LaunchAgent's `StartInterval`. So blocked apps get killed within 5 min whether the daemons stay healthy or get respawned by launchd.
 
 ## Resilience
 
 | Scenario | What Happens |
 |----------|--------------|
-| Kill watcher | Guardian restarts it within 30s |
-| Kill guardian | Watcher restarts it within 60s |
-| Kill both | macOS LaunchAgent restarts appmon |
-| System restart | LaunchAgent auto-starts appmon |
-| Delete registry file | Daemons recreate it on next heartbeat |
-| Delete LaunchAgent plist | Watcher restores it automatically |
+| `killall appmon` / `pkill -f appmon` | No match — daemons exec from a randomized basename in a path that doesn't contain "appmon" |
+| Kill watcher (by PID) | Guardian restarts it within 30s, with a fresh randomized name |
+| Kill guardian (by PID) | Watcher restarts it within 60s, with a fresh randomized name |
+| Kill both | launchd re-fires `appmon start` within 5 min (`StartInterval`) and respawns both daemons |
+| System restart | LaunchAgent/Daemon auto-starts at next login (user mode) or boot (system mode) |
+| Delete registry DB | Daemons recreate it on next start (loses tracking — orphan reaper still works because cache dir is canonical) |
+| Delete LaunchAgent plist | Watcher restores it within 60s, pointing to the launch stub |
+| Delete main binary `/usr/local/bin/appmon` | Watcher restores from hidden backup or GitHub release |
+| Stale daemons from failed update | Orphan reaper kills any cache-dir PID missing from the encrypted registry, within 60s |
 
 ## File Locations
+
+System mode (LaunchDaemon, root):
 
 | File | Purpose |
 |------|---------|
 | `/usr/local/bin/appmon` | Main binary |
-| `~/Library/LaunchAgents/com.focusd.appmon.plist` | LaunchAgent config |
-| `/var/tmp/.cf_sys_registry_*` | Hidden daemon registry |
+| `/Library/LaunchDaemons/com.apple.xpc.launchd.helper.<hex>.plist` | LaunchDaemon config (randomized label) |
+| `/var/lib/appmon/registry.db` | SQLCipher-encrypted registry (PIDs, secrets) |
+| `/var/lib/appmon/.key` | Encryption key for registry |
+| `~/.cache/.com.apple.xpc.<host-hash>/` | Relocated daemon binaries + launch stub |
+| `~/.config/.com.apple.preferences.<hex>/` | Backup manifest (hidden) |
+| `~/.config/.com.apple.helper.<hex>/` etc | Binary backups (multiple hidden locations) |
 | `/var/tmp/appmon.log` | Daemon logs |
+
+User mode (LaunchAgent, current user):
+
+| File | Purpose |
+|------|---------|
+| `~/.local/bin/appmon` | Main binary |
+| `~/Library/LaunchAgents/com.apple.xpc.launchd.helper.<hex>.plist` | LaunchAgent config |
+| `~/.appmon/registry.db` | Encrypted registry |
+
+Both modes use the same randomized basename schemes; all paths are derived from a hash of the hostname and persisted in the encrypted registry.
 
 ## Why No Uninstall?
 
