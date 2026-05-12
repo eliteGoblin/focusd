@@ -284,7 +284,7 @@ func TestParseLiveDaemons_FindsRelocatedAndLegacy(t *testing.T) {
 
 func TestParseLiveDaemons_IgnoresCLIAndUnrelatedProcesses(t *testing.T) {
 	input := strings.Join([]string{
-		"  200 /usr/local/bin/appmon status",       // CLI, no daemon --role
+		"  200 /usr/local/bin/appmon status", // CLI, no daemon --role
 		"  201 /usr/local/bin/appmon start --mode system",
 		"  300 /usr/bin/some-unrelated process",
 		"  400 /usr/local/bin/git status",
@@ -301,8 +301,8 @@ func TestExtractRoleArg(t *testing.T) {
 	}{
 		{"/x daemon --role watcher --name y", "watcher"},
 		{"/x daemon --role guardian --mode system", "guardian"},
-		{"/x daemon --role", ""},        // no value
-		{"/x daemon --name y", ""},      // no --role
+		{"/x daemon --role", ""},   // no value
+		{"/x daemon --name y", ""}, // no --role
 		{"/x daemon --role w-1 --mode system", "w-1"},
 	}
 	for _, tc := range cases {
