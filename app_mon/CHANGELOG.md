@@ -5,6 +5,26 @@ All notable changes to appmon will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.1] - 2026-05-12
+
+### Bug Fixes
+- **CRITICAL — stopped killing Microsoft Teams.** `ProcessManagerImpl.
+  FindByName` previously substring-matched against process basenames,
+  so the policy pattern `"Steam"` (lowercased `steam`) matched Microsoft
+  Teams' main binary `MSTeams` (lowercased `msteams` contains `steam`).
+  Combined with the v0.6.0 10-second quick-kill tick, this killed Teams
+  every 10 seconds — observed killing both `MSTeams` and Teams audio
+  driver subprocesses, interrupting work calls. `FindByName` is now
+  exact case-insensitive match only.
+
+### Architecture
+- New `processNameMatches` pure-function helper in `infra/process.go`
+  so the v0.6.0 substring-bug regression has an explicit test guard.
+- Steam policy `ProcessPatterns` expanded to enumerate every known
+  Steam runtime basename (`Steam Helper (GPU)`, `Steam Helper (Renderer)`,
+  `Steam Helper (Plugin)`, `steamservice`) since substring fallback is
+  gone. Dropped `steamapps` — it's a directory name, not a process.
+
 ## [0.6.0] - 2026-05-12
 
 ### Features

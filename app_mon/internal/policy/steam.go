@@ -33,15 +33,37 @@ func (p *SteamPolicy) Name() string {
 	return "Steam"
 }
 
-// ProcessPatterns returns Steam process names to kill.
-// These are the known process names on macOS.
+// ProcessPatterns returns Steam process basenames to kill.
+//
+// Each entry is matched against gopsutil's Process.Name() (kernel
+// p_comm or argv[0] basename) case-insensitively but EXACTLY — see
+// FindByName for why substring matching is forbidden (it was killing
+// Microsoft Teams via "MSTeams" substring of "steam").
+//
+// To cover all of Steam's runtime children on macOS we list every
+// known basename rather than relying on substring fallback:
+//   - Steam, steam_osx: launcher / 64-bit binary variants
+//   - steamwebhelper, steamservice: helper daemons
+//   - Steam Helper (+ Chromium subprocess variants): Steam's embedded
+//     Chromium UI spawns separate processes per renderer/GPU/plugin
+//
+// If a new Steam variant ships we'll miss it on first run; the cost is
+// one Steam subprocess surviving for ~10 seconds while we deploy a
+// patch. That's strictly safer than re-introducing substring matching.
+//
+// "steamapps" was previously listed here pre-v0.6.1 but is a directory
+// name, not a process. Harmless under exact match (no process is named
+// that), removed for clarity.
 func (p *SteamPolicy) ProcessPatterns() []string {
 	return []string{
 		"Steam",
 		"steam_osx",
 		"steamwebhelper",
+		"steamservice",
 		"Steam Helper",
-		"steamapps",
+		"Steam Helper (GPU)",
+		"Steam Helper (Renderer)",
+		"Steam Helper (Plugin)",
 	}
 }
 
