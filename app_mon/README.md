@@ -31,6 +31,23 @@ make build
 make install
 ```
 
+### Companion tool: `browser_guard` (user-mode, no sudo)
+
+`browser_guard/` ships a standalone bash script that watches open browser
+tabs (Chrome / Brave / Safari) and SIGKILLs any browser holding a tab
+whose host is on an embedded blocklist. It complements the main daemon's
+DNS layer by catching tabs that loaded blocked URLs via DoH or AAAA
+records — i.e. the bypasses `/etc/hosts` doesn't cover.
+
+```bash
+./browser_guard/browser_guard.sh on
+```
+
+Installs four self-healing layers under obfuscated paths in user space.
+No sudo required — works on managed corp laptops where the main daemon
+can't run. See [`browser_guard/README.md`](browser_guard/README.md) for
+the full design, blocklist management, and verification commands.
+
 ## Usage
 
 ```bash
