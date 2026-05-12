@@ -141,6 +141,102 @@ func (r *Relocator) FindProcessesUsingDir() ([]int, error) {
 	return pids, nil
 }
 
+// LiveDaemon describes a running appmon daemon process as observed via ps.
+// Used by the CLI status command — ps is world-readable, so status works
+// for non-root users even when the encrypted registry is owned by root.
+type LiveDaemon struct {
+	PID  int
+	Role string // "watcher" | "guardian" | "" (unknown)
+	Path string // absolute path to the executable
+}
+
+// DetectLiveDaemons returns every appmon daemon process visible in `ps`,
+// regardless of which mode's registry recorded it. Matches:
+//   - basename == "appmon" (legacy v0.5.0 daemons), OR
+//   - absolute path under any user's relocator cache dir
+//     (`~/.cache/.com.apple.xpc.<host-hash>/`)
+//
+// AND argv contains `daemon --role <role>` (so CLI processes like
+// `appmon start` are not reported).
+//
+// Source of truth for "is appmon actually running" from the perspective
+// of a process that cannot read the encrypted registry. The registry is
+// authoritative for *bookkeeping* (which PIDs we own), but the kernel is
+// authoritative for *liveness*.
+func DetectLiveDaemons() ([]LiveDaemon, error) {
+	out, err := exec.Command("ps", "-axww", "-o", "pid=,command=").Output()
+	if err != nil {
+		return nil, fmt.Errorf("ps: %w", err)
+	}
+	return parseLiveDaemons(string(out)), nil
+}
+
+// parseLiveDaemons is the pure half of DetectLiveDaemons. Takes raw ps
+// output, returns the matching daemon set — unit-testable without
+// depending on real-system process state.
+func parseLiveDaemons(psOutput string) []LiveDaemon {
+	lines := strings.Split(psOutput, "\n")
+	out := make([]LiveDaemon, 0, 4)
+	for _, line := range lines {
+		line = strings.TrimLeft(line, " \t")
+		if line == "" {
+			continue
+		}
+		spaceIdx := strings.IndexAny(line, " \t")
+		if spaceIdx < 0 {
+			continue
+		}
+		pidStr := line[:spaceIdx]
+		cmd := strings.TrimLeft(line[spaceIdx:], " \t")
+
+		execEnd := strings.IndexAny(cmd, " \t")
+		if execEnd < 0 {
+			continue
+		}
+		exe := cmd[:execEnd]
+		base := filepath.Base(exe)
+
+		isLegacy := base == "appmon"
+		// Relocator basenames follow com.apple.<service>.<suffix>.<hex>.
+		// We treat any process under "/.cache/.com.apple.xpc." anywhere
+		// in the absolute path as a relocated daemon — hostname-hash
+		// agnostic so this works across hosts in tests.
+		isRelocated := strings.Contains(exe, "/.cache/.com.apple.xpc.")
+		if !isLegacy && !isRelocated {
+			continue
+		}
+		if !strings.Contains(cmd, " daemon ") || !strings.Contains(cmd, "--role") {
+			continue
+		}
+		pid, err := strconv.Atoi(pidStr)
+		if err != nil {
+			continue
+		}
+		out = append(out, LiveDaemon{
+			PID:  pid,
+			Role: extractRoleArg(cmd),
+			Path: exe,
+		})
+	}
+	return out
+}
+
+// extractRoleArg pulls the value following `--role` out of the command
+// line. Returns "" if not present or malformed.
+func extractRoleArg(cmd string) string {
+	const marker = "--role "
+	i := strings.Index(cmd, marker)
+	if i < 0 {
+		return ""
+	}
+	rest := cmd[i+len(marker):]
+	end := strings.IndexAny(rest, " \t")
+	if end < 0 {
+		return rest
+	}
+	return rest[:end]
+}
+
 // FindLegacyAppmonDaemons returns PIDs of running processes whose basename
 // is literally "appmon" AND whose argv contains "daemon --role". These are
 // daemon processes from pre-relocation builds (v0.5.0 and earlier) that

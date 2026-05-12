@@ -122,6 +122,8 @@ The watcher scans every **5 minutes**, matching the LaunchAgent's `StartInterval
 | Daemon deadlocked but PID alive | `IsPartnerAlive` requires fresh heartbeat (≤2 min) — peer-restart fires automatically |
 | Legacy `appmon`-named daemon from old version | Both watcher's 60s tick and `appmon start` pre-flight kill these via the legacy-daemon scanner |
 | Suspect broken state, want to reset cleanly | `sudo appmon start` does unconditional pre-flight cleanup, then respawns. Idempotent — no-op when state is clean. |
+| Status command lies about RUNNING | After v0.5.3 `appmon status` (no sudo) reads `ps` directly; registry is enrichment, not the source of truth. Mode mismatch is shown explicitly. |
+| Stale other-mode binary / registry from old install | `appmon start` auto-purges them (removes other-mode binary, plist, and data dir). No manual cleanup needed. |
 
 ## File Locations
 

@@ -262,6 +262,57 @@ func TestParseLegacyAppmonDaemons_ExcludesRelocatedDaemons(t *testing.T) {
 	}
 }
 
+func TestParseLiveDaemons_FindsRelocatedAndLegacy(t *testing.T) {
+	input := strings.Join([]string{
+		"  100 /usr/local/bin/appmon daemon --role guardian --name com.apple.x --mode system",
+		"  101 /Users/frank.sun/.cache/.com.apple.xpc.6ff7c1a8/com.apple.cfprefsd.xpc.abc daemon --role watcher --name com.apple.y --mode system",
+	}, "\n")
+	live := parseLiveDaemons(input)
+	if len(live) != 2 {
+		t.Fatalf("expected 2 daemons, got %d: %+v", len(live), live)
+	}
+	if live[0].Role != "guardian" || live[0].PID != 100 {
+		t.Fatalf("first daemon mismatched: %+v", live[0])
+	}
+	if live[1].Role != "watcher" || live[1].PID != 101 {
+		t.Fatalf("second daemon mismatched: %+v", live[1])
+	}
+	if filepath.Base(live[1].Path) != "com.apple.cfprefsd.xpc.abc" {
+		t.Fatalf("relocated path basename: got %q", filepath.Base(live[1].Path))
+	}
+}
+
+func TestParseLiveDaemons_IgnoresCLIAndUnrelatedProcesses(t *testing.T) {
+	input := strings.Join([]string{
+		"  200 /usr/local/bin/appmon status", // CLI, no daemon --role
+		"  201 /usr/local/bin/appmon start --mode system",
+		"  300 /usr/bin/some-unrelated process",
+		"  400 /usr/local/bin/git status",
+	}, "\n")
+	live := parseLiveDaemons(input)
+	if len(live) != 0 {
+		t.Fatalf("expected no daemons, got %+v", live)
+	}
+}
+
+func TestExtractRoleArg(t *testing.T) {
+	cases := []struct {
+		in, want string
+	}{
+		{"/x daemon --role watcher --name y", "watcher"},
+		{"/x daemon --role guardian --mode system", "guardian"},
+		{"/x daemon --role", ""},   // no value
+		{"/x daemon --name y", ""}, // no --role
+		{"/x daemon --role w-1 --mode system", "w-1"},
+	}
+	for _, tc := range cases {
+		got := extractRoleArg(tc.in)
+		if got != tc.want {
+			t.Errorf("extractRoleArg(%q) = %q, want %q", tc.in, got, tc.want)
+		}
+	}
+}
+
 func TestParseLegacyAppmonDaemons_ExcludesUnrelatedProcesses(t *testing.T) {
 	input := strings.Join([]string{
 		"  200 /usr/sbin/cupsd",

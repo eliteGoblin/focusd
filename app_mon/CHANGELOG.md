@@ -5,6 +5,43 @@ All notable changes to appmon will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.3] - 2026-05-12
+
+### Features
+- **`appmon status` works without sudo now.** Liveness comes from `ps`
+  (world-readable) via the new `infra.DetectLiveDaemons`. The encrypted
+  registry is still queried for enrichment (heartbeat, daemon version)
+  but is no longer required for the "is it running?" answer. Closes the
+  gap where a user-mode CLI binary reading the user-mode registry would
+  report NOT RUNNING while system-mode daemons were healthy.
+- **`runStatus` is read-only.** Previously it would auto-create the
+  encrypted registry's key/DB just to *check* status — silently
+  recreating the user-mode footprint after cleanup and re-introducing
+  the dual-mode trap. Now it probes `KeyProvider.KeyExists()` first and
+  falls through to ps-only output when no registry exists for the
+  invoking mode.
+- **`appmon start` auto-purges other-mode artifacts.** Extends
+  `detectAndCleanupOtherModeDaemons` (which previously only removed the
+  other-mode plist) to also remove the other-mode binary
+  (`~/.local/bin/appmon` or `/usr/local/bin/appmon`) and data dir
+  (`~/.appmon` or `/var/lib/appmon`). Runs unconditionally, idempotent
+  when state is clean. Prevents the dual-mode accretion that causes
+  status-lies-to-user bugs.
+- **Mode-mismatch hints in `status`.** When ps shows daemons running
+  but the current CLI's registry is empty/unreadable, status prints a
+  clear hint pointing to `sudo /usr/local/bin/appmon status` for full
+  enrichment instead of silently lying with "NOT RUNNING".
+
+### Architecture
+- New `infra.LiveDaemon` struct + `infra.DetectLiveDaemons` — structured
+  ps-based discovery returning PID/role/path tuples. Source of truth for
+  liveness independent of which mode's registry the caller can read.
+- Pure parser `parseLiveDaemons(string)` and `extractRoleArg(string)`
+  split out for unit-testable filter logic without depending on
+  real-system process state.
+- `otherModePaths(execMode)` helper centralizes the canonical artifact
+  paths for the "other" mode, used by the auto-purge step.
+
 ## [0.5.2] - 2026-05-12
 
 ### Features
