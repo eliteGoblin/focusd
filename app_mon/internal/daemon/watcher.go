@@ -310,23 +310,21 @@ func (w *Watcher) sweepStaleRelocations() {
 	}
 }
 
-// reapOrphans kills any process exec'd from our relocator directory whose
-// PID is not recorded in the encrypted registry as a live daemon. This is
-// the cleanup-on-source-of-truth mechanism: the registry decides who's
-// "ours", and anything else running from our cache dir is an orphan —
-// from a failed update rollback, a racing spawn, or an old session whose
-// parent died. Reaping orphans keeps killall-resistant peer-restart
-// converging on exactly one watcher and one guardian.
+// reapOrphans kills any daemon process whose PID is not recorded in the
+// encrypted registry as a live daemon. Two sources are checked:
+//   - relocator cache dir (current daemons running under obfuscated
+//     basenames)
+//   - legacy "appmon"-named daemons with `daemon --role` argv (pre-
+//     relocation builds; they don't appear in the cache dir, so the first
+//     pass misses them)
 //
-// Safe even at high frequency: we never kill our own PID or our partner.
+// The encrypted registry is the source of truth: anything else is an
+// orphan from a failed update rollback, a racing spawn, or a stale
+// pre-upgrade session. Reaping keeps peer-restart converging on exactly
+// one watcher + one guardian.
+//
+// Safe at high frequency: we never kill our own PID or registered partner.
 func (w *Watcher) reapOrphans() {
-	relocator := infra.NewRelocator(infra.GetRealUserHome())
-	pids, err := relocator.FindProcessesUsingDir()
-	if err != nil {
-		w.logger.Debug("orphan reap: ps failed", zap.Error(err))
-		return
-	}
-
 	keep := map[int]struct{}{os.Getpid(): {}}
 	if entry, err := w.registry.GetAll(); err == nil && entry != nil {
 		if entry.WatcherPID > 0 {
@@ -337,11 +335,30 @@ func (w *Watcher) reapOrphans() {
 		}
 	}
 
-	for _, pid := range pids {
+	candidates := map[int]string{}
+	relocator := infra.NewRelocator(infra.GetRealUserHome())
+	if pids, err := relocator.FindProcessesUsingDir(); err == nil {
+		for _, pid := range pids {
+			candidates[pid] = "relocated"
+		}
+	} else {
+		w.logger.Debug("orphan reap: relocator dir scan failed", zap.Error(err))
+	}
+	if pids, err := infra.FindLegacyAppmonDaemons(); err == nil {
+		for _, pid := range pids {
+			candidates[pid] = "legacy-appmon"
+		}
+	} else {
+		w.logger.Debug("orphan reap: legacy-daemon scan failed", zap.Error(err))
+	}
+
+	for pid, source := range candidates {
 		if _, ok := keep[pid]; ok {
 			continue
 		}
-		w.logger.Info("reaping orphan daemon", zap.Int("pid", pid))
+		w.logger.Info("reaping orphan daemon",
+			zap.Int("pid", pid),
+			zap.String("source", source))
 		_ = w.processManager.Kill(pid)
 	}
 }

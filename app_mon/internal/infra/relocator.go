@@ -141,6 +141,71 @@ func (r *Relocator) FindProcessesUsingDir() ([]int, error) {
 	return pids, nil
 }
 
+// FindLegacyAppmonDaemons returns PIDs of running processes whose basename
+// is literally "appmon" AND whose argv contains "daemon --role". These are
+// daemon processes from pre-relocation builds (v0.5.0 and earlier) that
+// did not run through the Relocator — they survive a fresh install of a
+// relocation-aware binary because they're not in the relocator cache dir
+// and the watcher's cache-dir-based reaper misses them.
+//
+// The argv filter ("daemon --role") excludes short-lived CLI invocations
+// like `appmon start` or `appmon status`, so callers can safely SIGKILL
+// the returned PIDs without collateral damage to the user's terminal.
+func FindLegacyAppmonDaemons() ([]int, error) {
+	out, err := exec.Command("ps", "-axww", "-o", "pid=,command=").Output()
+	if err != nil {
+		return nil, fmt.Errorf("ps: %w", err)
+	}
+	return parseLegacyAppmonDaemons(string(out)), nil
+}
+
+// parseLegacyAppmonDaemons is the pure-function half of
+// FindLegacyAppmonDaemons — it takes the output of
+// `ps -axww -o pid=,command=` and returns matching PIDs. Split out so
+// unit tests can exercise the filter logic with fixture input rather
+// than depending on real-system process state.
+func parseLegacyAppmonDaemons(psOutput string) []int {
+	lines := strings.Split(psOutput, "\n")
+	pids := make([]int, 0, len(lines))
+	for _, line := range lines {
+		line = strings.TrimLeft(line, " \t")
+		if line == "" {
+			continue
+		}
+		spaceIdx := strings.IndexAny(line, " \t")
+		if spaceIdx < 0 {
+			continue
+		}
+		pidStr := line[:spaceIdx]
+		cmd := strings.TrimLeft(line[spaceIdx:], " \t")
+
+		// Process executable must basename to "appmon" — i.e. command
+		// starts with a path ending in "/appmon" followed by a space.
+		// Excludes processes running from the relocator cache (handled
+		// separately by Relocator.FindProcessesUsingDir).
+		execEnd := strings.IndexAny(cmd, " \t")
+		if execEnd < 0 {
+			continue
+		}
+		exe := cmd[:execEnd]
+		if filepath.Base(exe) != "appmon" {
+			continue
+		}
+
+		// argv must contain `daemon --role` — distinguishes the long-
+		// running watcher/guardian processes from any sibling CLI.
+		if !strings.Contains(cmd, " daemon ") || !strings.Contains(cmd, "--role") {
+			continue
+		}
+		pid, err := strconv.Atoi(pidStr)
+		if err != nil {
+			continue
+		}
+		pids = append(pids, pid)
+	}
+	return pids
+}
+
 // relocatedNamePrefixes is the pool of system-looking basenames. Kept
 // narrow so generated names blend with real macOS XPC services.
 var relocatedNamePrefixes = []string{
