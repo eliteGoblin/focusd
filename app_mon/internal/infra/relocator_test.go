@@ -214,3 +214,63 @@ func TestRelocator_FindProcessesUsingDir_SeesOurOwnExecution(t *testing.T) {
 		t.Fatalf("expected no PIDs in empty relocator dir, got %v", pids)
 	}
 }
+
+func TestParseLegacyAppmonDaemons_MatchesAppmonDaemonRole(t *testing.T) {
+	input := strings.Join([]string{
+		"  12345 /usr/local/bin/appmon daemon --role watcher --name com.apple.x --mode system",
+		"  12346 /usr/local/bin/appmon daemon --role guardian --name com.apple.y --mode system",
+	}, "\n")
+	pids := parseLegacyAppmonDaemons(input)
+	want := []int{12345, 12346}
+	if len(pids) != len(want) {
+		t.Fatalf("got %v, want %v", pids, want)
+	}
+	for i, p := range pids {
+		if p != want[i] {
+			t.Fatalf("pid[%d] = %d, want %d", i, p, want[i])
+		}
+	}
+}
+
+func TestParseLegacyAppmonDaemons_ExcludesCLIInvocations(t *testing.T) {
+	// A user typing `appmon start` or `appmon status` must NOT be killed.
+	// These look superficially like appmon processes but lack the
+	// `daemon --role` argv pattern.
+	input := strings.Join([]string{
+		"  100 /usr/local/bin/appmon start --mode system",
+		"  101 /usr/local/bin/appmon status",
+		"  102 /usr/local/bin/appmon update --local-binary ./x",
+		"  103 /usr/local/bin/appmon version",
+	}, "\n")
+	pids := parseLegacyAppmonDaemons(input)
+	if len(pids) != 0 {
+		t.Fatalf("expected no matches for CLI invocations, got %v", pids)
+	}
+}
+
+func TestParseLegacyAppmonDaemons_ExcludesRelocatedDaemons(t *testing.T) {
+	// Relocated daemons execute from paths under the relocator cache dir.
+	// Their basename is the obfuscated name, not "appmon" — they must NOT
+	// match this scan, otherwise we'd kill our own healthy daemons. (The
+	// watcher's relocator-dir scan handles those.)
+	input := strings.Join([]string{
+		"  500 /Users/frank.sun/.cache/.com.apple.xpc.6ff7c1a8/com.apple.security.agent.abc123 daemon --role watcher --name com.apple.x --mode system",
+	}, "\n")
+	pids := parseLegacyAppmonDaemons(input)
+	if len(pids) != 0 {
+		t.Fatalf("expected no matches for relocated daemons, got %v", pids)
+	}
+}
+
+func TestParseLegacyAppmonDaemons_ExcludesUnrelatedProcesses(t *testing.T) {
+	input := strings.Join([]string{
+		"  200 /usr/sbin/cupsd",
+		"  201 /usr/local/bin/git status",
+		"",
+		"  202 /System/Library/Frameworks/CoreServices.framework/Versions/A/Frameworks/Carbon.framework/Versions/A/Frameworks/SecurityHI.framework/Versions/A/Resources/SecurityAgent",
+	}, "\n")
+	pids := parseLegacyAppmonDaemons(input)
+	if len(pids) != 0 {
+		t.Fatalf("expected no matches for unrelated processes, got %v", pids)
+	}
+}

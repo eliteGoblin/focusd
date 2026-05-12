@@ -5,6 +5,44 @@ All notable changes to appmon will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.2] - 2026-05-12
+
+### Features
+- **`sudo appmon start` is now the universal recovery button.** It runs an
+  unconditional pre-flight cleanup before respawning:
+  - kills any `appmon`-named daemon process (legacy v0.5.0 ghosts from
+    before relocation existed) via the new
+    `infra.FindLegacyAppmonDaemons` helper;
+  - kills any process running under the relocator cache dir whose PID
+    isn't in the encrypted registry.
+  The CLI's own PID is exempt; CLI invocations like `appmon status` are
+  filtered out by the `daemon --role` argv check, so they're safe.
+- **Heartbeat-aware liveness** in both `EncryptedRegistry.IsPartnerAlive`
+  and `FileRegistry.IsPartnerAlive`. PID-running is necessary but no
+  longer sufficient: peer-restart now also requires `last_heartbeat`
+  within 2 minutes. This closes the stuck-but-alive class of bug — a
+  deadlocked daemon that keeps its PID but stops heartbeating used to
+  block peer-restart forever; now it gets respawned automatically.
+- **Stale-heartbeat detection in `appmon start`**: the "already running"
+  short-circuit now requires both PID-alive AND fresh heartbeat. A
+  registered-but-stuck watcher no longer prevents `start` from doing
+  recovery work.
+
+### Bug Fixes
+- **`status` "Auto-start: disabled" false positive**: previously
+  `os.Stat`ed the plist path stored in backup config, which drifted
+  whenever the randomized plist label rotated. Now uses
+  `launchdManager.IsInstalled()` — same source of truth the watcher
+  uses for self-heal — so status matches reality.
+
+### Architecture
+- New `infra.FindLegacyAppmonDaemons` (in `relocator.go`) — ps-based scan
+  for pre-relocation daemons. Pure parser split out as
+  `parseLegacyAppmonDaemons(string)` for unit-testable filter logic.
+- `watcher.reapOrphans` now also matches legacy `appmon`-named daemons,
+  not just relocator-dir PIDs. So the watcher's 60s tick eventually
+  cleans up legacy ghosts even without an explicit `appmon start`.
+
 ## [0.5.1] - 2026-05-12
 
 ### Features

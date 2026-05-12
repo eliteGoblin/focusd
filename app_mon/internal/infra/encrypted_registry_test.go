@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -213,6 +214,42 @@ func TestEncryptedRegistry_IsPartnerAlive(t *testing.T) {
 			assert.Equal(t, tt.wantAlive, alive)
 		})
 	}
+}
+
+// TestEncryptedRegistry_IsPartnerAlive_StaleHeartbeat covers the deadlock
+// case: PID is alive but the daemon has stopped writing last_heartbeat.
+// Peer-restart needs to treat this as "dead" so it can rescue the daemon.
+func TestEncryptedRegistry_IsPartnerAlive_StaleHeartbeat(t *testing.T) {
+	pm := newMockProcessManager()
+	pm.SetRunning(1234, true)
+	pm.SetRunning(5678, true)
+
+	reg := newTestRegistryWithPM(t, pm)
+	require.NoError(t, reg.Register(domain.Daemon{
+		PID: 1234, Role: domain.RoleWatcher, ObfuscatedName: "w",
+	}))
+	require.NoError(t, reg.Register(domain.Daemon{
+		PID: 5678, Role: domain.RoleGuardian, ObfuscatedName: "g",
+	}))
+
+	// Sanity: with fresh heartbeats, watcher sees a live guardian.
+	alive, err := reg.IsPartnerAlive(domain.RoleWatcher)
+	require.NoError(t, err)
+	require.True(t, alive, "fresh heartbeat partner should be alive")
+
+	// Backdate guardian's last_heartbeat past the staleness threshold,
+	// keeping the PID alive in the mock. IsPartnerAlive must now return
+	// false — that's the trigger for peer-restart on a stuck daemon.
+	staleTs := time.Now().Add(-(PartnerHeartbeatStaleThreshold + time.Minute)).Unix()
+	_, err = reg.db.Exec(
+		`UPDATE daemon_state SET last_heartbeat = ? WHERE role = ?`,
+		staleTs, string(domain.RoleGuardian),
+	)
+	require.NoError(t, err)
+
+	alive, err = reg.IsPartnerAlive(domain.RoleWatcher)
+	require.NoError(t, err)
+	require.False(t, alive, "stale heartbeat with live PID must be reported dead")
 }
 
 func TestEncryptedRegistry_UpdateHeartbeat(t *testing.T) {

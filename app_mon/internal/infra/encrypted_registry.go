@@ -172,13 +172,53 @@ func (r *EncryptedRegistry) UpdateHeartbeat(role domain.DaemonRole) error {
 	return nil
 }
 
-// IsPartnerAlive checks if partner daemon is running via PID.
+// PartnerHeartbeatStaleThreshold is the maximum age of a partner's
+// last_heartbeat we treat as "still alive". A daemon writes its heartbeat
+// every 30s; four missed writes (2 min) means it's stuck or dead even if
+// the kernel still owns the PID. Below this threshold, IsPartnerAlive
+// returns false and peer-restart fires.
+const PartnerHeartbeatStaleThreshold = 2 * time.Minute
+
+// IsPartnerAlive returns true only when both:
+//   - the kernel reports the partner's PID running, AND
+//   - the partner has written its heartbeat within the threshold.
+//
+// PID-only liveness is insufficient: a deadlocked or hung daemon keeps
+// its PID alive forever but stops writing heartbeats. Returning true in
+// that state would block peer-restart from recovering it. This is the
+// gap that left v0.5.1's stuck watcher registered for 50 min on a live
+// install before recovery was required.
 func (r *EncryptedRegistry) IsPartnerAlive(role domain.DaemonRole) (bool, error) {
 	partner, err := r.GetPartner(role)
 	if err != nil {
 		return false, nil // Partner not registered = not alive
 	}
-	return r.processManager.IsRunning(partner.PID), nil
+	if !r.processManager.IsRunning(partner.PID) {
+		return false, nil
+	}
+
+	var partnerRole domain.DaemonRole
+	switch role {
+	case domain.RoleWatcher:
+		partnerRole = domain.RoleGuardian
+	case domain.RoleGuardian:
+		partnerRole = domain.RoleWatcher
+	}
+
+	var heartbeat int64
+	err = r.db.QueryRow(
+		`SELECT last_heartbeat FROM daemon_state WHERE role = ?`,
+		string(partnerRole),
+	).Scan(&heartbeat)
+	if err != nil {
+		// Row missing or query error → no heartbeat → treat as dead.
+		return false, nil
+	}
+	if heartbeat == 0 {
+		return false, nil
+	}
+	age := time.Since(time.Unix(heartbeat, 0))
+	return age <= PartnerHeartbeatStaleThreshold, nil
 }
 
 // GetAll returns full registry state (for status command).

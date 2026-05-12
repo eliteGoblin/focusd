@@ -140,14 +140,30 @@ func (r *FileRegistry) UpdateHeartbeat(role domain.DaemonRole) error {
 	return r.atomicWrite(entry)
 }
 
-// IsPartnerAlive checks if partner daemon is running via PID.
+// IsPartnerAlive returns true only when the partner PID is running AND the
+// registry's last_heartbeat is within PartnerHeartbeatStaleThreshold.
+// FileRegistry stores a single global last_heartbeat (not per-role), so
+// the freshness check is global — both daemons must be heartbeating for
+// either to look alive. That's strictly safer for peer-restart: a stuck
+// daemon can still hold its PID, but its peer won't trust it.
 func (r *FileRegistry) IsPartnerAlive(role domain.DaemonRole) (bool, error) {
 	partner, err := r.GetPartner(role)
 	if err != nil {
 		return false, nil // Partner not registered = not alive
 	}
+	if !r.processManager.IsRunning(partner.PID) {
+		return false, nil
+	}
 
-	return r.processManager.IsRunning(partner.PID), nil
+	entry, err := r.GetAll()
+	if err != nil || entry == nil {
+		return false, nil
+	}
+	if entry.LastHeartbeat == 0 {
+		return false, nil
+	}
+	age := time.Since(time.Unix(entry.LastHeartbeat, 0))
+	return age <= PartnerHeartbeatStaleThreshold, nil
 }
 
 // GetAll returns full registry state.

@@ -274,11 +274,17 @@ func runStart(cmd *cobra.Command, args []string) error {
 	systemPlistExists := fileExists("/Library/LaunchDaemons/"+infra.DefaultLaunchdLabel+".plist") ||
 		fileExists("/Library/LaunchDaemons/"+plistLabel+".plist")
 
-	// Check if already running - handle mode switching
+	// Check if already running - handle mode switching.
+	//
+	// Liveness here means BOTH the kernel sees the PID AND the registry's
+	// last_heartbeat is fresh. Stale-heartbeat with a live PID is the
+	// stuck-daemon case (deadlock, hung syscall); we treat it as dead so
+	// the spawn path below tears it down and respawns. This is what makes
+	// `sudo appmon start` a universal recovery button.
 	entry, _ := registry.GetAll()
 	if entry != nil {
-		watcherAlive := pm.IsRunning(entry.WatcherPID)
-		guardianAlive := pm.IsRunning(entry.GuardianPID)
+		watcherAlive := pm.IsRunning(entry.WatcherPID) && heartbeatFresh(entry.LastHeartbeat)
+		guardianAlive := pm.IsRunning(entry.GuardianPID) && heartbeatFresh(entry.LastHeartbeat)
 
 		if watcherAlive && guardianAlive {
 			// Check if mode matches
@@ -334,6 +340,16 @@ func runStart(cmd *cobra.Command, args []string) error {
 		_ = registry.Clear()
 		time.Sleep(1 * time.Second)
 	}
+
+	// Pre-flight cleanup. Reaches us when we've decided to (re)spawn — kill
+	// any leftover daemon processes so we don't pile up multiple watchers /
+	// guardians from prior failed sessions:
+	//   - "appmon"-named processes with `daemon --role` argv → legacy
+	//     v0.5.0 ghosts that don't run through the relocator
+	//   - cache-dir processes (running under the obfuscated basename) →
+	//     stale relocated daemons whose registry entries timed out
+	// Idempotent: empty when state is clean. Exempts our own CLI PID.
+	cleanupStaleDaemonProcesses(pm)
 
 	// Determine binary path based on execution mode
 	var binaryPath string
@@ -553,14 +569,32 @@ func runStatus(cmd *cobra.Command, args []string) error {
 	// Check backup config for execution mode
 	backupConfig, err := backupManager.GetConfig()
 	if err == nil {
-		execMode := backupConfig.ExecMode
-		if execMode == "" {
-			execMode = "user"
+		modeStr := backupConfig.ExecMode
+		if modeStr == "" {
+			modeStr = "user"
 		}
-		fmt.Printf("Execution mode: %s\n", execMode)
+		fmt.Printf("Execution mode: %s\n", modeStr)
 
-		// Check if plist exists (don't show path for security)
-		if _, err := os.Stat(backupConfig.PlistPath); err == nil {
+		// Auto-start: ask the same component that installs the plist
+		// whether it's installed. Earlier versions os.Stat'd the path
+		// stored in the backup config, which drifted whenever the
+		// randomized plist label rotated (label is regenerated on
+		// EnsurePlistLabel's first call per session), leaving status
+		// showing "disabled" while the plist was actually loaded. The
+		// LaunchdManager uses the current label and mode, so it stays
+		// in sync with reality.
+		statusExecMode := infra.DetectExecMode()
+		if backupConfig.ExecMode == string(infra.ExecModeSystem) {
+			// Force-resolve system-mode paths if the backup said so,
+			// even though we may be invoked as a non-root user.
+			statusExecMode.Mode = infra.ExecModeSystem
+			statusExecMode.PlistDir = "/Library/LaunchDaemons"
+		}
+		if plistLabel := infra.GetLaunchdLabel(); plistLabel != "" {
+			statusExecMode.PlistPath = filepath.Join(statusExecMode.PlistDir, plistLabel+".plist")
+		}
+		ldm := infra.NewLaunchdManager(statusExecMode)
+		if ldm.IsInstalled() {
 			fmt.Println("Auto-start:     enabled")
 		} else {
 			fmt.Println("Auto-start:     disabled")
@@ -984,6 +1018,56 @@ func openEncryptedRegistry(execMode *infra.ExecModeConfig, pm domain.ProcessMana
 		return nil, fmt.Errorf("failed to open encrypted registry: %w", err)
 	}
 	return reg, nil
+}
+
+// heartbeatStaleThreshold is the maximum age of last_heartbeat we treat as
+// "still alive". Anything older means the daemon is stuck or dead — even
+// if the kernel still owns the PID — so the spawn path will tear it down
+// and respawn. Three minutes is generous: the watcher heartbeats every
+// 30s, so 6 missed heartbeats in a row triggers recovery.
+const heartbeatStaleThreshold = 3 * time.Minute
+
+// heartbeatFresh returns true when the registry's last_heartbeat is within
+// heartbeatStaleThreshold of now. A zero timestamp is treated as stale.
+func heartbeatFresh(lastHeartbeatUnix int64) bool {
+	if lastHeartbeatUnix == 0 {
+		return false
+	}
+	return time.Since(time.Unix(lastHeartbeatUnix, 0)) <= heartbeatStaleThreshold
+}
+
+// cleanupStaleDaemonProcesses kills any leftover daemon processes that
+// could conflict with a fresh spawn. Runs unconditionally at the spawn
+// step of runStart — idempotent when nothing's stale.
+//
+// Two passes via shared helpers in infra:
+//   - infra.FindLegacyAppmonDaemons (basename "appmon" + daemon --role
+//     argv) catches pre-relocation ghosts.
+//   - Relocator.FindProcessesUsingDir catches relocated daemons whose
+//     registry entry timed out.
+//
+// Both passes skip the current CLI's PID. Returns silently — best effort.
+func cleanupStaleDaemonProcesses(pm domain.ProcessManager) {
+	self := pm.GetCurrentPID()
+	kill := func(pid int) {
+		if pid == self {
+			return
+		}
+		_ = pm.Kill(pid)
+	}
+
+	if pids, err := infra.FindLegacyAppmonDaemons(); err == nil {
+		for _, pid := range pids {
+			kill(pid)
+		}
+	}
+
+	relocator := infra.NewRelocator(infra.GetRealUserHome())
+	if pids, err := relocator.FindProcessesUsingDir(); err == nil {
+		for _, pid := range pids {
+			kill(pid)
+		}
+	}
 }
 
 // fileExists returns true if the path exists.

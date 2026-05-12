@@ -119,6 +119,9 @@ The watcher scans every **5 minutes**, matching the LaunchAgent's `StartInterval
 | Delete LaunchAgent plist | Watcher restores it within 60s, pointing to the launch stub |
 | Delete main binary `/usr/local/bin/appmon` | Watcher restores from hidden backup or GitHub release |
 | Stale daemons from failed update | Orphan reaper kills any cache-dir PID missing from the encrypted registry, within 60s |
+| Daemon deadlocked but PID alive | `IsPartnerAlive` requires fresh heartbeat (≤2 min) — peer-restart fires automatically |
+| Legacy `appmon`-named daemon from old version | Both watcher's 60s tick and `appmon start` pre-flight kill these via the legacy-daemon scanner |
+| Suspect broken state, want to reset cleanly | `sudo appmon start` does unconditional pre-flight cleanup, then respawns. Idempotent — no-op when state is clean. |
 
 ## File Locations
 

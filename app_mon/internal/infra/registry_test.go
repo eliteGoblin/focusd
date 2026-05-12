@@ -135,6 +135,60 @@ func TestFileRegistry_IsPartnerAlive(t *testing.T) {
 	}
 }
 
+// TestFileRegistry_IsPartnerAlive_StaleHeartbeat verifies that a live PID
+// with a stale heartbeat is treated as dead — the trigger for peer-restart
+// when a daemon is deadlocked or hung but the kernel still owns the PID.
+func TestFileRegistry_IsPartnerAlive_StaleHeartbeat(t *testing.T) {
+	tmpDir, err := os.MkdirTemp("", "registry-test-*")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	registryPath := filepath.Join(tmpDir, ".test_registry")
+	pm := newMockProcessManager()
+	registry := NewFileRegistryWithPath(registryPath, pm)
+
+	guardian := domain.Daemon{
+		PID:            12346,
+		Role:           domain.RoleGuardian,
+		ObfuscatedName: "com.apple.test.guardian",
+	}
+	if err := registry.Register(guardian); err != nil {
+		t.Fatalf("register: %v", err)
+	}
+	pm.SetRunning(12346, true)
+
+	// Sanity: fresh heartbeat from Register → partner is alive.
+	alive, err := registry.IsPartnerAlive(domain.RoleWatcher)
+	if err != nil {
+		t.Fatalf("IsPartnerAlive: %v", err)
+	}
+	if !alive {
+		t.Fatal("expected fresh-heartbeat guardian to be alive")
+	}
+
+	// Backdate the registry heartbeat past the staleness threshold by
+	// reading + rewriting the JSON file directly. PID stays alive in mock.
+	fr, _ := registry.(*FileRegistry)
+	entry, err := fr.GetAll()
+	if err != nil {
+		t.Fatalf("GetAll: %v", err)
+	}
+	entry.LastHeartbeat = time.Now().Add(-(PartnerHeartbeatStaleThreshold + time.Minute)).Unix()
+	if err := fr.atomicWrite(entry); err != nil {
+		t.Fatalf("atomicWrite: %v", err)
+	}
+
+	alive, err = registry.IsPartnerAlive(domain.RoleWatcher)
+	if err != nil {
+		t.Fatalf("IsPartnerAlive after stale: %v", err)
+	}
+	if alive {
+		t.Fatal("expected stale-heartbeat guardian to be reported dead")
+	}
+}
+
 func TestFileRegistry_Clear(t *testing.T) {
 	tmpDir, err := os.MkdirTemp("", "registry-test-*")
 	if err != nil {
