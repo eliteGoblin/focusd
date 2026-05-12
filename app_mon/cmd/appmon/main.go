@@ -115,6 +115,20 @@ This kills blocked processes, uninstalls via package managers (brew, etc.), and 
 	RunE: runScan,
 }
 
+var blocklistCmd = &cobra.Command{
+	Use:   "blocklist",
+	Short: "Show the DNS blocklist managed in /etc/hosts",
+	Long: `Prints two lists:
+  - Compiled: domains hardcoded in this binary (the permanent block set).
+  - Active:   domains currently installed in /etc/hosts between the
+              appmon-managed markers.
+
+If Compiled and Active diverge, the watcher will reconcile within ~60s.
+The blocklist is enforced in system mode only; user-mode daemons can't
+write /etc/hosts.`,
+	RunE: runBlocklist,
+}
+
 var versionCmd = &cobra.Command{
 	Use:   "version",
 	Short: "Print version information",
@@ -168,6 +182,7 @@ func init() {
 	rootCmd.AddCommand(statusCmd)
 	rootCmd.AddCommand(listCmd)
 	rootCmd.AddCommand(scanCmd)
+	rootCmd.AddCommand(blocklistCmd)
 	rootCmd.AddCommand(versionCmd)
 	rootCmd.AddCommand(updateCmd)
 	rootCmd.AddCommand(daemonCmd)
@@ -875,6 +890,12 @@ func runDaemon(cmd *cobra.Command, args []string) error {
 	// Initialize Freedom protector (best effort - nil-safe if not installed)
 	freedomProtector := infra.NewFreedomProtector(pm, logger)
 
+	// Initialize hosts-file manager. The watcher owns the appmon section
+	// of /etc/hosts so blocked domains can't be resolved by any process.
+	// In user mode the daemon will hit EACCES on write — that's logged
+	// at Debug and ignored; DNS-layer blocking is system-mode-only.
+	hostsManager := infra.NewHostsManager()
+
 	// Run appropriate daemon
 	switch role {
 	case domain.RoleWatcher:
@@ -886,6 +907,7 @@ func runDaemon(cmd *cobra.Command, args []string) error {
 			launchdManager,
 			backupManager,
 			freedomProtector,
+			hostsManager,
 			d,
 			logger,
 		)
@@ -1030,6 +1052,79 @@ func runUpdate(cmd *cobra.Command, args []string) error {
 	}
 
 	fmt.Println("=====================")
+	return nil
+}
+
+// runBlocklist prints the compiled-in blocklist and the active /etc/hosts
+// blocklist side-by-side, plus a small diff if they disagree. Read-only:
+// never modifies /etc/hosts even when divergence is detected.
+func runBlocklist(cmd *cobra.Command, args []string) error {
+	compiled := policy.DefaultDNSBlocklist
+	hm := infra.NewHostsManager()
+	active, err := hm.ActiveBlocklist()
+	if err != nil {
+		// /etc/hosts unreadable as the current user is a real possibility;
+		// surface it as informational, not as a hard error.
+		fmt.Printf("\n=== appmon Blocklist ===\n")
+		fmt.Printf("Compiled into binary: %d hostnames\n", len(compiled))
+		fmt.Printf("Active in /etc/hosts: unable to read (%v)\n", err)
+		fmt.Println()
+		fmt.Println("Compiled hostnames:")
+		for _, h := range compiled {
+			fmt.Printf("  %s\n", h)
+		}
+		return nil
+	}
+
+	fmt.Printf("\n=== appmon Blocklist ===\n")
+	fmt.Printf("Compiled into binary: %d hostnames\n", len(compiled))
+	fmt.Printf("Active in /etc/hosts: %d hostnames\n", len(active))
+
+	compiledSet := map[string]struct{}{}
+	for _, h := range compiled {
+		compiledSet[h] = struct{}{}
+	}
+	activeSet := map[string]struct{}{}
+	for _, h := range active {
+		activeSet[h] = struct{}{}
+	}
+
+	var missingFromActive, extraInActive []string
+	for h := range compiledSet {
+		if _, ok := activeSet[h]; !ok {
+			missingFromActive = append(missingFromActive, h)
+		}
+	}
+	for h := range activeSet {
+		if _, ok := compiledSet[h]; !ok {
+			extraInActive = append(extraInActive, h)
+		}
+	}
+
+	if len(missingFromActive) == 0 && len(extraInActive) == 0 {
+		fmt.Println("Status:               in sync ✓")
+	} else {
+		fmt.Println("Status:               DIVERGENT (watcher will reconcile within ~60s)")
+		if len(missingFromActive) > 0 {
+			fmt.Printf("  Missing from /etc/hosts (%d):\n", len(missingFromActive))
+			for _, h := range missingFromActive {
+				fmt.Printf("    %s\n", h)
+			}
+		}
+		if len(extraInActive) > 0 {
+			fmt.Printf("  Extra in /etc/hosts (%d):\n", len(extraInActive))
+			for _, h := range extraInActive {
+				fmt.Printf("    %s\n", h)
+			}
+		}
+	}
+
+	fmt.Println()
+	fmt.Println("Compiled hostnames (the permanent ban list):")
+	for _, h := range compiled {
+		fmt.Printf("  %s\n", h)
+	}
+	fmt.Println("=========================")
 	return nil
 }
 

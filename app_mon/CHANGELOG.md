@@ -5,6 +5,52 @@ All notable changes to appmon will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.0] - 2026-05-12
+
+### Features
+- **DNS-layer blocking via managed `/etc/hosts` section.** appmon now
+  installs a permanent ban list of hostnames as `0.0.0.0 <host>`
+  entries inside `# BEGIN appmon-blocklist` / `# END` markers in
+  `/etc/hosts`. Entries OUTSIDE the markers are preserved verbatim;
+  entries INSIDE are reverted to the compiled-in list on every 60s
+  watcher tick. This closes the major leak where Steam (which ignores
+  the system HTTP proxy) could still resolve and reach
+  `store.steampowered.com` during its brief launch window.
+- **Quick-kill tick at 10 seconds.** Watcher gains a fast process-kill
+  loop (`Enforcer.EnforceKillOnly`) in addition to the existing full
+  scan. Closes the launch-to-kill window from up to 5 minutes (the
+  prior `EnforcementInterval`) down to ~10 seconds. Heavy phases (brew
+  uninstall + file delete) stay on the 60-second tick to keep CPU
+  negligible.
+- **`appmon blocklist` CLI command.** Prints the compiled-in
+  permanent ban list and the active /etc/hosts list side-by-side,
+  flagging divergence. Read-only — never modifies /etc/hosts. Works
+  without sudo (just reads `/etc/hosts`, which is world-readable).
+- **`EnforcementInterval` dropped 5 min → 60 s.** With quick-kill at 10s
+  the heavy scan no longer needs to be the only process-killing line
+  of defense, so it can run more often without CPU cost — that means
+  brew-uninstall and path-deletion happen within a minute of a fresh
+  Steam install rather than within five.
+
+### Architecture
+- New `internal/policy/dns_blocklist.go` — exports `DefaultDNSBlocklist`,
+  a flat slice of ~68 hostnames covering the user's base sites plus
+  subdomain expansion (`www.<d>`, `m.<d>`, plus Steam's CDN/API/store
+  hostnames). To extend, edit this slice and rebuild — that's the
+  permanent-ban semantic.
+- New `internal/infra/hosts_manager.go` — `HostsManager.EnsureBlocklist`,
+  atomic write via temp+rename, preserves 0644 mode, idempotent when
+  on-disk content already matches. `FlushDNSCache()` invokes
+  `dscacheutil` + `mDNSResponder` so changes take effect within
+  seconds rather than on the resolver TTL.
+- New `Enforcer.EnforceKillOnly` interface method — splits the fast
+  kill phase out of the heavy `Enforce` for the quick-tick caller.
+  `enforceKill` is the private helper both code paths share.
+- `Watcher` gains a `hostsManager` field and an `ensureHostsBlocklist`
+  method called on startup + the existing 60s plist-check tick. User
+  mode degrades silently (EACCES → Debug log) since `/etc/hosts` is
+  root-owned; DNS-layer blocking is system-mode-only.
+
 ## [0.5.3] - 2026-05-12
 
 ### Features

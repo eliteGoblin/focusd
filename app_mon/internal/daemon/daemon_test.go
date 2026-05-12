@@ -13,9 +13,13 @@ import (
 func TestDefaultWatcherConfig(t *testing.T) {
 	config := DefaultWatcherConfig()
 
-	// EnforcementInterval matches the LaunchAgent's StartInterval (5 min)
-	// so steam/dota2 get scanned at the same cadence as the cron respawn.
-	assert.Equal(t, 5*time.Minute, config.EnforcementInterval)
+	// Enforcement is split into two cadences:
+	//   - QuickKillInterval (10s) — fast process-kill loop, no file deletion
+	//   - EnforcementInterval (60s) — full scan with brew uninstall + delete
+	// Quick-kill closes the launch-to-kill window for apps like Steam that
+	// would otherwise initiate network transfers between heavy scans.
+	assert.Equal(t, 60*time.Second, config.EnforcementInterval)
+	assert.Equal(t, 10*time.Second, config.QuickKillInterval)
 	assert.Equal(t, 30*time.Second, config.HeartbeatInterval)
 	assert.Equal(t, 60*time.Second, config.PartnerCheckInterval)
 	assert.Equal(t, 60*time.Second, config.PlistCheckInterval)
