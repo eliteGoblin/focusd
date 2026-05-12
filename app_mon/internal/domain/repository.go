@@ -71,11 +71,21 @@ type PolicyStore interface {
 
 // Enforcer orchestrates process killing and file deletion.
 type Enforcer interface {
-	// Enforce runs all policies once.
+	// Enforce runs all policies once: kill processes, run uninstall
+	// strategies (brew etc.), and delete paths. Expensive — typically
+	// invoked from a 60-second tick.
 	Enforce(ctx context.Context) ([]EnforcementResult, error)
 
 	// EnforcePolicy runs a single policy.
 	EnforcePolicy(ctx context.Context, policy Policy) (*EnforcementResult, error)
+
+	// EnforceKillOnly runs only the process-kill phase across all
+	// policies — no brew uninstall, no path deletion. Cheap, intended
+	// for the watcher's fast tick (~10s) so that an app launched
+	// between heavy enforcement runs gets killed within seconds rather
+	// than within the heavy interval. Returns the same shape as Enforce
+	// (with empty DeletedPaths/SkippedPaths) so callers don't branch.
+	EnforceKillOnly(ctx context.Context) ([]EnforcementResult, error)
 }
 
 // LaunchAgentManager handles macOS LaunchAgent plist operations.

@@ -391,6 +391,61 @@ func TestEnforce_WithStrategyManager(t *testing.T) {
 	// Strategy manager was called (no direct assertion needed, just verifying no panic)
 }
 
+// TestEnforceKillOnly_KillsButDoesNotDelete pins the fast-tick contract:
+// the kill phase runs for every policy, but the destructive phases (brew
+// uninstall, path deletion) are skipped. Regression here would either:
+//   - re-enable expensive scans on the 10s tick (CPU regression), or
+//   - drop the kill loop entirely (Steam runs unchecked).
+func TestEnforceKillOnly_KillsButDoesNotDelete(t *testing.T) {
+	pm := &mockProcessManager{
+		findResult: map[string][]int{
+			"steam": {1001, 1002},
+			"dota2": {2001},
+		},
+	}
+	fs := &mockFileSystemManager{
+		existingPaths: map[string]bool{
+			"/Applications/Steam.app": true, // would be deleted by full Enforce
+		},
+	}
+	sm := &mockStrategyManager{uninstallResult: "brew"} // would fire on Enforce
+	ps := &mockPolicyStore{
+		policies: []domain.Policy{
+			{
+				ID:           "steam",
+				Name:         "Steam",
+				ProcessNames: []string{"steam"},
+				Paths:        []string{"/Applications/Steam.app"},
+			},
+			{
+				ID:           "dota2",
+				Name:         "Dota 2",
+				ProcessNames: []string{"dota2"},
+				Paths:        []string{}, // intentionally empty
+			},
+		},
+	}
+	logger := zap.NewNop()
+
+	enforcer := NewEnforcerWithStrategy(pm, fs, ps, sm, logger)
+
+	results, err := enforcer.EnforceKillOnly(context.Background())
+	require.NoError(t, err)
+	require.Len(t, results, 2, "one result per policy")
+
+	// All matching processes were killed across both policies.
+	assert.ElementsMatch(t, []int{1001, 1002, 2001}, pm.killedPIDs)
+
+	// FileSystemManager.Delete was NOT called (no path deletion).
+	assert.Empty(t, fs.deletedPaths, "EnforceKillOnly must skip path deletion")
+
+	// Result shapes: KilledPIDs populated, DeletedPaths empty.
+	for _, r := range results {
+		assert.NotNil(t, r.DeletedPaths, "DeletedPaths must be non-nil slice")
+		assert.Empty(t, r.DeletedPaths, "EnforceKillOnly must produce empty DeletedPaths")
+	}
+}
+
 // TestEnforcePolicy_RecordsDuration verifies duration recording
 func TestEnforcePolicy_RecordsDuration(t *testing.T) {
 	pm := &mockProcessManager{}

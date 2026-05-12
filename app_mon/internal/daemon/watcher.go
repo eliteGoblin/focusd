@@ -10,6 +10,7 @@ import (
 
 	"github.com/eliteGoblin/focusd/app_mon/internal/domain"
 	"github.com/eliteGoblin/focusd/app_mon/internal/infra"
+	"github.com/eliteGoblin/focusd/app_mon/internal/policy"
 )
 
 // BackupManager interface for binary self-protection
@@ -20,25 +21,30 @@ type BackupManager interface {
 
 // WatcherConfig holds watcher daemon configuration.
 type WatcherConfig struct {
-	EnforcementInterval  time.Duration // How often to run enforcement (default 10 min)
+	EnforcementInterval  time.Duration // Full enforcement tick (kill + brew uninstall + path delete). Heavy; runs every 60s.
+	QuickKillInterval    time.Duration // Fast process-kill tick. Cheap (~100ms); runs every 10s to shrink the launch-to-kill window.
 	HeartbeatInterval    time.Duration // How often to update heartbeat
 	PartnerCheckInterval time.Duration // How often to check guardian
-	PlistCheckInterval   time.Duration // How often to check LaunchAgent plist
+	PlistCheckInterval   time.Duration // How often to check LaunchAgent plist + /etc/hosts blocklist
 	BinaryCheckInterval  time.Duration // How often to check binary integrity
 	FreedomCheckInterval time.Duration // How often to check Freedom app (default 5s)
 }
 
 // DefaultWatcherConfig returns default watcher configuration.
 //
-// EnforcementInterval is 5 min: matches the LaunchAgent's StartInterval so
-// blocked apps (Steam, Dota 2) get scanned and killed/deleted within that
-// window whether the daemons stay healthy or get respawned by launchd.
+// Cadence is split into two enforcement ticks so launching a blocked
+// app between heavy scans doesn't grant a multi-minute network window:
+//   - QuickKillInterval (10s): cheap FindByName+Kill loop. Catches a
+//     freshly-launched Steam within ~10s.
+//   - EnforcementInterval (60s): full scan including brew uninstall +
+//     path delete. Removes the binary so a reinstall isn't free.
 func DefaultWatcherConfig() WatcherConfig {
 	return WatcherConfig{
-		EnforcementInterval:  5 * time.Minute,
+		EnforcementInterval:  60 * time.Second,
+		QuickKillInterval:    10 * time.Second,
 		HeartbeatInterval:    30 * time.Second,
 		PartnerCheckInterval: 60 * time.Second,
-		PlistCheckInterval:   60 * time.Second, // Check plist every minute
+		PlistCheckInterval:   60 * time.Second, // Check plist + hosts blocklist every minute
 		BinaryCheckInterval:  60 * time.Second, // Check binary integrity every minute
 		FreedomCheckInterval: 5 * time.Second,  // Check Freedom every 5 seconds (fast restart)
 	}
@@ -50,6 +56,9 @@ func DefaultWatcherConfig() WatcherConfig {
 // It also protects the LaunchAgent plist file, restoring it if deleted.
 // It also protects the binary itself, restoring from backup if deleted/corrupted.
 // It also protects Freedom app, restarting it if killed.
+// It also maintains a DNS blocklist in /etc/hosts so blocked domains
+// fail to resolve regardless of which application asks (Steam ignores
+// the system HTTP proxy, so DNS-layer is the only reliable network block).
 type Watcher struct {
 	config           WatcherConfig
 	enforcer         domain.Enforcer
@@ -58,6 +67,7 @@ type Watcher struct {
 	launchAgent      domain.LaunchAgentManager
 	backupManager    BackupManager
 	freedomProtector domain.FreedomProtector
+	hostsManager     *infra.HostsManager
 	logger           *zap.Logger
 	daemon           domain.Daemon
 }
@@ -71,6 +81,7 @@ func NewWatcher(
 	launchAgent domain.LaunchAgentManager,
 	backupManager BackupManager,
 	freedomProtector domain.FreedomProtector,
+	hostsManager *infra.HostsManager,
 	daemon domain.Daemon,
 	logger *zap.Logger,
 ) *Watcher {
@@ -82,6 +93,7 @@ func NewWatcher(
 		launchAgent:      launchAgent,
 		backupManager:    backupManager,
 		freedomProtector: freedomProtector,
+		hostsManager:     hostsManager,
 		daemon:           daemon,
 		logger:           logger,
 	}
@@ -118,11 +130,18 @@ func (w *Watcher) Run(ctx context.Context) error {
 	// single source of truth for which daemons are "ours".
 	w.reapOrphans()
 
+	// Install / refresh DNS blocklist in /etc/hosts on startup. This
+	// is the first line of defense against Steam-style apps that ignore
+	// the system HTTP proxy: even when launched they can't resolve
+	// their servers.
+	w.ensureHostsBlocklist()
+
 	// Protect Freedom on startup
 	w.protectFreedom()
 
 	// Set up tickers
 	enforceTicker := time.NewTicker(w.config.EnforcementInterval)
+	quickKillTicker := time.NewTicker(w.config.QuickKillInterval)
 	heartbeatTicker := time.NewTicker(w.config.HeartbeatInterval)
 	partnerCheckTicker := time.NewTicker(w.config.PartnerCheckInterval)
 	plistCheckTicker := time.NewTicker(w.config.PlistCheckInterval)
@@ -131,6 +150,7 @@ func (w *Watcher) Run(ctx context.Context) error {
 
 	defer func() {
 		enforceTicker.Stop()
+		quickKillTicker.Stop()
 		heartbeatTicker.Stop()
 		partnerCheckTicker.Stop()
 		plistCheckTicker.Stop()
@@ -147,6 +167,9 @@ func (w *Watcher) Run(ctx context.Context) error {
 		case <-enforceTicker.C:
 			w.runEnforcement(ctx)
 
+		case <-quickKillTicker.C:
+			w.runQuickKill(ctx)
+
 		case <-heartbeatTicker.C:
 			if err := w.registry.UpdateHeartbeat(domain.RoleWatcher); err != nil {
 				w.logger.Warn("failed to update heartbeat", zap.Error(err))
@@ -157,6 +180,7 @@ func (w *Watcher) Run(ctx context.Context) error {
 
 		case <-plistCheckTicker.C:
 			w.ensurePlistInstalled()
+			w.ensureHostsBlocklist()
 
 		case <-binaryCheckTicker.C:
 			w.ensureBinaryIntegrity()
@@ -307,6 +331,48 @@ func (w *Watcher) sweepStaleRelocations() {
 
 	if err := relocator.CleanStale(keep, 2*time.Minute); err != nil {
 		w.logger.Debug("relocation sweep failed", zap.Error(err))
+	}
+}
+
+// runQuickKill runs the fast process-kill loop across all policies.
+// Skips brew uninstall + path deletion — those run on the slower
+// EnforcementInterval. Purpose: shrink the time between a blocked app
+// launching and being killed from ~60s to ~10s, so apps like Steam
+// don't get a chance to start network transfers before they die.
+func (w *Watcher) runQuickKill(ctx context.Context) {
+	if _, err := w.enforcer.EnforceKillOnly(ctx); err != nil {
+		w.logger.Warn("quick-kill failed", zap.Error(err))
+	}
+}
+
+// ensureHostsBlocklist installs / refreshes the appmon-managed section
+// of /etc/hosts so blocked domains can't be resolved. In user mode the
+// daemon lacks permission to write /etc/hosts; the resulting EACCES is
+// logged at Debug and the call returns — DNS blocking is a system-mode-
+// only layer, not a regression for user-mode users.
+//
+// On any successful write, the macOS DNS cache is flushed so the new
+// entries take effect immediately rather than after the resolver's TTL.
+func (w *Watcher) ensureHostsBlocklist() {
+	if w.hostsManager == nil {
+		return
+	}
+	changed, err := w.hostsManager.EnsureBlocklist(policy.DefaultDNSBlocklist)
+	if err != nil {
+		if os.IsPermission(err) {
+			w.logger.Debug("hosts blocklist skipped (need root)", zap.Error(err))
+			return
+		}
+		w.logger.Warn("hosts blocklist write failed", zap.Error(err))
+		return
+	}
+	if changed {
+		w.logger.Info("hosts blocklist updated",
+			zap.Int("entries", len(policy.DefaultDNSBlocklist)))
+		if err := w.hostsManager.FlushDNSCache(); err != nil {
+			w.logger.Debug("DNS cache flush failed (entries still apply on next lookup)",
+				zap.Error(err))
+		}
 	}
 }
 

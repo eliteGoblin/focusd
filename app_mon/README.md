@@ -18,6 +18,8 @@ A self-enforcing application monitor that blocks distracting apps like Steam and
 - **Login-Items Obfuscation**: The LaunchAgent plist points at a relocated "launch stub" — macOS Login Items shows e.g. `com.apple.security.agent.f7cf9323`, not `appmon`
 - **Encrypted Registry (source of truth)**: SQLCipher database holds daemon PIDs, plist label, launch stub path, version. Update flow and watcher both read from it — no split-brain
 - **Orphan Reaper**: Watcher periodically scans the relocator cache dir and kills any process whose PID isn't in the registry (handles failed updates, racing spawns, stale state)
+- **DNS-Layer Blocking**: Permanent ban list (~68 hostnames) installed into `/etc/hosts` and self-restored within 60s if tampered. Catches Steam-style apps that ignore the system HTTP proxy
+- **Quick-Kill Tick**: 10-second process-kill loop alongside the 60-second full scan. A freshly-launched blocked app dies within ~10 seconds before it can establish meaningful network transfers
 - **No Stop Command**: Intentional friction to prevent impulsive disabling
 
 ## Installation
@@ -80,6 +82,15 @@ appmon list
 │  - Updater + watcher both read from it (no split-brain)      │
 │  - Orphan reaper kills cache-dir PIDs not in registry        │
 └──────────────────────────────────────────────────────────────┘
+                            │
+┌──────────────────────────────────────────────────────────────┐
+│  Layer 5: DNS Blocklist (/etc/hosts)                         │
+│  - Compiled-in permanent ban list (~68 hostnames)            │
+│  - Installed between # BEGIN/END appmon-blocklist markers    │
+│  - Reverted to compiled list on every 60s tick (tamper-fix)  │
+│  - User entries outside markers preserved (tamper-safe)      │
+│  - Catches apps that ignore system HTTP proxy (Steam, etc.)  │
+└──────────────────────────────────────────────────────────────┘
 ```
 
 ## What Gets Blocked
@@ -124,6 +135,8 @@ The watcher scans every **5 minutes**, matching the LaunchAgent's `StartInterval
 | Suspect broken state, want to reset cleanly | `sudo appmon start` does unconditional pre-flight cleanup, then respawns. Idempotent — no-op when state is clean. |
 | Status command lies about RUNNING | After v0.5.3 `appmon status` (no sudo) reads `ps` directly; registry is enrichment, not the source of truth. Mode mismatch is shown explicitly. |
 | Stale other-mode binary / registry from old install | `appmon start` auto-purges them (removes other-mode binary, plist, and data dir). No manual cleanup needed. |
+| Blocked app launches and tries to download | Quick-kill tick fires within ~10s; even before that, DNS blocklist makes domain resolution fail so no network traffic happens |
+| `/etc/hosts` blocklist tampering | Watcher restores the compiled list within 60s; entries outside the appmon markers are preserved |
 
 ## File Locations
 

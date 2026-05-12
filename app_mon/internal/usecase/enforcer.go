@@ -53,6 +53,65 @@ func NewEnforcerWithStrategy(
 	}
 }
 
+// EnforceKillOnly runs the kill phase across all policies without the
+// brew-uninstall or path-deletion phases. Used by the watcher's fast
+// tick (~10s) so a freshly-launched blocked app gets killed within
+// seconds — closing the window between heavy Enforce runs where a user
+// could launch Steam and start a download before the next 60s tick.
+//
+// Skipping the heavy phases keeps this call ~100ms (just FindByName +
+// Kill per pattern), which is safe to run at 10s cadence with negligible
+// CPU. The 60s Enforce still handles the destructive cleanup (delete
+// app bundles, run brew uninstall) — kills alone won't prevent a
+// reinstall, so deep cleanup remains on its own schedule.
+func (e *EnforcerImpl) EnforceKillOnly(ctx context.Context) ([]domain.EnforcementResult, error) {
+	policies := e.policyStore.GetAll()
+	results := make([]domain.EnforcementResult, 0, len(policies))
+
+	for _, policy := range policies {
+		result := e.enforceKill(ctx, policy)
+		if result != nil {
+			results = append(results, *result)
+		}
+	}
+
+	return results, nil
+}
+
+// enforceKill is the inner kill-only loop shared by EnforceKillOnly and
+// EnforcePolicy. Splitting it lets the fast tick reuse the same Find +
+// Kill code path without duplicating logging or result-shape concerns.
+func (e *EnforcerImpl) enforceKill(ctx context.Context, policy domain.Policy) *domain.EnforcementResult {
+	result := &domain.EnforcementResult{
+		PolicyID:     policy.ID,
+		KilledPIDs:   make([]int, 0),
+		DeletedPaths: make([]string, 0),
+		SkippedPaths: make([]string, 0),
+		Errors:       make([]error, 0),
+		ExecutedAt:   time.Now(),
+	}
+
+	for _, pattern := range policy.ProcessNames {
+		pids, err := e.processManager.FindByName(pattern)
+		if err != nil {
+			result.Errors = append(result.Errors, err)
+			continue
+		}
+		for _, pid := range pids {
+			if err := e.processManager.Kill(pid); err != nil {
+				result.Errors = append(result.Errors, err)
+				continue
+			}
+			e.logger.Info("killed process",
+				zap.String("policy", policy.ID),
+				zap.Int("pid", pid),
+				zap.String("pattern", pattern))
+			result.KilledPIDs = append(result.KilledPIDs, pid)
+		}
+	}
+	return result
+}
+
 // Enforce runs all policies once.
 func (e *EnforcerImpl) Enforce(ctx context.Context) ([]domain.EnforcementResult, error) {
 	policies := e.policyStore.GetAll()
