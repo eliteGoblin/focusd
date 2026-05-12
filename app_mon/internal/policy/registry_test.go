@@ -18,12 +18,12 @@ type fakePolicy struct {
 	interval time.Duration
 }
 
-func (f *fakePolicy) ID() string                                                 { return f.id }
-func (f *fakePolicy) Name() string                                               { return f.name }
-func (f *fakePolicy) ProcessPatterns() []string                                  { return f.patterns }
-func (f *fakePolicy) PathsToDelete() []string                                    { return f.paths }
-func (f *fakePolicy) ScanInterval() time.Duration                                { return f.interval }
-func (f *fakePolicy) PreEnforce(context.Context) error                           { return nil }
+func (f *fakePolicy) ID() string                                                   { return f.id }
+func (f *fakePolicy) Name() string                                                 { return f.name }
+func (f *fakePolicy) ProcessPatterns() []string                                    { return f.patterns }
+func (f *fakePolicy) PathsToDelete() []string                                      { return f.paths }
+func (f *fakePolicy) ScanInterval() time.Duration                                  { return f.interval }
+func (f *fakePolicy) PreEnforce(context.Context) error                             { return nil }
 func (f *fakePolicy) PostEnforce(context.Context, *domain.EnforcementResult) error { return nil }
 
 func TestNewRegistry_RegistersDefaultPolicies(t *testing.T) {

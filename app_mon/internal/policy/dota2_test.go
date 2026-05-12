@@ -32,9 +32,9 @@ func TestDota2Policy_ProcessPatternsCoverKnownExecutables(t *testing.T) {
 	// All of these are macOS process names observed on real installs;
 	// removing any silently breaks the kill loop.
 	required := []string{
-		"dota2",        // launcher
-		"dota_osx64",   // 64-bit game binary
-		"Dota 2",       // UI / app bundle name
+		"dota2",      // launcher
+		"dota_osx64", // 64-bit game binary
+		"Dota 2",     // UI / app bundle name
 	}
 	have := map[string]struct{}{}
 	for _, p := range patterns {
@@ -78,11 +78,11 @@ func TestDota2Policy_PathsToDelete_CoverGameInstallAndCache(t *testing.T) {
 	paths := p.PathsToDelete()
 
 	expectedSubstrings := []string{
-		"steamapps/common/dota 2 beta",       // main game install
-		"steamapps/appmanifest_570.acf",      // Steam catalog entry
-		"steamapps/workshop/content/570",     // mods / custom games
-		"steamapps/shadercache/570",          // GPU shader cache
-		"steamapps/downloading/570",          // partial downloads
+		"steamapps/common/dota 2 beta",   // main game install
+		"steamapps/appmanifest_570.acf",  // Steam catalog entry
+		"steamapps/workshop/content/570", // mods / custom games
+		"steamapps/shadercache/570",      // GPU shader cache
+		"steamapps/downloading/570",      // partial downloads
 	}
 	for _, need := range expectedSubstrings {
 		found := false
