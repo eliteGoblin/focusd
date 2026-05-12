@@ -514,47 +514,104 @@ func copyBinary(src, dst string) error {
 
 func runStatus(cmd *cobra.Command, args []string) error {
 	pm := infra.NewProcessManager()
+
+	fmt.Println("\n=== appmon Status ===")
+
+	// Source of truth for "is appmon running": ps. The encrypted registry
+	// is mode-scoped (user vs system), so a user-mode CLI cannot read the
+	// system-mode registry — it'd report NOT RUNNING even when system-
+	// mode daemons are alive. ps is world-readable, so we use it for
+	// liveness and treat the registry as enrichment only.
+	live, _ := infra.DetectLiveDaemons()
+	hasWatcher, hasGuardian := false, false
+	for _, d := range live {
+		if d.Role == "watcher" {
+			hasWatcher = true
+		}
+		if d.Role == "guardian" {
+			hasGuardian = true
+		}
+	}
+	switch {
+	case hasWatcher && hasGuardian:
+		fmt.Println("Status: RUNNING (fully protected)")
+	case hasWatcher || hasGuardian:
+		fmt.Println("Status: DEGRADED (partial protection)")
+		if !hasWatcher {
+			fmt.Println("        Watcher is down (will be restarted by guardian)")
+		}
+		if !hasGuardian {
+			fmt.Println("        Guardian is down (will be restarted by watcher)")
+		}
+	default:
+		fmt.Println("Status: NOT RUNNING")
+	}
+
 	execMode := infra.DetectExecMode()
-	registry, err := openEncryptedRegistry(execMode, pm)
-	if err != nil {
-		fmt.Println("\n=== appmon Status ===")
-		fmt.Println("Status: NOT RUNNING (cannot open registry)")
-		fmt.Println("\nRun 'appmon start' to enable protection.")
+
+	// Read-only registry probe: don't auto-create the key/DB just to
+	// answer "what's the status?" — that would silently recreate the
+	// user-mode footprint we just cleaned up, putting us back in the
+	// dual-mode trap. If no key exists for this mode's data dir, we
+	// fall through to ps-only output.
+	keyProvider := infra.NewFileKeyProvider(execMode.DataDir)
+	if !keyProvider.KeyExists() {
+		if hasWatcher || hasGuardian {
+			fmt.Println("\nNote: daemons run in a different mode than this CLI.")
+			fmt.Println("      For full version + heartbeat details, run:")
+			fmt.Println("        sudo /usr/local/bin/appmon status")
+		} else {
+			fmt.Println("\nRun 'appmon start' (or 'sudo appmon start' for system mode) to enable protection.")
+		}
+		printLiveDaemonList(live)
+		return nil
+	}
+
+	registry, regErr := openEncryptedRegistry(execMode, pm)
+	if regErr != nil {
+		// Registry exists but unreadable (e.g. permission). ps liveness
+		// is already printed above; just hint at the right command.
+		if hasWatcher || hasGuardian {
+			fmt.Println("\nNote: cannot read this mode's registry (permission?).")
+			fmt.Println("      For full version + heartbeat details, run:")
+			fmt.Println("        sudo /usr/local/bin/appmon status")
+		} else {
+			fmt.Println("\nRun 'appmon start' to enable protection.")
+		}
+		printLiveDaemonList(live)
 		return nil
 	}
 	defer registry.Close()
 
-	// Load randomized plist label for status display
 	if plistLabel, labelErr := infra.EnsurePlistLabel(registry); labelErr == nil {
 		_ = rebuildExecModeWithLabel(execMode, plistLabel)
 	}
 
 	backupManager := infra.NewBackupManager()
 
-	fmt.Println("\n=== appmon Status ===")
-
 	entry, err := registry.GetAll()
 	if err != nil || entry == nil {
-		fmt.Println("Status: NOT RUNNING")
-		fmt.Println("\nRun 'appmon start' to enable protection.")
+		if hasWatcher || hasGuardian {
+			fmt.Println("\nNote: daemons running but this CLI's registry is empty.")
+			fmt.Println("      Likely a mode mismatch; try: sudo /usr/local/bin/appmon status")
+		} else {
+			fmt.Println("\nRun 'appmon start' to enable protection.")
+		}
+		printLiveDaemonList(live)
 		return nil
 	}
 
-	watcherAlive := pm.IsRunning(entry.WatcherPID)
-	guardianAlive := pm.IsRunning(entry.GuardianPID)
-
-	if watcherAlive && guardianAlive {
-		fmt.Println("Status: RUNNING (fully protected)")
-	} else if watcherAlive || guardianAlive {
-		fmt.Println("Status: DEGRADED (partial protection)")
-		if !watcherAlive {
-			fmt.Println("        Watcher is down (will be restarted by guardian)")
-		}
-		if !guardianAlive {
-			fmt.Println("        Guardian is down (will be restarted by watcher)")
-		}
-	} else {
-		fmt.Println("Status: NOT RUNNING")
+	// If ps says daemons are alive but the registry shows different PIDs
+	// (or empty), flag it — usually means the registry is stale or from
+	// the other mode.
+	registryAgreesWithPS := false
+	if hasWatcher && pm.IsRunning(entry.WatcherPID) &&
+		hasGuardian && pm.IsRunning(entry.GuardianPID) {
+		registryAgreesWithPS = true
+	}
+	if (hasWatcher || hasGuardian) && !registryAgreesWithPS {
+		fmt.Println("        (registry shows stale PIDs — likely a mode mismatch;")
+		fmt.Println("         live daemons listed below come from ps, not the registry)")
 	}
 
 	// Show version info
@@ -606,6 +663,10 @@ func runStatus(cmd *cobra.Command, args []string) error {
 		lastBeat := time.Unix(entry.LastHeartbeat, 0)
 		fmt.Printf("Last heartbeat: %s ago\n", time.Since(lastBeat).Round(time.Second))
 	}
+
+	// Live processes from ps — independent of registry state, makes
+	// mode-mismatch and stale-registry situations debuggable at a glance.
+	printLiveDaemonList(live)
 
 	// Blocked apps
 	fmt.Println("\nBlocked applications:")
@@ -1020,6 +1081,23 @@ func openEncryptedRegistry(execMode *infra.ExecModeConfig, pm domain.ProcessMana
 	return reg, nil
 }
 
+// printLiveDaemonList prints a compact view of daemons discovered via ps.
+// Always uses real PIDs and observed paths — never registry data — so it's
+// safe to call from any mode/uid and exposes mode mismatches cleanly.
+func printLiveDaemonList(live []infra.LiveDaemon) {
+	if len(live) == 0 {
+		return
+	}
+	fmt.Println("\nLive daemon processes (from ps):")
+	for _, d := range live {
+		role := d.Role
+		if role == "" {
+			role = "?"
+		}
+		fmt.Printf("  - pid=%d role=%s path=%s\n", d.PID, role, d.Path)
+	}
+}
+
 // heartbeatStaleThreshold is the maximum age of last_heartbeat we treat as
 // "still alive". Anything older means the daemon is stuck or dead — even
 // if the kernel still owns the PID — so the spawn path will tear it down
@@ -1131,56 +1209,113 @@ func isNewerVersion(current, installed string) bool {
 	return false // Equal versions
 }
 
-// detectAndCleanupOtherModeDaemons checks if daemons are running in the OTHER mode
-// (user vs system) and cleans them up if found. This prevents two sets of daemons
-// running simultaneously when switching modes without explicit --mode flag.
+// detectAndCleanupOtherModeDaemons surveys the OTHER mode (user vs system)
+// for leftover artifacts and removes them. Runs unconditionally on every
+// `appmon start` — even when no other-mode plist is present — because a
+// half-cleaned other-mode install (stale binary at the other location,
+// stale registry under the other DataDir) is exactly what causes
+// `appmon status` to read the wrong DB and lie to the user.
+//
+// What gets cleaned up:
+//   - Other-mode plist (unload + rm)
+//   - Other-mode binary at the canonical path for that mode
+//   - Other-mode data dir (encrypted registry + key) — root deletes
+//     `/var/lib/appmon`; user deletes `~/.appmon`
+//
+// We don't touch the relocator cache dir (`~/.cache/.com.apple.xpc.*/`):
+// it's mode-agnostic and reaped by the watcher's orphan reaper anyway.
+//
+// The function tolerates permission errors: a user-mode `appmon start`
+// can't `rm /var/lib/appmon`, but that's fine — the dir isn't writable
+// or readable by the user, so it can't cause status drift either.
 func detectAndCleanupOtherModeDaemons(execMode *infra.ExecModeConfig, pm domain.ProcessManager) error {
-	var otherModePlistPattern string
-	var otherModeDescription string
+	otherMode, plistPattern, binaryPath, dataDir := otherModePaths(execMode)
+	otherModeDescription := string(otherMode)
 
-	if execMode.Mode == infra.ExecModeSystem {
-		// Starting system mode - check for user mode plists
-		home := infra.GetRealUserHome()
-		otherModePlistPattern = filepath.Join(home, "Library/LaunchAgents/com.apple.*.plist")
-		otherModeDescription = "user"
-	} else {
-		// Starting user mode - check for system mode plists
-		otherModePlistPattern = "/Library/LaunchDaemons/com.apple.*.plist"
-		otherModeDescription = "system"
-	}
-
-	// Glob for plists matching the pattern
-	matches, err := filepath.Glob(otherModePlistPattern)
+	// Step 1: find and unload other-mode plists.
+	matches, err := filepath.Glob(plistPattern)
 	if err != nil {
 		return fmt.Errorf("failed to glob for other mode plists: %w", err)
 	}
 
-	if len(matches) == 0 {
-		// No other-mode plists found, proceed normally
+	plistFound := len(matches) > 0
+	binaryFound := fileExists(binaryPath)
+	dataDirFound := fileExists(dataDir)
+
+	if !plistFound && !binaryFound && !dataDirFound {
+		// Nothing to do — clean slate.
 		return nil
 	}
 
-	// Found plists from other mode - kill all appmon daemons and cleanup
-	fmt.Printf("Detected %s mode daemons running, switching to %s mode...\n",
-		otherModeDescription, execMode.Mode)
+	if plistFound {
+		fmt.Printf("Detected %s mode daemons running, switching to %s mode...\n",
+			otherModeDescription, execMode.Mode)
 
-	// Kill all appmon processes except current CLI
-	pids, _ := pm.FindByName("appmon")
-	for _, pid := range pids {
-		if pid != pm.GetCurrentPID() {
-			_ = pm.Kill(pid)
+		// Kill all appmon processes except current CLI
+		pids, _ := pm.FindByName("appmon")
+		for _, pid := range pids {
+			if pid != pm.GetCurrentPID() {
+				_ = pm.Kill(pid)
+			}
+		}
+
+		for _, plistPath := range matches {
+			_ = exec.Command("launchctl", "unload", plistPath).Run()
+			if err := os.Remove(plistPath); err == nil {
+				fmt.Printf("Removed stale %s-mode plist: %s\n", otherModeDescription, filepath.Base(plistPath))
+			}
 		}
 	}
 
-	// Unload and remove all found plists
-	for _, plistPath := range matches {
-		_ = exec.Command("launchctl", "unload", plistPath).Run()
-		_ = os.Remove(plistPath)
+	// Step 2: remove stale binary in the other mode's install location.
+	// Idempotent — only fires when the file actually exists.
+	if binaryFound {
+		if err := os.Remove(binaryPath); err == nil {
+			fmt.Printf("Removed stale %s-mode binary: %s\n", otherModeDescription, binaryPath)
+		}
 	}
 
-	// Give processes time to die
-	time.Sleep(1 * time.Second)
+	// Step 3: remove the other mode's data dir (registry, key, backups).
+	// This is the bit that fixes "appmon status lies because it reads
+	// the wrong DB" — without it, a stale registry from a former
+	// session can sit around indefinitely and confuse the read path.
+	if dataDirFound {
+		if err := os.RemoveAll(dataDir); err == nil {
+			fmt.Printf("Removed stale %s-mode data dir: %s\n", otherModeDescription, dataDir)
+		}
+	}
 
-	fmt.Printf("Cleaned up %d %s mode plist(s)\n", len(matches), otherModeDescription)
+	// Give any killed processes time to fully exit before we proceed
+	// with the spawn step. Skipping the wait when nothing was killed.
+	if plistFound {
+		time.Sleep(1 * time.Second)
+	}
+
 	return nil
+}
+
+// otherModePaths returns the canonical artifact paths for the mode that is
+// NOT the one we're starting in. Splitting this out keeps the cleanup
+// logic readable and makes it trivial to test against fake homes.
+func otherModePaths(execMode *infra.ExecModeConfig) (
+	otherMode infra.ExecMode,
+	plistPattern string,
+	binaryPath string,
+	dataDir string,
+) {
+	home := infra.GetRealUserHome()
+	if execMode.Mode == infra.ExecModeSystem {
+		// Starting system → clean up user-mode footprint.
+		otherMode = infra.ExecModeUser
+		plistPattern = filepath.Join(home, "Library/LaunchAgents/com.apple.*.plist")
+		binaryPath = filepath.Join(home, ".local", "bin", "appmon")
+		dataDir = filepath.Join(home, ".appmon")
+		return
+	}
+	// Starting user → clean up system-mode footprint.
+	otherMode = infra.ExecModeSystem
+	plistPattern = "/Library/LaunchDaemons/com.apple.*.plist"
+	binaryPath = "/usr/local/bin/appmon"
+	dataDir = "/var/lib/appmon"
+	return
 }
