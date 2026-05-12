@@ -6,10 +6,20 @@ builds:
   - id: appmon
     main: ./cmd/appmon
     binary: appmon
+    # SQLCipher (encrypted registry) requires CGO. Matches the Makefile's
+    # CGO_ENABLED=1 build line — without this, goreleaser defaults to
+    # CGO_ENABLED=0 and fails with "undefined: sqlcipher.ErrBusy".
+    env:
+      - CGO_ENABLED=1
+    # arm64 only for now. Adding amd64 requires CGO cross-compile setup
+    # (SDKROOT + CC=clang -arch x86_64) because SQLCipher needs CGO, and
+    # we can't naively cross-compile CGO from an arm64 GitHub Actions
+    # runner to darwin/amd64. Modern Macs are arm64; users on Intel Macs
+    # can build from source via `make build` until we wire up the
+    # cross-compile.
     goos:
       - darwin
     goarch:
-      - amd64
       - arm64
     ldflags:
       - -s -w
