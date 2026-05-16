@@ -1,0 +1,80 @@
+name: Platform CI
+
+on:
+  push:
+    branches: [master, main]
+    paths:
+      - 'platform/**'
+      - 'plugins/**'
+      - 'go.work'
+      - '.github/workflows/platform.yml'
+  pull_request:
+    branches: [master, main]
+    paths:
+      - 'platform/**'
+      - 'plugins/**'
+      - 'go.work'
+      - '.github/workflows/platform.yml'
+  workflow_dispatch:
+
+jobs:
+  format:
+    name: Format Check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.25'
+      - name: gofmt
+        run: |
+          unformatted="$(gofmt -s -l platform plugins)"
+          if [ -n "$unformatted" ]; then
+            echo "Not gofmt-formatted:"; echo "$unformatted"; exit 1
+          fi
+
+  test:
+    name: Test (${{ matrix.module }} / ${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+        module:
+          - platform
+          - plugins/kill-steam
+          - plugins/browser-monitor
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.25'
+          cache-dependency-path: ${{ matrix.module }}/go.sum
+      - name: Download deps
+        working-directory: ${{ matrix.module }}
+        run: go mod download
+      - name: Vet
+        working-directory: ${{ matrix.module }}
+        run: go vet ./...
+      - name: Test (race + coverage)
+        working-directory: ${{ matrix.module }}
+        run: go test ./... -count=1 -race -coverprofile=coverage.out
+
+  build:
+    name: Cross-build artifacts
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.25'
+      - name: Build platform (darwin/arm64, darwin/amd64, windows/amd64)
+        run: bash scripts/build-platform.sh
+      - name: Build plugins (per OS/arch + checksums)
+        run: bash scripts/build-plugins.sh
+      - name: Upload dist
+        uses: actions/upload-artifact@v4
+        with:
+          name: focusd-dist
+          path: dist/
+          retention-days: 7

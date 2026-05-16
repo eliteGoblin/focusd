@@ -62,14 +62,14 @@ func TestParseManifestAcceptsNativeBinaryRuntime(t *testing.T) {
 
 func TestParseManifestInvalid(t *testing.T) {
 	cases := map[string]string{
-		"bad json":        `{`,
-		"unknown field":   `{"id":"x","name":"X","version":"1","type":"job","protocol_version":"1","entrypoint":"./x","supported_os":["` + runtime.GOOS + `"],"supported_arch":["` + runtime.GOARCH + `"],"required_privilege":"user","run_as":"current_user","extra":1}`,
-		"missing id":      `{"name":"X","version":"1","type":"job","protocol_version":"1","entrypoint":"./x","supported_os":["x"],"supported_arch":["y"],"required_privilege":"user","run_as":"current_user"}`,
-		"bad type":        `{"id":"x","name":"X","version":"1","type":"weird","protocol_version":"1","entrypoint":"./x","supported_os":["x"],"supported_arch":["y"],"required_privilege":"user","run_as":"current_user"}`,
-		"bad privilege":   `{"id":"x","name":"X","version":"1","type":"job","protocol_version":"1","entrypoint":"./x","supported_os":["x"],"supported_arch":["y"],"required_privilege":"root","run_as":"current_user"}`,
-		"bad run_as":      `{"id":"x","name":"X","version":"1","type":"job","protocol_version":"1","entrypoint":"./x","supported_os":["x"],"supported_arch":["y"],"required_privilege":"user","run_as":"god"}`,
-		"empty os list":   `{"id":"x","name":"X","version":"1","type":"job","protocol_version":"1","entrypoint":"./x","supported_os":[],"supported_arch":["y"],"required_privilege":"user","run_as":"current_user"}`,
-		"bad runtime":     `{"id":"x","name":"X","version":"1","type":"job","runtime":"wasm","protocol_version":"1","entrypoint":"./x","supported_os":["` + runtime.GOOS + `"],"supported_arch":["` + runtime.GOARCH + `"],"required_privilege":"user","run_as":"current_user"}`,
+		"bad json":      `{`,
+		"unknown field": `{"id":"x","name":"X","version":"1","type":"job","protocol_version":"1","entrypoint":"./x","supported_os":["` + runtime.GOOS + `"],"supported_arch":["` + runtime.GOARCH + `"],"required_privilege":"user","run_as":"current_user","extra":1}`,
+		"missing id":    `{"name":"X","version":"1","type":"job","protocol_version":"1","entrypoint":"./x","supported_os":["x"],"supported_arch":["y"],"required_privilege":"user","run_as":"current_user"}`,
+		"bad type":      `{"id":"x","name":"X","version":"1","type":"weird","protocol_version":"1","entrypoint":"./x","supported_os":["x"],"supported_arch":["y"],"required_privilege":"user","run_as":"current_user"}`,
+		"bad privilege": `{"id":"x","name":"X","version":"1","type":"job","protocol_version":"1","entrypoint":"./x","supported_os":["x"],"supported_arch":["y"],"required_privilege":"root","run_as":"current_user"}`,
+		"bad run_as":    `{"id":"x","name":"X","version":"1","type":"job","protocol_version":"1","entrypoint":"./x","supported_os":["x"],"supported_arch":["y"],"required_privilege":"user","run_as":"god"}`,
+		"empty os list": `{"id":"x","name":"X","version":"1","type":"job","protocol_version":"1","entrypoint":"./x","supported_os":[],"supported_arch":["y"],"required_privilege":"user","run_as":"current_user"}`,
+		"bad runtime":   `{"id":"x","name":"X","version":"1","type":"job","runtime":"wasm","protocol_version":"1","entrypoint":"./x","supported_os":["` + runtime.GOOS + `"],"supported_arch":["` + runtime.GOARCH + `"],"required_privilege":"user","run_as":"current_user"}`,
 	}
 	for name, raw := range cases {
 		t.Run(name, func(t *testing.T) {

@@ -81,11 +81,11 @@ func TestInvalidRunModeRejected(t *testing.T) {
 
 func TestRunModeValid(t *testing.T) {
 	cases := map[RunMode]bool{
-		ModeUser:           true,
-		ModeSystem:         true,
-		RunMode(""):        false,
-		RunMode("root"):    false,
-		RunMode("SYSTEM"):  false,
+		ModeUser:          true,
+		ModeSystem:        true,
+		RunMode(""):       false,
+		RunMode("root"):   false,
+		RunMode("SYSTEM"): false,
 	}
 	for m, want := range cases {
 		if got := m.Valid(); got != want {

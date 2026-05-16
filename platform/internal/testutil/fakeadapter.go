@@ -84,7 +84,7 @@ func (f *FakeAdapter) DefaultStateDir(m osadapter.RunMode) (string, error) {
 	return filepath.Join(b, "state"), err
 }
 
-func (f *FakeAdapter) InstallAgent(osadapter.RunMode) error { f.InstallCalled = true; return nil }
+func (f *FakeAdapter) InstallAgent(osadapter.RunMode) error   { f.InstallCalled = true; return nil }
 func (f *FakeAdapter) UninstallAgent(osadapter.RunMode) error { return nil }
 func (f *FakeAdapter) IsAgentInstalled(osadapter.RunMode) (bool, error) {
 	return f.InstallCalled, nil

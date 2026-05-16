@@ -18,11 +18,11 @@ func TestKillsExactMatchOnly(t *testing.T) {
 	procs := []procView{
 		{PID: 10, Name: "Steam"},
 		{PID: 11, Name: "steam_osx"},
-		{PID: 12, Name: "msteams"},     // MUST NOT be killed
-		{PID: 13, Name: "MSTeams"},     // MUST NOT be killed
-		{PID: 14, Name: "Slack"},       // unrelated
-		{PID: 15, Name: "dota2"},       // killed
-		{PID: 16, Name: "STEAM"},       // case-insensitive exact -> killed
+		{PID: 12, Name: "msteams"}, // MUST NOT be killed
+		{PID: 13, Name: "MSTeams"}, // MUST NOT be killed
+		{PID: 14, Name: "Slack"},   // unrelated
+		{PID: 15, Name: "dota2"},   // killed
+		{PID: 16, Name: "STEAM"},   // case-insensitive exact -> killed
 	}
 	out, err := newFake(procs, nil).Run()
 	if err != nil {

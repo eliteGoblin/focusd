@@ -33,11 +33,11 @@ const (
 
 // Manifest is the parsed plugin.json.
 type Manifest struct {
-	ID                string   `json:"id"`
-	Name              string   `json:"name"`
-	Version           string   `json:"version"`
-	Type              string   `json:"type"`
-	ProtocolVersion   string   `json:"protocol_version"`
+	ID              string `json:"id"`
+	Name            string `json:"name"`
+	Version         string `json:"version"`
+	Type            string `json:"type"`
+	ProtocolVersion string `json:"protocol_version"`
 	// Runtime is optional. "" or "native_binary" => the platform execs
 	// the entrypoint directly (the only model supported today). Any
 	// other value is rejected so the platform never tries to run a

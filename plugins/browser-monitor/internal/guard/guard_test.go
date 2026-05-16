@@ -11,14 +11,14 @@ import (
 
 func TestExtractHost(t *testing.T) {
 	cases := map[string]string{
-		"https://www.youtube.com/watch?v=x":     "www.youtube.com",
-		"http://Google.COM/search?q=1":          "google.com",
-		"https://user:pass@news.com.au:8443/a":  "news.com.au",
-		"steampowered.com/app/570":              "steampowered.com",
-		"https://sub.zhihu.com":                 "sub.zhihu.com",
-		"":                                      "",
-		"about:blank":                           "about", // scheme-less, ':' cut
-		"https://alibaba.com":                   "alibaba.com",
+		"https://www.youtube.com/watch?v=x":    "www.youtube.com",
+		"http://Google.COM/search?q=1":         "google.com",
+		"https://user:pass@news.com.au:8443/a": "news.com.au",
+		"steampowered.com/app/570":             "steampowered.com",
+		"https://sub.zhihu.com":                "sub.zhihu.com",
+		"":                                     "",
+		"about:blank":                          "about", // scheme-less, ':' cut
+		"https://alibaba.com":                  "alibaba.com",
 	}
 	for in, want := range cases {
 		if got := ExtractHost(in); got != want {
@@ -48,8 +48,8 @@ func TestIsBlocked(t *testing.T) {
 func TestScanKillsBlockedBrowserOnce(t *testing.T) {
 	tabs := []Tab{
 		{App: "Safari", URL: "https://news.com.au/story"},
-		{App: "Safari", URL: "https://www.youtube.com/feed"},   // same browser, 2nd hit
-		{App: "Google Chrome", URL: "https://example.com/ok"},  // allowed
+		{App: "Safari", URL: "https://www.youtube.com/feed"},  // same browser, 2nd hit
+		{App: "Google Chrome", URL: "https://example.com/ok"}, // allowed
 		{App: "Brave Browser", URL: "https://alibaba.com/x"},
 	}
 	var killCalls []string
