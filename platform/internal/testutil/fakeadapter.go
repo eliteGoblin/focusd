@@ -19,8 +19,9 @@ type FakeAdapter struct {
 	SystemBase      string
 
 	// Fault injection for testing bootstrap error paths.
-	FailLogDir   bool
-	FailStateDir bool
+	FailLogDir    bool
+	FailStateDir  bool
+	FailPluginDir bool
 
 	InstallCalled bool
 }
@@ -62,6 +63,9 @@ func (f *FakeAdapter) DefaultConfigPath(m osadapter.RunMode) (string, error) {
 	return filepath.Join(b, "config.yaml"), err
 }
 func (f *FakeAdapter) DefaultPluginDir(m osadapter.RunMode) (string, error) {
+	if f.FailPluginDir {
+		return "", osadapter.ErrNotImplemented
+	}
 	b, err := f.base(m)
 	return filepath.Join(b, "plugins"), err
 }

@@ -52,8 +52,8 @@ func usage() {
 
 usage:
   platform version
-  platform validate [--config PATH] [--state-db PATH] [--mode user|system]
-  platform run      [--config PATH] [--state-db PATH] [--mode user|system]
+  platform validate [--config PATH] [--state-db PATH] [--plugin-dir DIR] [--mode user|system]
+  platform run      [--config PATH] [--state-db PATH] [--plugin-dir DIR] [--mode user|system]
 `)
 }
 
@@ -61,11 +61,13 @@ func parseCommon(name string, args []string) app.Options {
 	fs := flag.NewFlagSet(name, flag.ExitOnError)
 	cfg := fs.String("config", "", "config.yaml path (default: OS layout)")
 	db := fs.String("state-db", "", "state.db path (default: OS layout)")
+	pdir := fs.String("plugin-dir", "", "plugin scan dir (default: OS layout)")
 	mode := fs.String("mode", "", "force run mode: user|system")
 	_ = fs.Parse(args)
 	return app.Options{
 		ConfigPath:  *cfg,
 		StateDBPath: *db,
+		PluginDir:   *pdir,
 		ForceMode:   osadapter.RunMode(*mode),
 	}
 }
@@ -78,10 +80,27 @@ func runValidate(args []string) int {
 	}
 	defer a.Close()
 
+	found, derr := a.DiscoverPlugins()
+	if derr != nil {
+		fmt.Fprintln(os.Stderr, "plugin discovery failed:", derr)
+		return 1
+	}
+	okCount := 0
+	for _, p := range found {
+		if p.OK {
+			okCount++
+		}
+	}
+
 	sv, _ := a.State.SchemaVersion()
-	fmt.Printf("OK  os=%s arch=%s mode=%s schema=v%d jobs=%d services=%d\n",
+	fmt.Printf("OK  os=%s arch=%s mode=%s schema=v%d jobs=%d services=%d plugins=%d/%d\n",
 		a.Adapter.CurrentOS(), a.Adapter.CurrentArch(), a.Mode,
-		sv, len(a.Config.Jobs), len(a.Config.Services))
+		sv, len(a.Config.Jobs), len(a.Config.Services), okCount, len(found))
+	for _, p := range found {
+		if !p.OK {
+			fmt.Printf("  rejected %s: %s\n", p.Dir, p.Reason)
+		}
+	}
 	return 0
 }
 
@@ -93,8 +112,11 @@ func runRun(args []string) int {
 	}
 	defer a.Close()
 
-	// Plugin discovery + scheduler are wired in later phases. Phase 1
-	// proves the runtime boots cleanly end to end.
+	if _, derr := a.DiscoverPlugins(); derr != nil {
+		fmt.Fprintln(os.Stderr, "plugin discovery failed:", derr)
+		return 1
+	}
+	// Scheduler wiring lands in a later phase.
 	a.Log.Info("platform ready (scheduler wiring lands in a later phase)")
 	return 0
 }

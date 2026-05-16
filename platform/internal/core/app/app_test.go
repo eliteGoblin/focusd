@@ -128,6 +128,65 @@ func TestBootstrapFailsWhenStateDirUnresolvable(t *testing.T) {
 	}
 }
 
+func TestDiscoverPluginsSyncsInventory(t *testing.T) {
+	fa := testutil.NewFakeAdapter(t.TempDir())
+	writeUserConfig(t, fa, sampleConfig)
+	a, err := Bootstrap(Options{Adapter: fa})
+	if err != nil {
+		t.Fatalf("Bootstrap: %v", err)
+	}
+	defer a.Close()
+
+	pdir, _ := fa.DefaultPluginDir(osadapter.ModeUser)
+	ks := filepath.Join(pdir, "kill-steam")
+	os.MkdirAll(ks, 0o755)
+	manifest := `{"id":"kill-steam","name":"Kill Steam","version":"1.0.0",
+"type":"job","protocol_version":"1","entrypoint":"./kill-steam",
+"supported_os":["` + fa.OS + `"],"supported_arch":["` + fa.Arch + `"],
+"required_privilege":"user","run_as":"current_user"}`
+	os.WriteFile(filepath.Join(ks, "plugin.json"), []byte(manifest), 0o644)
+	os.WriteFile(filepath.Join(ks, "kill-steam"), []byte("#!/bin/sh\n"), 0o755)
+
+	found, err := a.DiscoverPlugins()
+	if err != nil {
+		t.Fatalf("DiscoverPlugins: %v", err)
+	}
+	if len(found) != 1 || !found[0].OK {
+		t.Fatalf("expected 1 OK plugin, got %+v", found)
+	}
+	rows, _ := a.State.Plugins.List()
+	if len(rows) != 1 || rows[0].ID != "kill-steam" {
+		t.Errorf("inventory not synced: %+v", rows)
+	}
+}
+
+func TestBootstrapFailsWhenPluginDirUnresolvable(t *testing.T) {
+	fa := testutil.NewFakeAdapter(t.TempDir())
+	fa.FailPluginDir = true
+	writeUserConfig(t, fa, sampleConfig)
+	if _, err := Bootstrap(Options{Adapter: fa}); err == nil {
+		t.Fatal("expected error when plugin dir cannot be resolved")
+	}
+}
+
+func TestPluginDirOverrideUsed(t *testing.T) {
+	fa := testutil.NewFakeAdapter(t.TempDir())
+	writeUserConfig(t, fa, sampleConfig)
+	pdir := t.TempDir() // outside adapter layout
+	a, err := Bootstrap(Options{Adapter: fa, PluginDir: pdir})
+	if err != nil {
+		t.Fatalf("Bootstrap: %v", err)
+	}
+	defer a.Close()
+	found, err := a.DiscoverPlugins()
+	if err != nil {
+		t.Fatalf("DiscoverPlugins: %v", err)
+	}
+	if len(found) != 0 {
+		t.Errorf("empty override dir should yield no plugins, got %d", len(found))
+	}
+}
+
 func TestBootstrapExplicitPathsOverride(t *testing.T) {
 	fa := testutil.NewFakeAdapter(t.TempDir())
 	dir := t.TempDir()

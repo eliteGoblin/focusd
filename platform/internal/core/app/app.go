@@ -10,6 +10,7 @@ import (
 
 	"github.com/eliteGoblin/focusd/platform/internal/core/config"
 	"github.com/eliteGoblin/focusd/platform/internal/core/logging"
+	"github.com/eliteGoblin/focusd/platform/internal/core/plugin"
 	"github.com/eliteGoblin/focusd/platform/internal/core/state"
 	"github.com/eliteGoblin/focusd/platform/internal/osadapter"
 )
@@ -23,6 +24,8 @@ type Options struct {
 	ConfigPath string
 	// StateDBPath overrides the state DB path. "" => adapter default.
 	StateDBPath string
+	// PluginDir overrides the plugin scan directory. "" => adapter default.
+	PluginDir string
 	// ForceMode pins the run mode. "" => config, then adapter detection.
 	ForceMode osadapter.RunMode
 }
@@ -35,7 +38,8 @@ type App struct {
 	State   *state.DB
 	Log     *slog.Logger
 
-	logClose func() error
+	pluginDir string // resolved scan dir (override or adapter default)
+	logClose  func() error
 }
 
 // Bootstrap resolves the runtime in strict order: adapter → run mode →
@@ -122,13 +126,25 @@ func Bootstrap(opts Options) (*App, error) {
 		"os", adapter.CurrentOS(), "arch", adapter.CurrentArch(),
 		"mode", string(mode), "config", cfgPath, "state_db", dbPath)
 
+	pluginDir := opts.PluginDir
+	if pluginDir == "" {
+		pd, err := adapter.DefaultPluginDir(mode)
+		if err != nil {
+			db.Close()
+			logClose()
+			return nil, fmt.Errorf("resolve plugin dir: %w", err)
+		}
+		pluginDir = pd
+	}
+
 	return &App{
-		Adapter:  adapter,
-		Mode:     mode,
-		Config:   cfg,
-		State:    db,
-		Log:      log,
-		logClose: logClose,
+		Adapter:   adapter,
+		Mode:      mode,
+		Config:    cfg,
+		State:     db,
+		Log:       log,
+		pluginDir: pluginDir,
+		logClose:  logClose,
 	}, nil
 }
 
@@ -147,6 +163,32 @@ func guardMode(a osadapter.Adapter, mode osadapter.RunMode) error {
 		}
 	}
 	return nil
+}
+
+// DiscoverPlugins scans the OS plugin directory for this mode, evaluates
+// each plugin against host/protocol/privilege/security gates, and syncs
+// the result (accepted and rejected) into the inventory.
+func (a *App) DiscoverPlugins() ([]plugin.Discovered, error) {
+	d := &plugin.Discoverer{
+		GOOS:   a.Adapter.CurrentOS(),
+		GOARCH: a.Adapter.CurrentArch(),
+		Mode:   a.Mode,
+	}
+	found, err := d.Discover(a.pluginDir)
+	if err != nil {
+		return nil, err
+	}
+	if err := plugin.SyncInventory(a.State, found); err != nil {
+		return nil, fmt.Errorf("sync inventory: %w", err)
+	}
+	for _, p := range found {
+		if p.OK {
+			a.Log.Info("plugin discovered", "id", p.Manifest.ID, "dir", p.Dir)
+		} else {
+			a.Log.Warn("plugin rejected", "dir", p.Dir, "reason", p.Reason)
+		}
+	}
+	return found, nil
 }
 
 // Close releases the state DB and log file.

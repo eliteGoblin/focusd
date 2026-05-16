@@ -1,0 +1,146 @@
+package plugin
+
+import (
+	"fmt"
+	"os"
+	"path/filepath"
+	"runtime"
+	"strings"
+
+	"github.com/eliteGoblin/focusd/platform/internal/osadapter"
+)
+
+// Discovered is the outcome of inspecting one plugin directory.
+type Discovered struct {
+	Manifest *Manifest
+	Dir      string
+	// BinaryPath is the resolved executable for the current host. Empty
+	// when the plugin was rejected before/at binary resolution.
+	BinaryPath string
+	// OK is true only if the plugin is valid AND runnable in this mode.
+	OK bool
+	// Reason explains a rejection (empty when OK).
+	Reason string
+}
+
+// Discoverer scans a plugin root and decides which plugins this platform
+// instance may run, given its OS/arch and run mode.
+type Discoverer struct {
+	GOOS, GOARCH string
+	Mode         osadapter.RunMode
+}
+
+// NewDiscoverer builds a Discoverer for the current host and given mode.
+func NewDiscoverer(mode osadapter.RunMode) *Discoverer {
+	return &Discoverer{GOOS: runtime.GOOS, GOARCH: runtime.GOARCH, Mode: mode}
+}
+
+// Discover scans every immediate subdirectory of pluginRoot for a
+// plugin.json and evaluates it. Missing root => empty result, no error
+// (a fresh install legitimately has no plugins yet).
+func (d *Discoverer) Discover(pluginRoot string) ([]Discovered, error) {
+	entries, err := os.ReadDir(pluginRoot)
+	if os.IsNotExist(err) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("read plugin root %s: %w", pluginRoot, err)
+	}
+
+	var out []Discovered
+	for _, e := range entries {
+		if !e.IsDir() {
+			continue
+		}
+		dir := filepath.Join(pluginRoot, e.Name())
+		out = append(out, d.evaluate(dir))
+	}
+	return out, nil
+}
+
+func reject(dir, reason string, m *Manifest) Discovered {
+	return Discovered{Manifest: m, Dir: dir, OK: false, Reason: reason}
+}
+
+func (d *Discoverer) evaluate(dir string) Discovered {
+	raw, err := os.ReadFile(filepath.Join(dir, "plugin.json"))
+	if err != nil {
+		return reject(dir, fmt.Sprintf("read plugin.json: %v", err), nil)
+	}
+	m, err := ParseManifest(raw)
+	if err != nil {
+		return reject(dir, err.Error(), nil)
+	}
+
+	// 1. Protocol gate — never execute unknown protocol versions.
+	if !m.ProtocolSupported() {
+		return reject(dir, fmt.Sprintf("unsupported protocol_version %q (supported: %v)",
+			m.ProtocolVersion, SupportedProtocols), m)
+	}
+
+	// 2. Host gate — OS/arch must match.
+	if !m.SupportsHost(d.GOOS, d.GOARCH) {
+		return reject(dir, fmt.Sprintf("unsupported host %s/%s (plugin supports os=%v arch=%v)",
+			d.GOOS, d.GOARCH, m.SupportedOS, m.SupportedArch), m)
+	}
+
+	// 3. Privilege gate — modes are fully isolated. A user-mode platform
+	// must never run a system plugin; do not silently elevate.
+	if d.Mode == osadapter.ModeUser && m.RequiredPrivilege == PrivSystem {
+		return reject(dir, "system plugin cannot run under user-mode platform", m)
+	}
+
+	// 4. Security gate — a system/root platform must never execute a
+	// plugin from a user-writable directory (spec §Important security
+	// rule). User-writable here = group/other write bit set.
+	if d.Mode == osadapter.ModeSystem {
+		writable, werr := dirIsUserWritable(dir)
+		if werr != nil {
+			return reject(dir, fmt.Sprintf("inspect plugin dir perms: %v", werr), m)
+		}
+		if writable {
+			return reject(dir, "system-mode refuses plugin from user-writable directory", m)
+		}
+	}
+
+	// 5. Resolve the executable for this host.
+	bin, berr := resolveBinary(dir, m, d.GOOS, d.GOARCH)
+	if berr != nil {
+		return reject(dir, berr.Error(), m)
+	}
+
+	return Discovered{Manifest: m, Dir: dir, BinaryPath: bin, OK: true}
+}
+
+// resolveBinary finds the plugin executable, trying the manifest's
+// entrypoint first, then the bin/<os>-<arch>/<id> package layout.
+func resolveBinary(dir string, m *Manifest, goos, goarch string) (string, error) {
+	ext := ""
+	if goos == "windows" {
+		ext = ".exe"
+	}
+	candidates := []string{
+		filepath.Join(dir, filepath.Clean(m.Entrypoint)),
+		filepath.Join(dir, "bin", goos+"-"+goarch, m.ID+ext),
+	}
+	for _, c := range candidates {
+		// Containment check: never resolve outside the plugin dir.
+		if rel, err := filepath.Rel(dir, c); err != nil || strings.HasPrefix(rel, "..") {
+			continue
+		}
+		fi, err := os.Stat(c)
+		if err == nil && !fi.IsDir() {
+			return c, nil
+		}
+	}
+	return "", fmt.Errorf("no executable found (tried %v)", candidates)
+}
+
+// dirIsUserWritable reports whether path is writable by group or other.
+func dirIsUserWritable(path string) (bool, error) {
+	fi, err := os.Stat(path)
+	if err != nil {
+		return false, err
+	}
+	return fi.Mode().Perm()&0o022 != 0, nil
+}
