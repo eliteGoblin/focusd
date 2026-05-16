@@ -25,6 +25,10 @@ const (
 	RunAsCurrentUser = "current_user"
 	RunAsSystem      = "system"
 	RunAsActiveUser  = "active_user"
+
+	// RuntimeNativeBinary is the only supported plugin runtime: the
+	// platform execs the entrypoint directly. "" is treated the same.
+	RuntimeNativeBinary = "native_binary"
 )
 
 // Manifest is the parsed plugin.json.
@@ -34,6 +38,11 @@ type Manifest struct {
 	Version           string   `json:"version"`
 	Type              string   `json:"type"`
 	ProtocolVersion   string   `json:"protocol_version"`
+	// Runtime is optional. "" or "native_binary" => the platform execs
+	// the entrypoint directly (the only model supported today). Any
+	// other value is rejected so the platform never tries to run a
+	// plugin packaged for a runtime it does not understand.
+	Runtime           string   `json:"runtime,omitempty"`
 	Entrypoint        string   `json:"entrypoint"`
 	SupportedOS       []string `json:"supported_os"`
 	SupportedArch     []string `json:"supported_arch"`
@@ -70,6 +79,10 @@ func (m *Manifest) validate() error {
 	}
 	if m.Type != TypeJob && m.Type != TypeService {
 		return fmt.Errorf("manifest %q: type must be job|service, got %q", m.ID, m.Type)
+	}
+	if m.Runtime != "" && m.Runtime != RuntimeNativeBinary {
+		return fmt.Errorf("manifest %q: unsupported runtime %q (only %q)",
+			m.ID, m.Runtime, RuntimeNativeBinary)
 	}
 	if m.RequiredPrivilege != PrivUser && m.RequiredPrivilege != PrivSystem {
 		return fmt.Errorf("manifest %q: required_privilege must be user|system, got %q",

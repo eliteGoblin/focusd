@@ -46,6 +46,20 @@ func TestParseManifestValid(t *testing.T) {
 	}
 }
 
+func TestParseManifestAcceptsNativeBinaryRuntime(t *testing.T) {
+	m := `{"id":"browser-monitor","name":"BM","version":"1.0.0","type":"job",
+"runtime":"native_binary","protocol_version":"1","entrypoint":"./browser-monitor",
+"supported_os":["` + runtime.GOOS + `"],"supported_arch":["` + runtime.GOARCH + `"],
+"required_privilege":"user","run_as":"current_user"}`
+	parsed, err := ParseManifest([]byte(m))
+	if err != nil {
+		t.Fatalf("native_binary runtime should be valid: %v", err)
+	}
+	if parsed.Runtime != RuntimeNativeBinary {
+		t.Errorf("runtime = %q", parsed.Runtime)
+	}
+}
+
 func TestParseManifestInvalid(t *testing.T) {
 	cases := map[string]string{
 		"bad json":        `{`,
@@ -55,6 +69,7 @@ func TestParseManifestInvalid(t *testing.T) {
 		"bad privilege":   `{"id":"x","name":"X","version":"1","type":"job","protocol_version":"1","entrypoint":"./x","supported_os":["x"],"supported_arch":["y"],"required_privilege":"root","run_as":"current_user"}`,
 		"bad run_as":      `{"id":"x","name":"X","version":"1","type":"job","protocol_version":"1","entrypoint":"./x","supported_os":["x"],"supported_arch":["y"],"required_privilege":"user","run_as":"god"}`,
 		"empty os list":   `{"id":"x","name":"X","version":"1","type":"job","protocol_version":"1","entrypoint":"./x","supported_os":[],"supported_arch":["y"],"required_privilege":"user","run_as":"current_user"}`,
+		"bad runtime":     `{"id":"x","name":"X","version":"1","type":"job","runtime":"wasm","protocol_version":"1","entrypoint":"./x","supported_os":["` + runtime.GOOS + `"],"supported_arch":["` + runtime.GOARCH + `"],"required_privilege":"user","run_as":"current_user"}`,
 	}
 	for name, raw := range cases {
 		t.Run(name, func(t *testing.T) {
