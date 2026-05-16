@@ -14,6 +14,9 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"os/signal"
+	"syscall"
+	"time"
 
 	"github.com/eliteGoblin/focusd/platform/internal/core/app"
 	"github.com/eliteGoblin/focusd/platform/internal/osadapter"
@@ -112,11 +115,25 @@ func runRun(args []string) int {
 	}
 	defer a.Close()
 
-	if _, derr := a.DiscoverPlugins(); derr != nil {
-		fmt.Fprintln(os.Stderr, "plugin discovery failed:", derr)
+	sched, n, serr := a.BuildScheduler()
+	if serr != nil {
+		fmt.Fprintln(os.Stderr, "scheduler build failed:", serr)
 		return 1
 	}
-	// Scheduler wiring lands in a later phase.
-	a.Log.Info("platform ready (scheduler wiring lands in a later phase)")
+	sched.Start()
+	a.Log.Info("platform running", "jobs_registered", n)
+
+	sig := make(chan os.Signal, 1)
+	signal.Notify(sig, syscall.SIGINT, syscall.SIGTERM)
+	<-sig
+
+	a.Log.Info("shutdown requested; draining in-flight jobs")
+	stopCtx := sched.Stop()
+	select {
+	case <-stopCtx.Done():
+	case <-time.After(30 * time.Second):
+		a.Log.Warn("shutdown drain timed out")
+	}
+	a.Log.Info("platform stopped")
 	return 0
 }

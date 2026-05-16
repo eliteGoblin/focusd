@@ -11,6 +11,8 @@ import (
 	"github.com/eliteGoblin/focusd/platform/internal/core/config"
 	"github.com/eliteGoblin/focusd/platform/internal/core/logging"
 	"github.com/eliteGoblin/focusd/platform/internal/core/plugin"
+	"github.com/eliteGoblin/focusd/platform/internal/core/runner"
+	"github.com/eliteGoblin/focusd/platform/internal/core/scheduler"
 	"github.com/eliteGoblin/focusd/platform/internal/core/state"
 	"github.com/eliteGoblin/focusd/platform/internal/osadapter"
 )
@@ -189,6 +191,28 @@ func (a *App) DiscoverPlugins() ([]plugin.Discovered, error) {
 		}
 	}
 	return found, nil
+}
+
+// BuildScheduler discovers plugins, then registers every enabled job
+// whose plugin is runnable. Returns the scheduler and how many jobs were
+// registered.
+func (a *App) BuildScheduler() (*scheduler.Scheduler, int, error) {
+	found, err := a.DiscoverPlugins()
+	if err != nil {
+		return nil, 0, err
+	}
+	byID := make(map[string]plugin.Discovered, len(found))
+	for _, p := range found {
+		if p.Manifest != nil {
+			byID[p.Manifest.ID] = p
+		}
+	}
+	s := scheduler.New(runner.New(a.State), a.State, a.Log)
+	n, err := s.Register(a.Config.Jobs, byID)
+	if err != nil {
+		return nil, 0, err
+	}
+	return s, n, nil
 }
 
 // Close releases the state DB and log file.

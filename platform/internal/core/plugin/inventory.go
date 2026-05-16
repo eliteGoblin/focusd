@@ -11,15 +11,15 @@ import (
 // plugin is not running (spec AC 7, 14).
 func SyncInventory(db *state.DB, discovered []Discovered) error {
 	for _, d := range discovered {
-		row := toRow(d)
-		if err := db.Plugins.Upsert(row); err != nil {
+		if err := db.Plugins.Upsert(ToInventoryRow(d)); err != nil {
 			return err
 		}
 	}
 	return nil
 }
 
-func toRow(d Discovered) state.Plugin {
+// ToInventoryRow maps a discovery result to a persistable plugin row.
+func ToInventoryRow(d Discovered) state.Plugin {
 	status := state.ValidationOK
 	verr := ""
 	if !d.OK {

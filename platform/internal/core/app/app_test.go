@@ -187,6 +187,33 @@ func TestPluginDirOverrideUsed(t *testing.T) {
 	}
 }
 
+func TestBuildSchedulerRegistersJobsForDiscoveredPlugins(t *testing.T) {
+	fa := testutil.NewFakeAdapter(t.TempDir())
+	writeUserConfig(t, fa, sampleConfig) // job kill-steam + service browser_monitor
+	a, err := Bootstrap(Options{Adapter: fa})
+	if err != nil {
+		t.Fatalf("Bootstrap: %v", err)
+	}
+	defer a.Close()
+
+	pdir, _ := fa.DefaultPluginDir(osadapter.ModeUser)
+	ks := filepath.Join(pdir, "kill-steam")
+	os.MkdirAll(ks, 0o755)
+	m := `{"id":"kill-steam","name":"Kill Steam","version":"1.0.0","type":"job",
+"protocol_version":"1","entrypoint":"./kill-steam","supported_os":["` + fa.OS +
+		`"],"supported_arch":["` + fa.Arch + `"],"required_privilege":"user","run_as":"current_user"}`
+	os.WriteFile(filepath.Join(ks, "plugin.json"), []byte(m), 0o644)
+	os.WriteFile(filepath.Join(ks, "kill-steam"), []byte("#!/bin/sh\necho '{\"status\":\"ok\"}'\n"), 0o755)
+
+	s, n, err := a.BuildScheduler()
+	if err != nil {
+		t.Fatalf("BuildScheduler: %v", err)
+	}
+	if n != 1 || s == nil {
+		t.Fatalf("registered = %d, want 1", n)
+	}
+}
+
 func TestBootstrapExplicitPathsOverride(t *testing.T) {
 	fa := testutil.NewFakeAdapter(t.TempDir())
 	dir := t.TempDir()
