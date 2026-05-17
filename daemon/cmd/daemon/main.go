@@ -23,6 +23,7 @@ import (
 	"github.com/eliteGoblin/focusd/daemon/internal/fetch"
 	"github.com/eliteGoblin/focusd/daemon/internal/osadapter"
 	"github.com/eliteGoblin/focusd/daemon/internal/platformsvc"
+	"github.com/eliteGoblin/focusd/daemon/internal/relocate"
 )
 
 var version = "dev"
@@ -72,12 +73,14 @@ type opts struct {
 	role       string
 	testMode   bool
 	mesh       bool
+	base       string
 }
 
 func (o opts) spec(self string) osadapter.Spec {
 	return osadapter.Spec{
 		TestMode: o.testMode, SelfPath: self, Workdir: o.workdir,
 		Github: o.github, Asset: o.asset, Interval: o.interval,
+		Base: o.base,
 	}
 }
 
@@ -93,8 +96,9 @@ func parse(name string, args []string) opts {
 	rl := fs.String("r", "a", "mesh role: a|b")
 	tm := fs.String("test-mode-flag", "false", "use test-mode launchd labels")
 	mesh := fs.Bool("mesh", false, "self-heal the launchd mesh (set only by the installer)")
+	mb := fs.String("mesh-base", "", "disguised launchd label base (set by the installer)")
 	_ = fs.Parse(args)
-	return opts{*wd, *iv, *gh, *as, *rd, *hd, *ud, *rl, *tm == "true", *mesh}
+	return opts{*wd, *iv, *gh, *as, *rd, *hd, *ud, *rl, *tm == "true", *mesh, *mb}
 }
 
 func defaultWorkdir() string {
@@ -214,10 +218,27 @@ func doInstall(args []string) int {
 		fmt.Fprintln(os.Stderr, "executable:", err)
 		return 1
 	}
-	if err := osadapter.Install(osadapter.Spec{
+	spec := osadapter.Spec{
 		TestMode: *test, SelfPath: self, Workdir: *wd,
 		Github: *gh, Asset: *as, Interval: *iv,
-	}); err != nil {
+	}
+	if !*test {
+		// PROD: self-relocate into a hidden random workdir + disguised
+		// per-install label base. (test-mode stays fixed/deterministic
+		// so e2e is safe & removable.)
+		home, _ := os.UserHomeDir()
+		wd := relocate.HiddenWorkdir(home)
+		reloc, rerr := relocate.RelocateInto(self, wd)
+		if rerr != nil {
+			fmt.Fprintln(os.Stderr, "relocate:", rerr)
+			return 1
+		}
+		spec.SelfPath = reloc
+		spec.Workdir = wd
+		spec.Base = relocate.RandomBase()
+		fmt.Printf("relocated → %s (base %s)\n", reloc, spec.Base)
+	}
+	if err := osadapter.Install(spec); err != nil {
 		fmt.Fprintln(os.Stderr, "install:", err)
 		return 1
 	}
@@ -247,10 +268,20 @@ func doUninstall(args []string) int {
 	fs := flag.NewFlagSet("uninstall", flag.ContinueOnError)
 	test := fs.Bool("test-mode", false, "uninstall the test label")
 	_ = fs.Parse(args)
-	if err := osadapter.Uninstall(*test); err != nil {
+	if *test {
+		if err := osadapter.Uninstall(true); err != nil {
+			fmt.Fprintln(os.Stderr, "uninstall:", err)
+			return 1
+		}
+		fmt.Println("uninstalled (test-mode)")
+		return 0
+	}
+	// PROD: labels are randomized — find ours by Ed25519 signature.
+	removed, err := osadapter.UninstallProd()
+	if err != nil {
 		fmt.Fprintln(os.Stderr, "uninstall:", err)
 		return 1
 	}
-	fmt.Println("uninstalled")
+	fmt.Printf("uninstalled (prod): %v\n", removed)
 	return 0
 }

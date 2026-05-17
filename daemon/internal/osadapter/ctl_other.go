@@ -8,7 +8,8 @@ import "errors"
 // later behind this same package API.
 var ErrUnsupported = errors.New("osadapter: launchd lifecycle is macOS-only")
 
-func Install(Spec) error             { return ErrUnsupported }
-func Uninstall(bool) error           { return ErrUnsupported }
-func EnsureAll(Spec) ([]Role, error) { return nil, ErrUnsupported }
-func IsLoaded(bool, Role) bool       { return false }
+func Install(Spec) error               { return ErrUnsupported }
+func Uninstall(bool) error             { return ErrUnsupported }
+func EnsureAll(Spec) ([]Role, error)   { return nil, ErrUnsupported }
+func IsLoaded(bool, Role) bool         { return false }
+func UninstallProd() ([]string, error) { return nil, ErrUnsupported }

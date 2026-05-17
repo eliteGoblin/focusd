@@ -15,6 +15,11 @@ func args(s Spec, r Role) []string {
 		"--asset", s.Asset,
 		"--interval", s.Interval.String(),
 		"--test-mode-flag", boolStr(s.TestMode),
+		// Every role carries the disguised base so any survivor can
+		// recompute sibling labels and rebuild their plists — no
+		// separate registry; the base lives in the plists (which must
+		// exist anyway).
+		"--mesh-base", s.base(),
 	}
 	if r == RoleEnsure {
 		return append([]string{"ensure"}, common...)

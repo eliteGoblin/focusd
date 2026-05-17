@@ -98,13 +98,19 @@ No memory → re-derived each tick → crash-safe.
 | bad version crash-loops | rollback to `good`; skip `bad-<ver>` |
 | delete **all** plists+binaries & kill all within the ~1 min window | **wins — accepted ceiling (§9)** |
 
-## 6. Workdir & obfuscation — honest
+## 6. Workdir & obfuscation — **REQUIRED (TODO, not yet built)**
 
-- **Randomized per install** (casual friction only). At `install`,
-  generate random workdir path, plist Label/filename, binary basename
-  (Apple-metadata-looking). Set once, persisted, never re-randomized.
-  app_mon v0.6.1 already ships relocation + random Apple-looking names —
-  port it.
+> Status: **wanted, must build.** NOT scoped out. Currently the daemon
+> runs from where it was installed with a fixed default workdir and
+> fixed labels `com.focusd.daemon.{a,b,ensure}`. Both items below are
+> required follow-up work, tracked.
+
+- **Self-relocation + randomized per install.** At `install`: generate
+  a random, Apple-metadata-looking **workdir path** (create if absent),
+  **copy the binary into it**, run from there; randomize the launchd
+  **Label + plist filename** and the **binary basename**. Set once,
+  persisted, never re-randomized. app_mon v0.6.1 already ships
+  relocation + random Apple-looking names — **port it.**
 - **No registry file.** Recognition is **structural + cryptographic**,
   not a stored list:
   - *enumerate* candidates by structure (processes/plists tied to the

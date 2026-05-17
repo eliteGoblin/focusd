@@ -32,13 +32,21 @@ type Spec struct {
 	Github   string        // owner/repo
 	Asset    string        // release asset filename
 	Interval time.Duration // reconcile / ensure interval
+	// Base is the disguised, per-install random launchd label base
+	// (prod only; e.g. "com.apple.metadata.helper.7f3a2c11"). Empty +
+	// !TestMode falls back to the non-disguised default (dev). TestMode
+	// always uses the fixed e2e base so e2e stays deterministic/safe.
+	Base string
 }
 
 func (s Spec) base() string {
 	if s.TestMode {
-		return "com.focusd.daemon.e2e"
+		return "com.focusd.daemon.e2e" // fixed → deterministic, safely removable
 	}
-	return "com.focusd.daemon"
+	if s.Base != "" {
+		return s.Base // prod: per-install random disguised base
+	}
+	return "com.focusd.daemon" // dev fallback (unsigned, not disguised)
 }
 
 // Label is the launchd label for a role.
