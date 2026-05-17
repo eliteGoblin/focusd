@@ -13,6 +13,12 @@ on:
       - '.github/workflows/app_mon.yml'
   workflow_dispatch:  # Manual trigger
 
+# app_mon is the standalone v0.6.1 monolith with its own go.mod. The
+# repo-root go.work (platform/daemon/plugins) deliberately excludes it;
+# GOWORK=off keeps app_mon building independently of the workspace.
+env:
+  GOWORK: 'off'
+
 defaults:
   run:
     working-directory: app_mon

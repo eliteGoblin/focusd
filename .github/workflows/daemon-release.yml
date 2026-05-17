@@ -39,13 +39,21 @@ jobs:
           go build -o /tmp/focusd-sign ./cmd/focusd-sign
           mkdir -p /tmp/out
           V="${{ steps.t.outputs.tag }}"
-          for arch in arm64 amd64; do
-            CGO_ENABLED=0 GOOS=darwin GOARCH=$arch \
+          # macOS = supported now. Linux/Windows = future-ready: the
+          # daemon is CGO-free and signing is pure-Go, so they build &
+          # sign today; launchd lifecycle is darwin-only (osadapter
+          # returns ErrUnsupported elsewhere) until systemd/SCM land.
+          targets="darwin/arm64 darwin/amd64 linux/amd64 linux/arm64 windows/amd64"
+          for t in $targets; do
+            os=${t%/*}; arch=${t#*/}; ext=""
+            [ "$os" = windows ] && ext=".exe"
+            CGO_ENABLED=0 GOOS=$os GOARCH=$arch \
               go build -trimpath -ldflags "-s -w -X main.version=$V" \
-              -o /tmp/daemon-$arch ./cmd/daemon
-            /tmp/focusd-sign -in /tmp/daemon-$arch -out /tmp/out/daemon-darwin-$arch
+              -o /tmp/daemon-$os-$arch$ext ./cmd/daemon
+            /tmp/focusd-sign -in /tmp/daemon-$os-$arch$ext \
+              -out /tmp/out/daemon-$os-$arch$ext
           done
-          ( cd /tmp/out && shasum -a 256 daemon-darwin-* > checksums.txt )
+          ( cd /tmp/out && shasum -a 256 daemon-* > checksums.txt )
           ls -l /tmp/out
 
       - name: Publish GitHub Release
@@ -54,5 +62,5 @@ jobs:
         run: |
           gh release create "${{ steps.t.outputs.tag }}" \
             --title "${{ steps.t.outputs.tag }}" \
-            --notes "Signed daemon release (Ed25519). Verified by the embedded public key." \
-            /tmp/out/daemon-darwin-arm64 /tmp/out/daemon-darwin-amd64 /tmp/out/checksums.txt
+            --notes "Signed daemon release (Ed25519, embedded-key verified). macOS supported; linux/windows future-ready." \
+            /tmp/out/*
