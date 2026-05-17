@@ -1,0 +1,74 @@
+name: Daemon CI
+
+on:
+  push:
+    branches: [master, main, feat/platform-refactor]
+    paths:
+      - 'daemon/**'
+      - 'go.work'
+      - '.github/workflows/daemon.yml'
+  pull_request:
+    branches: [master, main]
+    paths:
+      - 'daemon/**'
+      - 'go.work'
+      - '.github/workflows/daemon.yml'
+  workflow_dispatch:
+
+jobs:
+  format:
+    name: Format Check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.25'
+      - name: gofmt
+        run: |
+          out="$(gofmt -s -l daemon)"
+          if [ -n "$out" ]; then echo "not gofmt:"; echo "$out"; exit 1; fi
+
+  test:
+    name: Test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.25'
+          cache-dependency-path: daemon/go.sum
+      - name: Vet
+        working-directory: daemon
+        run: go vet ./...
+      - name: Unit + race + coverage
+        working-directory: daemon
+        run: go test ./... -count=1 -race -short -coverprofile=coverage.out
+      - name: E2E (real processes + real Ed25519 signatures)
+        working-directory: daemon
+        env:
+          # Signing key from the repo secret; the e2e skips itself if
+          # this is empty (e.g. PRs from forks without secret access).
+          FOCUSD_ED25519_PRIVATE_KEY: ${{ secrets.FOCUSD_ED25519_PRIVATE_KEY }}
+        run: go test ./internal/e2e/ -count=1 -run TestDaemonE2E -v
+
+  build:
+    name: Cross-build daemon + signer + mock
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.25'
+      - name: Build (darwin arm64/amd64)
+        working-directory: daemon
+        run: |
+          for a in arm64 amd64; do
+            CGO_ENABLED=0 GOOS=darwin GOARCH=$a go build -o /tmp/daemon-darwin-$a ./cmd/daemon
+            CGO_ENABLED=0 GOOS=darwin GOARCH=$a go build -o /tmp/sign-darwin-$a ./cmd/focusd-sign
+          done
+          ls -l /tmp/daemon-darwin-* /tmp/sign-darwin-*
