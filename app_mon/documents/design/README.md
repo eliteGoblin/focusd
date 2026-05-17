@@ -15,6 +15,30 @@ must be **hard to remove later, in a weak moment**. Adversary = you, with
 root, low willpower. Goal = widen the gap between *impulse* and
 *circumvention*; not impossibility (honest ceiling accepted).
 
+**Design philosophy.** Success = the user actually stays focused —
+measured by behaviour, not technical purity. A root user can always win
+*technically* (honest ceiling). Therefore **psychological and social
+friction are first-class design levers, equal to technical ones**:
+anything that makes the bypass not worth the effort, or visible to
+someone the user doesn't want to disappoint, is a valid part of the
+solution. Build for "it actually helps the user", not "it's technically
+unbreakable" — the latter is impossible and is not the goal. Concrete
+examples already in the design: per-install randomized names (no
+copy-pasteable forum bypass), auto re-arm from the server, accountability
+notification.
+
+**Defense in depth, friction not perfection.** The primary threat is an
+*addicted, desperate mind* — creative, possibly AI-assisted, with public
+source. No single layer is perfect; the design stacks independent layers
+(launchd resurrection · twin+ensurer · camouflage · crypto recognition ·
+off-box server re-arm · accountability) so breaking it becomes
+**impractical enough that the person doesn't even try**. "Good = works
+in practice", not "perfect in theory". Two layers do different jobs and
+must not be confused: **recognition** (crypto: unforgeable "this is
+genuine appmon") *works*; **hiding** (camouflage) is only casual-grade —
+an AI + public source defeats it, so the durable weight sits on the
+**server**, not on secrecy.
+
 3 layers, "controllers all the way down" (k8s shape):
 
 - **Platform** = the *brain*. Talks to the server; owns policy; runs plugins.
@@ -52,13 +76,17 @@ Code overview: [`platform/README.md`](../../../platform/README.md).
 | D11 | Server: **off-box mandatory**, deferred; platform is sole server client; daemon never talks to server; enforcement **offline-complete / fail-closed**; v1 server scope = policy + version + signed records | accepted |
 | D12 | OS specifics behind **one interface** (mirrors `osadapter`); macOS first | accepted |
 | D13 | Plugins: job/service model; `kill-steam` + `browser-monitor` | ✅ built |
+| D14 | Peer recognition = **own embedded Ed25519 public key** (verify release signature), OS-portable, behind the OS interface. **Not RSA** (bigger, no benefit). macOS notarization / Team ID kept **separately** for Gatekeeper/install trust, *not* the recognition mechanism. Recognition works; it does not hide (symmetric — adversary runs the same check) | accepted |
+| D15 | Daemon **self-updates via the twin** (sibling-driven, staggered, last-good rollback), reusing the platform-update pattern; daemon never replaces its own running binary | accepted |
 
 ## 4. Document index
 
 | Doc | Scope | Status |
 |---|---|---|
-| [self_protecting_reconcile_platform.md](./self_protecting_reconcile_platform.md) | Daemon / self-protection / reconcile / upgrade — the deep-dive | agreed, not built |
+| [daemon_design.md](./daemon_design.md) | **Daemon** self-protection & lifecycle (launchd, bootstrap, pair+ensurer, concern→response) — deep-dive | agreed, not built |
+| [self_protecting_reconcile_platform.md](./self_protecting_reconcile_platform.md) | Reconcile / upgrade / 3-layer architecture & threat model — deep-dive | agreed, not built |
 | [server_requirements.md](./server_requirements.md) | Server requirements & TODO tracker | not started |
+| [release_and_shipment.md](./release_and_shipment.md) | Signing / release / shipment (own Ed25519 now; Apple notarization far-future, additive) | not started |
 | [platform/README.md](../../../platform/README.md) | Built platform + plugins (code-level) | current |
 | [platform_refactor_plugin.md](../../requirements/support_plugin_platform_refactor/platform_refactor_plugin.md) | Original refactor spec (acceptance criteria) | satisfied (Phases 0–6) |
 
@@ -68,10 +96,11 @@ Code overview: [`platform/README.md`](../../../platform/README.md).
 ## 5. What's next
 
 1. **Design: closed.** Only the daemon remains to build (server deferred).
-2. Build the **minimal daemon** (Layer 1): stateless reconciler — read
+2. Build the **minimal daemon** (Layer 1) per
+   [daemon_design.md](./daemon_design.md): stateless reconciler — read
    `version` file → `pgrep bin/<v>/platform` → download+SHA-256 if
-   missing → start; flock singleton; OS-interface; rollback via `good`/
-   `bad-` files; ≤500 LoC stdlib-only.
+   missing → start; flock singleton; launchd pair+ensurer; OS-interface;
+   rollback via `good`/`bad-` files; ≤500 LoC stdlib-only.
 3. Server later — see `server_requirements.md` (SR-F-1..4 first).
 
 Honest ceiling: root + deliberate effort defeats this. Commitment

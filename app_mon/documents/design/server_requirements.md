@@ -45,7 +45,17 @@ robust skeleton.
 
 - SR-O-1 Web dashboard: set policy + view audit.
 - SR-O-2 Multi-device.
-- SR-O-3 Tamper/anomaly alerting (heartbeat-absence notifications).
+- SR-O-3 **Accountability-partner notification on suspected tamper.**
+  Social deterrent (not a technical control) — value = a human you don't
+  want to disappoint gets told. MUST solve the noise problem or it's
+  useless (alert fatigue): (a) platform sends a *clean-shutdown* check-in
+  on graceful stop/sleep → silence-without-it = suspicious,
+  silence-with-it = benign; (b) long threshold (~24–48 h, not minutes);
+  (c) optional user-declared expected-online window; (d) two-stage —
+  notify the user first, escalate to partner only if still silent.
+  Honest limit: a faked checker can keep heartbeats green while focusd
+  is gone → only meaningful once heartbeats carry signed proof of the
+  applied policy (depends on SR-F-3 signing). Phase: later.
 - SR-O-4 Stronger emergency unlock (2-person / hardware key).
 
 ## Open questions (SR-Q)
@@ -57,6 +67,10 @@ robust skeleton.
 - SR-Q-4 Release-token cooldown policy (duration, slow-unlock rules).
 - SR-Q-5 Backup payload format + restore trigger.
 - SR-Q-6 Server API / policy-schema versioning.
+- SR-Q-7 Tamper-vs-offline discrimination policy for SR-O-3 (threshold,
+  clean-shutdown signal, expected-online window, two-stage escalation).
+- SR-Q-8 Heartbeat integrity: signed proof-of-applied-policy so a faked
+  checker can't show green (depends on SR-F-3).
 
 ## Corrections / decision log
 
@@ -65,3 +79,8 @@ robust skeleton.
   later. GitHub assumed legit; server is the local-tamper trust anchor.
   Daemon never talks to the server. Enforcement offline-complete /
   fail-closed.
+- 2026-05-17 — SR-O-3 reframed as accountability-partner notification:
+  it is a **social deterrent, not a technical control**; only lever for
+  the determined-uninstall case the server otherwise can't touch. Hard
+  problem = tamper-vs-offline noise (SR-Q-7); heartbeat is a weak signal
+  until signed (SR-Q-8). Phase: later.
