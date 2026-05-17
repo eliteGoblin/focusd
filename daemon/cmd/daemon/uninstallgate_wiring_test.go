@@ -56,7 +56,11 @@ func TestRunUninstallGate_WaitDoesNotProceed(t *testing.T) {
 func TestRunUninstallGate_CompleteProceeds(t *testing.T) {
 	gpath := filepath.Join(t.TempDir(), "gate")
 	past := time.Now().Add(-time.Hour)
-	if err := uninstallgate.Save(gpath, uninstallgate.State{Step: uninstallgate.TotalSteps, LastSeen: past}); err != nil {
+	// A genuinely completed state has both step timestamps set (Evaluate
+	// rejects "Step done without timestamp" as a crafted bypass).
+	if err := uninstallgate.Save(gpath, uninstallgate.State{
+		Step: uninstallgate.TotalSteps, T1: past, T2: past, LastSeen: past,
+	}); err != nil {
 		t.Fatal(err)
 	}
 	code, proceed := runUninstallGate(gpath)

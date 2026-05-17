@@ -25,6 +25,7 @@ package uninstallgate
 
 import (
 	"embed"
+	"fmt"
 	"time"
 )
 
@@ -45,9 +46,13 @@ var passageFiles = [TotalSteps]string{
 }
 
 // Passage returns the reference text the user must transcribe for a step
-// (1-based). It panics only on a programming error (bad embed), never on
-// user input.
+// (1-based, 1..TotalSteps). It panics on a programming error (out-of-
+// range step, or a missing embed) — never on user input. Callers pass
+// Outcome.Step from Evaluate, which is always in range.
 func Passage(step int) string {
+	if step < 1 || step > TotalSteps {
+		panic(fmt.Sprintf("uninstallgate: invalid step %d (want 1..%d)", step, TotalSteps))
+	}
 	b, err := passageFS.ReadFile(passageFiles[step-1])
 	if err != nil {
 		panic("uninstallgate: embedded passage missing: " + err.Error())
@@ -90,6 +95,15 @@ type Outcome struct {
 // time, what happens next. (Tamper/rollback are handled at Load, which
 // hands Evaluate a zeroed state — i.e. "start from step 1".)
 func Evaluate(s State, now time.Time) Outcome {
+	// Ratchet invariant: a step that gates on a timestamp MUST have it.
+	// A state claiming progress without the timestamp (bug, schema
+	// drift, or an HMAC-valid hand-crafted payload) would let a zero
+	// time make the cool-off look elapsed — or let Step≥3 "Proceed"
+	// having never waited. Treat any such state as "start over" so the
+	// 2h/4h waits can never be skipped.
+	if (s.Step >= 1 && s.T1.IsZero()) || (s.Step >= 2 && s.T2.IsZero()) {
+		return Outcome{Kind: Transcribe, Step: 1}
+	}
 	switch s.Step {
 	case 0:
 		return Outcome{Kind: Transcribe, Step: 1}

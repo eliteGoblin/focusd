@@ -21,6 +21,38 @@ func TestPassagesEmbeddedAndDistinct(t *testing.T) {
 	}
 }
 
+func TestPassageInvalidStepPanics(t *testing.T) {
+	for _, bad := range []int{0, -1, TotalSteps + 1, 99} {
+		func() {
+			defer func() {
+				if recover() == nil {
+					t.Fatalf("Passage(%d) must panic", bad)
+				}
+			}()
+			_ = Passage(bad)
+		}()
+	}
+}
+
+// A state that claims progress without the timestamp the step gates on
+// (bug / schema drift / HMAC-valid hand-crafted payload) must NOT let a
+// zero time skip the cool-off — it resets to step 1.
+func TestEvaluateRejectsProgressWithoutTimestamp(t *testing.T) {
+	cases := []State{
+		{Step: 1},                  // step 1 done but no T1
+		{Step: 2, T1: t0},          // step 2 done but no T2
+		{Step: 2},                  // neither
+		{Step: TotalSteps},         // "all done" but never timestamped → no free Proceed
+		{Step: TotalSteps, T1: t0}, // missing T2
+	}
+	for i, s := range cases {
+		o := Evaluate(s, t0.Add(100*time.Hour))
+		if o.Kind != Transcribe || o.Step != 1 {
+			t.Fatalf("case %d %+v: got %+v, want Transcribe step 1", i, s, o)
+		}
+	}
+}
+
 func TestEvaluateRatchet(t *testing.T) {
 	cases := []struct {
 		name     string
@@ -32,10 +64,10 @@ func TestEvaluateRatchet(t *testing.T) {
 		{"fresh → transcribe 1", State{}, t0, Transcribe, 1},
 		{"after step1, still waiting", State{Step: 1, T1: t0}, t0.Add(Step1Wait - time.Minute), Wait, 0},
 		{"after step1, wait elapsed → transcribe 2", State{Step: 1, T1: t0}, t0.Add(Step1Wait), Transcribe, 2},
-		{"after step2, still waiting", State{Step: 2, T2: t0}, t0.Add(Step2Wait - time.Second), Wait, 0},
-		{"after step2, wait elapsed → transcribe 3", State{Step: 2, T2: t0}, t0.Add(Step2Wait), Transcribe, 3},
-		{"all done → proceed", State{Step: 3}, t0, Proceed, 0},
-		{"over-complete → proceed", State{Step: 99}, t0, Proceed, 0},
+		{"after step2, still waiting", State{Step: 2, T1: t0, T2: t0}, t0.Add(Step2Wait - time.Second), Wait, 0},
+		{"after step2, wait elapsed → transcribe 3", State{Step: 2, T1: t0, T2: t0}, t0.Add(Step2Wait), Transcribe, 3},
+		{"all done → proceed", State{Step: 3, T1: t0, T2: t0}, t0, Proceed, 0},
+		{"over-complete → proceed", State{Step: 99, T1: t0, T2: t0}, t0, Proceed, 0},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {

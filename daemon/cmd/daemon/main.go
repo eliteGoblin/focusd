@@ -320,7 +320,14 @@ func doUninstall(args []string) int {
 	// It turns an impulsive removal into a deliberate, multi-hour ritual
 	// (transcribe → wait 2h → transcribe → wait 4h → transcribe). See
 	// internal/uninstallgate and daemon_design.md.
-	gpath := uninstallgate.StatePath(mode.Resolve(), homeDir())
+	home, herr := os.UserHomeDir()
+	if herr != nil {
+		// Without a real home the gate state path would be relative and
+		// land in CWD — silently weakening the gate. Fail instead.
+		fmt.Fprintln(os.Stderr, "uninstall: cannot resolve home directory:", herr)
+		return 1
+	}
+	gpath := uninstallgate.StatePath(mode.Resolve(), home)
 	if *abort {
 		if err := uninstallgate.Clear(gpath); err != nil {
 			fmt.Fprintln(os.Stderr, "uninstall --abort:", err)
@@ -343,8 +350,6 @@ func doUninstall(args []string) int {
 	fmt.Printf("uninstalled (prod): %v\n", removed)
 	return 0
 }
-
-func homeDir() string { h, _ := os.UserHomeDir(); return h }
 
 // runUninstallGate advances the commitment gate one interaction. It
 // returns (exitCode, proceed): proceed=true means all steps are done and
@@ -371,7 +376,13 @@ func runUninstallGate(gpath string) (code int, proceed bool) {
 			o.Step, uninstallgate.TotalSteps, ref)
 
 		start := time.Now()
-		typed, _ := io.ReadAll(os.Stdin)
+		typed, rerr := io.ReadAll(os.Stdin)
+		if rerr != nil {
+			// A read failure must not be treated as a transcription
+			// attempt — don't advance or save.
+			fmt.Fprintln(os.Stderr, "could not read input:", rerr, "(no progress lost)")
+			return 1, false
+		}
 		ok, why := uninstallgate.Accept(string(typed), ref, time.Since(start))
 		if !ok {
 			fmt.Fprintln(os.Stderr, "not accepted:", why, "(no progress lost — try again)")
