@@ -48,6 +48,11 @@ jobs:
       - name: Unit + race + coverage
         working-directory: daemon
         run: go test ./... -count=1 -race -short -coverprofile=coverage.out
+      - name: Vet + unit (e2e build tag — test-mode seam compiled in)
+        working-directory: daemon
+        run: |
+          go vet -tags e2e ./...
+          go test -tags e2e ./... -count=1 -race -short
       - name: E2E (real processes + real Ed25519 signatures)
         working-directory: daemon
         env:

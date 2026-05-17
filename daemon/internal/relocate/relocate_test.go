@@ -24,9 +24,9 @@ func TestRandomBaseDisguisedAndUnique(t *testing.T) {
 }
 
 func TestHiddenWorkdir(t *testing.T) {
-	wd := HiddenWorkdir("/Users/x")
+	wd := HiddenWorkdir("/Users/x/Library/Application Support")
 	if !strings.HasPrefix(wd, "/Users/x/Library/Application Support/.") {
-		t.Fatalf("workdir not hidden under App Support: %s", wd)
+		t.Fatalf("workdir not hidden under support root: %s", wd)
 	}
 	if strings.Contains(wd, "focusd") {
 		t.Fatalf("workdir must not contain 'focusd': %s", wd)

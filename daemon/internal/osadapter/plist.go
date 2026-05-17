@@ -14,7 +14,7 @@ func args(s Spec, r Role) []string {
 		"--github", s.Github,
 		"--asset", s.Asset,
 		"--interval", s.Interval.String(),
-		"--test-mode-flag", boolStr(s.TestMode),
+		"--test-mode-flag", boolStr(s.isTest()),
 		// Every role carries the disguised base so any survivor can
 		// recompute sibling labels and rebuild their plists — no
 		// separate registry; the base lives in the plists (which must

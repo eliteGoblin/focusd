@@ -1,6 +1,10 @@
 package osadapter
 
-import "testing"
+import (
+	"testing"
+
+	"github.com/eliteGoblin/focusd/daemon/internal/mode"
+)
 
 func TestLabels(t *testing.T) {
 	s := Spec{}
@@ -10,7 +14,7 @@ func TestLabels(t *testing.T) {
 		t.Fatalf("prod labels wrong: %v %v %v",
 			s.Label(RoleA), s.Label(RoleB), s.Label(RoleEnsure))
 	}
-	ts := Spec{TestMode: true}
+	ts := Spec{Mode: mode.Test}
 	if ts.Label(RoleA) != "com.focusd.daemon.e2e.a" {
 		t.Fatalf("test label wrong: %s", ts.Label(RoleA))
 	}

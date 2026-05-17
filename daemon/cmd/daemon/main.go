@@ -21,6 +21,7 @@ import (
 
 	"github.com/eliteGoblin/focusd/daemon/internal/core"
 	"github.com/eliteGoblin/focusd/daemon/internal/fetch"
+	"github.com/eliteGoblin/focusd/daemon/internal/mode"
 	"github.com/eliteGoblin/focusd/daemon/internal/osadapter"
 	"github.com/eliteGoblin/focusd/daemon/internal/platformsvc"
 	"github.com/eliteGoblin/focusd/daemon/internal/relocate"
@@ -78,10 +79,20 @@ type opts struct {
 
 func (o opts) spec(self string) osadapter.Spec {
 	return osadapter.Spec{
-		TestMode: o.testMode, SelfPath: self, Workdir: o.workdir,
+		Mode: o.modeVal(), SelfPath: self, Workdir: o.workdir,
 		Github: o.github, Asset: o.asset, Interval: o.interval,
 		Base: o.base,
 	}
+}
+
+// modeVal is the install mode for a running mesh member: test when the
+// installer baked --test-mode-flag into the plist, otherwise the real
+// deployment mode resolved from euid (sudo → system, else user).
+func (o opts) modeVal() mode.Mode {
+	if o.testMode {
+		return mode.Test
+	}
+	return mode.Resolve()
 }
 
 func parse(name string, args []string) opts {
@@ -211,23 +222,31 @@ func doInstall(args []string) int {
 	gh := fs.String("github", "eliteGoblin/focusd", "owner/repo")
 	as := fs.String("asset", "", "release asset filename")
 	iv := fs.Duration("interval", 10*time.Second, "reconcile interval")
-	test := fs.Bool("test-mode", false, "use the easily-removable test label")
+	wantTest := registerTestMode(fs) // --test-mode only under -tags e2e
 	_ = fs.Parse(args)
 	self, err := os.Executable()
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "executable:", err)
 		return 1
 	}
+	// The daemon decides the install mode at bootstrap: test (e2e builds
+	// only), else system when run as root (sudo), else user.
+	m := mode.Resolve()
+	if wantTest() {
+		m = mode.Test
+	}
 	spec := osadapter.Spec{
-		TestMode: *test, SelfPath: self, Workdir: *wd,
+		Mode: m, SelfPath: self, Workdir: *wd,
 		Github: *gh, Asset: *as, Interval: *iv,
 	}
-	if !*test {
-		// PROD: self-relocate into a hidden random workdir + disguised
-		// per-install label base. (test-mode stays fixed/deterministic
-		// so e2e is safe & removable.)
+	if m != mode.Test {
+		// user/system: self-relocate into a hidden random workdir under
+		// this mode's Application Support root (user → ~/Library,
+		// system → /Library) + a disguised per-install label base. Test
+		// mode stays fixed/deterministic + uses the given workdir so e2e
+		// is safe & removable.
 		home, _ := os.UserHomeDir()
-		wd := relocate.HiddenWorkdir(home)
+		wd := relocate.HiddenWorkdir(mode.SupportRoot(m, home))
 		reloc, rerr := relocate.RelocateInto(self, wd)
 		if rerr != nil {
 			fmt.Fprintln(os.Stderr, "relocate:", rerr)
@@ -236,7 +255,7 @@ func doInstall(args []string) int {
 		spec.SelfPath = reloc
 		spec.Workdir = wd
 		spec.Base = relocate.RandomBase()
-		fmt.Printf("relocated → %s (base %s)\n", reloc, spec.Base)
+		fmt.Printf("relocated → %s (mode %s, base %s)\n", reloc, m, spec.Base)
 	}
 	if err := osadapter.Install(spec); err != nil {
 		fmt.Fprintln(os.Stderr, "install:", err)
@@ -266,9 +285,9 @@ func doEnsure(args []string) int {
 
 func doUninstall(args []string) int {
 	fs := flag.NewFlagSet("uninstall", flag.ContinueOnError)
-	test := fs.Bool("test-mode", false, "uninstall the test label")
+	wantTest := registerTestMode(fs) // --test-mode only under -tags e2e
 	_ = fs.Parse(args)
-	if *test {
+	if wantTest() {
 		if err := osadapter.Uninstall(true); err != nil {
 			fmt.Fprintln(os.Stderr, "uninstall:", err)
 			return 1
@@ -276,7 +295,7 @@ func doUninstall(args []string) int {
 		fmt.Println("uninstalled (test-mode)")
 		return 0
 	}
-	// PROD: labels are randomized — find ours by Ed25519 signature.
+	// user/system: labels are randomized — find ours by Ed25519 signature.
 	removed, err := osadapter.UninstallProd()
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "uninstall:", err)
