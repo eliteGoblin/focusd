@@ -4,6 +4,8 @@ package scheduler
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"log/slog"
@@ -122,7 +124,8 @@ func (s *Scheduler) trigger(j config.Job, p plugin.Discovered) {
 func (s *Scheduler) persistJob(j config.Job, p plugin.Discovered) error {
 	hash := ""
 	if b, err := json.Marshal(j.Config); err == nil {
-		hash = fmt.Sprintf("%x", len(b)) // cheap change marker
+		sum := sha256.Sum256(b) // real content digest (change marker)
+		hash = hex.EncodeToString(sum[:])
 	}
 	if err := s.db.Jobs.Upsert(state.Job{
 		ID: j.ID, PluginID: j.Plugin, Enabled: j.Enabled, Schedule: j.Schedule,

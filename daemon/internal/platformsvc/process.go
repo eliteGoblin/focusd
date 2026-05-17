@@ -22,6 +22,7 @@ type ProcSvc struct {
 	startedAt time.Time
 	exited    bool
 	exitedAt  time.Time
+	exitCh    chan struct{} // closed by the SINGLE waiter when cmd exits
 }
 
 // New builds a ProcSvc with sane default windows.
@@ -48,12 +49,16 @@ func (p *ProcSvc) Start(binPath, v string) error {
 	if err := c.Start(); err != nil {
 		return err
 	}
+	exitCh := make(chan struct{})
 	p.cmd = c
 	p.version = v
 	p.startedAt = time.Now()
 	p.exited = false
 	p.exitedAt = time.Time{}
+	p.exitCh = exitCh
 
+	// The ONLY waiter for this child. Whoever needs to know it exited
+	// observes exitCh — no second Wait() (double-reap race).
 	go func() {
 		_ = c.Wait()
 		p.mu.Lock()
@@ -62,31 +67,30 @@ func (p *ProcSvc) Start(binPath, v string) error {
 			p.exitedAt = time.Now()
 		}
 		p.mu.Unlock()
+		close(exitCh)
 	}()
 	return nil
 }
 
-// Stop terminates the current child (SIGTERM, then kill).
+// Stop SIGTERMs the child and waits (via the single waiter's exitCh)
+// up to 2s, then SIGKILLs. "exited" is set only by the waiter when the
+// process is truly observed to have exited.
 func (p *ProcSvc) Stop() error {
 	p.mu.Lock()
-	c := p.cmd
+	c, exitCh := p.cmd, p.exitCh
 	p.mu.Unlock()
 	if c == nil || c.Process == nil {
 		return nil
 	}
 	_ = c.Process.Signal(syscall.SIGTERM)
-	done := make(chan struct{})
-	go func() { _, _ = c.Process.Wait(); close(done) }()
 	select {
-	case <-done:
+	case <-exitCh:
+		return nil
 	case <-time.After(2 * time.Second):
 		_ = c.Process.Kill()
+		<-exitCh // the waiter will observe the kill and record exit
+		return nil
 	}
-	p.mu.Lock()
-	p.exited = true
-	p.exitedAt = time.Now()
-	p.mu.Unlock()
-	return nil
 }
 
 // CrashedQuickly reports whether version v's process exited within the

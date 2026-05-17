@@ -85,10 +85,15 @@ func (s *Store) MarkBad(v string) error {
 	if err := os.MkdirAll(s.badDir(), 0o755); err != nil {
 		return err
 	}
-	return atomicWrite(filepath.Join(s.badDir(), safe(v)), []byte("1"))
+	// Filename is path-sanitised; the ORIGINAL version is the file
+	// CONTENT so BadSet returns the exact version string and the
+	// executor's s.Bad[desired] lookup is symmetric (no silent miss
+	// for versions containing sanitised characters).
+	return atomicWrite(filepath.Join(s.badDir(), safe(v)), []byte(v))
 }
 
-// BadSet returns all versions marked bad.
+// BadSet returns the exact versions marked bad (read from file
+// content, so lookups by the original version string always match).
 func (s *Store) BadSet() map[string]bool {
 	out := map[string]bool{}
 	entries, err := os.ReadDir(s.badDir())
@@ -96,8 +101,15 @@ func (s *Store) BadSet() map[string]bool {
 		return out
 	}
 	for _, e := range entries {
-		if !e.IsDir() {
-			out[e.Name()] = true
+		if e.IsDir() {
+			continue
+		}
+		b, rerr := os.ReadFile(filepath.Join(s.badDir(), e.Name()))
+		if rerr != nil {
+			continue
+		}
+		if v := strings.TrimSpace(string(b)); v != "" {
+			out[v] = true
 		}
 	}
 	return out

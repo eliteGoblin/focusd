@@ -7,6 +7,7 @@ package fetch
 import (
 	"context"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -50,15 +51,26 @@ func (l *Local) EnsureBinary(_ context.Context, st *core.Store, version string) 
 // placeVerified copies an already-verified file to dst atomically with
 // executable mode.
 func placeVerified(src, dst string) error {
-	data, err := os.ReadFile(src)
-	if err != nil {
-		return err
-	}
 	if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
 		return err
 	}
+	in, err := os.Open(src)
+	if err != nil {
+		return err
+	}
+	defer in.Close()
 	tmp := dst + ".tmp"
-	if err := os.WriteFile(tmp, data, 0o755); err != nil {
+	out, err := os.OpenFile(tmp, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o755)
+	if err != nil {
+		return err
+	}
+	if _, err := io.Copy(out, in); err != nil { // stream, no full buffer
+		out.Close()
+		os.Remove(tmp)
+		return err
+	}
+	if err := out.Close(); err != nil {
+		os.Remove(tmp)
 		return err
 	}
 	return os.Rename(tmp, dst)

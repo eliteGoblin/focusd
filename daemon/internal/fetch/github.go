@@ -100,7 +100,16 @@ func (g *GitHub) EnsureBinary(ctx context.Context, st *core.Store, version strin
 	tmpPath := tmp.Name()
 	defer os.Remove(tmpPath)
 
-	dl, err := g.get(ctx, dlURL)
+	// Asset download: browser_download_url 302s to signed S3. Use a
+	// PLAIN request — no GitHub JSON Accept, no Authorization bearer
+	// forwarded to the redirect target (octet-stream).
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, dlURL, nil)
+	if err != nil {
+		tmp.Close()
+		return err
+	}
+	req.Header.Set("Accept", "application/octet-stream")
+	dl, err := g.client().Do(req)
 	if err != nil {
 		tmp.Close()
 		return err
@@ -110,7 +119,10 @@ func (g *GitHub) EnsureBinary(ctx context.Context, st *core.Store, version strin
 		tmp.Close()
 		return fmt.Errorf("fetch/github: download status %d", dl.StatusCode)
 	}
-	if _, err := io.Copy(tmp, dl.Body); err != nil {
+	// Cap the body so a malicious/misconfigured release can't push an
+	// unbounded stream into the daemon.
+	const maxAsset = 512 << 20 // 512 MiB ceiling
+	if _, err := io.Copy(tmp, io.LimitReader(dl.Body, maxAsset)); err != nil {
 		tmp.Close()
 		return err
 	}

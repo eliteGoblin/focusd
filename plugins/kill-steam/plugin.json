@@ -3,6 +3,7 @@
   "name": "Kill Steam",
   "version": "1.0.0",
   "type": "job",
+  "runtime": "native_binary",
   "protocol_version": "1",
   "entrypoint": "./kill-steam",
   "supported_os": ["darwin"],

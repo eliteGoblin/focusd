@@ -2,6 +2,7 @@ package core
 
 import (
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -44,9 +45,29 @@ func TestStoreBinPath(t *testing.T) {
 	}
 }
 
-func TestStoreSafeVersion(t *testing.T) {
-	if safe("../../etc") == "../../etc" {
-		t.Fatal("path-traversal version must be sanitised")
+func TestStoreSafeVersionStaysUnderBadDir(t *testing.T) {
+	bad := "/store/bad"
+	for _, v := range []string{"../../etc/passwd", "a/b", "x..y", "v 1.0", "ok"} {
+		joined := filepath.Clean(filepath.Join(bad, safe(v)))
+		if !strings.HasPrefix(joined+string(filepath.Separator), bad+string(filepath.Separator)) &&
+			joined != bad {
+			t.Fatalf("safe(%q) escapes bad dir: %s", v, joined)
+		}
+		if strings.Contains(safe(v), "..") || strings.ContainsRune(safe(v), filepath.Separator) {
+			t.Fatalf("safe(%q)=%q still path-dangerous", v, safe(v))
+		}
+	}
+}
+
+func TestMarkBadRoundtripsSanitisedVersion(t *testing.T) {
+	s := &Store{Dir: t.TempDir()}
+	// A version containing a sanitised char must still be recognised
+	// by its ORIGINAL string (the bug Copilot flagged).
+	if err := s.MarkBad("v 1.0/beta"); err != nil {
+		t.Fatal(err)
+	}
+	if !s.BadSet()["v 1.0/beta"] {
+		t.Fatalf("bad lookup must match original version, got %v", s.BadSet())
 	}
 }
 

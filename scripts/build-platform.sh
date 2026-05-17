@@ -27,5 +27,8 @@ for entry in "${matrix[@]}"; do
     go build -trimpath -ldflags "${LDFLAGS}" -o "${bin}" ./cmd/platform
 done
 
-( cd "${OUT}" && shasum -a 256 focusd-platform-* > platform-checksums.txt )
+# Linux has sha256sum; macOS has shasum. Pick whichever exists.
+if command -v sha256sum >/dev/null 2>&1; then SHACMD="sha256sum"
+else SHACMD="shasum -a 256"; fi
+( cd "${OUT}" && ${SHACMD} focusd-platform-* > platform-checksums.txt )
 echo "platform artifacts in ${OUT}"
