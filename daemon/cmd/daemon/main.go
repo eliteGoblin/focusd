@@ -44,6 +44,8 @@ func run(args []string) int {
 		return loop(args[1:], true)
 	case "update":
 		return doUpdate(args[1:])
+	case "ensure":
+		return doEnsure(args[1:])
 	case "install":
 		return doInstall(args[1:])
 	case "uninstall":
@@ -67,6 +69,16 @@ type opts struct {
 	releaseDir string
 	healthy    time.Duration
 	unhealthy  time.Duration
+	role       string
+	testMode   bool
+	mesh       bool
+}
+
+func (o opts) spec(self string) osadapter.Spec {
+	return osadapter.Spec{
+		TestMode: o.testMode, SelfPath: self, Workdir: o.workdir,
+		Github: o.github, Asset: o.asset, Interval: o.interval,
+	}
 }
 
 func parse(name string, args []string) opts {
@@ -78,8 +90,11 @@ func parse(name string, args []string) opts {
 	rd := fs.String("release-dir", "", "use a local fake release dir instead of GitHub")
 	hd := fs.Duration("healthy", 5*time.Second, "alive longer than this ⇒ promote good")
 	ud := fs.Duration("unhealthy", 3*time.Second, "exit sooner than this ⇒ crashed")
+	rl := fs.String("r", "a", "mesh role: a|b")
+	tm := fs.String("test-mode-flag", "false", "use test-mode launchd labels")
+	mesh := fs.Bool("mesh", false, "self-heal the launchd mesh (set only by the installer)")
 	_ = fs.Parse(args)
-	return opts{*wd, *iv, *gh, *as, *rd, *hd, *ud}
+	return opts{*wd, *iv, *gh, *as, *rd, *hd, *ud, *rl, *tm == "true", *mesh}
 }
 
 func defaultWorkdir() string {
@@ -112,13 +127,27 @@ func loop(args []string, once bool) int {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
+	self, _ := os.Executable()
+	spec := o.spec(self)
+
 	tick := func() {
 		a, err := e.Tick(ctx)
 		if err != nil {
 			log.Error("tick error", "err", err)
-			return
+		} else {
+			log.Info("tick", "role", o.role, "action", string(a.Kind),
+				"target", a.Target, "note", a.Note)
 		}
-		log.Info("tick", "action", string(a.Kind), "target", a.Target, "note", a.Note)
+		// Mesh self-heal: only when launched as part of an installed
+		// mesh (--mesh, set solely by the installer). A plain
+		// `daemon run` (e2e/foreground) never touches launchd.
+		if o.mesh {
+			if rec, eerr := osadapter.EnsureAll(spec); eerr != nil {
+				log.Warn("ensure-all", "err", eerr)
+			} else if len(rec) > 0 {
+				log.Info("mesh recreated", "roles", rec)
+			}
+		}
 	}
 
 	tick()
@@ -193,6 +222,24 @@ func doInstall(args []string) int {
 		return 1
 	}
 	fmt.Println("installed")
+	return 0
+}
+
+// doEnsure is the ensurer role (StartInterval): recreate any missing
+// mesh entry (A/B/ensure), then exit. The mesh's periodic backstop.
+func doEnsure(args []string) int {
+	o := parse("ensure", args)
+	self, err := os.Executable()
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "executable:", err)
+		return 1
+	}
+	rec, eerr := osadapter.EnsureAll(o.spec(self))
+	if eerr != nil {
+		fmt.Fprintln(os.Stderr, "ensure:", eerr)
+		return 1
+	}
+	fmt.Printf("ensure ok (recreated=%v)\n", rec)
 	return 0
 }
 

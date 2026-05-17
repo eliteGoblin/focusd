@@ -2,14 +2,22 @@ package osadapter
 
 import "testing"
 
-func TestLabel(t *testing.T) {
-	if (Spec{}).Label() != "com.focusd.daemon" {
-		t.Fatal("default label wrong")
+func TestLabels(t *testing.T) {
+	s := Spec{}
+	if s.Label(RoleA) != "com.focusd.daemon.a" ||
+		s.Label(RoleB) != "com.focusd.daemon.b" ||
+		s.Label(RoleEnsure) != "com.focusd.daemon.ensure" {
+		t.Fatalf("prod labels wrong: %v %v %v",
+			s.Label(RoleA), s.Label(RoleB), s.Label(RoleEnsure))
 	}
-	if (Spec{TestMode: true}).Label() != "com.focusd.daemon.e2e" {
-		t.Fatal("test-mode label wrong")
+	ts := Spec{TestMode: true}
+	if ts.Label(RoleA) != "com.focusd.daemon.e2e.a" {
+		t.Fatalf("test label wrong: %s", ts.Label(RoleA))
 	}
-	if LabelFor(true) != "com.focusd.daemon.e2e" || LabelFor(false) != "com.focusd.daemon" {
-		t.Fatal("LabelFor wrong")
+	if LabelFor(true, RoleEnsure) != "com.focusd.daemon.e2e.ensure" {
+		t.Fatalf("LabelFor wrong: %s", LabelFor(true, RoleEnsure))
+	}
+	if len(AllRoles) != 3 {
+		t.Fatalf("AllRoles must be 3, got %v", AllRoles)
 	}
 }
