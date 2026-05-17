@@ -41,6 +41,10 @@ type Executor struct {
 	Plat     Platform
 	Log      *slog.Logger
 	crashHit map[string]int // in-memory consecutive fast-exits per version
+	// lastTarget is the version this executor last drove the platform
+	// to (EnsureRunning/Rollback target). Crash detection keys off this
+	// so a version that crashes instantly is still caught.
+	lastTarget string
 }
 
 // New builds an Executor.
@@ -50,47 +54,53 @@ func NewExecutor(st *Store, f Fetcher, p Platform, log *slog.Logger) *Executor {
 
 const crashThreshold = 3 // consecutive fast exits ⇒ mark version bad
 
-// observe gathers State from disk + the running platform.
-func (e *Executor) observe() (State, error) {
+// Tick performs exactly one reconcile step. Returns the Action taken.
+func (e *Executor) Tick(ctx context.Context) (Action, error) {
 	running, err := e.Plat.RunningVersion()
 	if err != nil {
-		return State{}, fmt.Errorf("observe running: %w", err)
+		return Action{}, fmt.Errorf("observe running: %w", err)
 	}
-	return State{
+
+	// Crash-loop detection. Check the version we last drove (lastTarget)
+	// — NOT the currently-running version — because a version that
+	// crashes immediately is no longer "running" yet must still be
+	// detected, marked bad, and rolled back.
+	cv := e.lastTarget
+	if cv == "" {
+		cv = running
+	}
+	if cv != "" {
+		switch {
+		case e.Plat.CrashedQuickly(cv):
+			e.crashHit[cv]++
+			if e.crashHit[cv] >= crashThreshold {
+				_ = e.Store.MarkBad(cv)
+				e.logf("version %s crash-looped (%d) → marked bad", cv, e.crashHit[cv])
+			}
+		case e.Plat.HealthyFor(cv):
+			e.crashHit[cv] = 0
+		}
+	}
+
+	st := State{
 		HaveConfig: e.Store.HaveConfig(),
 		Desired:    e.Store.Desired(),
 		Running:    running,
 		Good:       e.Store.Good(),
 		Bad:        e.Store.BadSet(),
-	}, nil
-}
-
-// Tick performs exactly one reconcile step. Returns the Action taken.
-func (e *Executor) Tick(ctx context.Context) (Action, error) {
-	st, err := e.observe()
-	if err != nil {
-		return Action{}, err
 	}
 
-	// Crash-loop detection on the currently-running version.
-	if st.Running != "" {
-		if e.Plat.CrashedQuickly(st.Running) {
-			e.crashHit[st.Running]++
-			if e.crashHit[st.Running] >= crashThreshold {
-				_ = e.Store.MarkBad(st.Running)
-				e.logf("version %s crash-looped (%d) → marked bad",
-					st.Running, e.crashHit[st.Running])
-				st.Bad = e.Store.BadSet() // re-read so Decide rolls back
-			}
-		} else if e.Plat.HealthyFor(st.Running) {
-			e.crashHit[st.Running] = 0
-			if st.Running == st.Desired && st.Good != st.Running {
-				_ = e.Store.WriteGood(st.Running) // promote
-			}
-		}
+	// Promote: a healthy running version that equals desired becomes good.
+	if running != "" && running == st.Desired && st.Good != running &&
+		e.Plat.HealthyFor(running) {
+		_ = e.Store.WriteGood(running)
+		st.Good = running
 	}
 
 	act := Decide(st)
+	if act.Kind == EnsureRunning || act.Kind == Rollback {
+		e.lastTarget = act.Target
+	}
 	return act, e.apply(ctx, act)
 }
 

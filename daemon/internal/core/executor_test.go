@@ -34,10 +34,14 @@ type fakePlat struct {
 }
 
 func (p *fakePlat) RunningVersion() (string, error) { return p.running, nil }
-func (p *fakePlat) Start(_, v string) error         { p.started = append(p.started, v); p.running = v; return nil }
-func (p *fakePlat) Stop() error                     { p.stopped++; p.running = ""; return nil }
-func (p *fakePlat) CrashedQuickly(v string) bool    { return v == p.crashV }
-func (p *fakePlat) HealthyFor(v string) bool        { return v == p.healthyV }
+func (p *fakePlat) Start(_, v string) error {
+	p.started = append(p.started, v)
+	p.running = v
+	return nil
+}
+func (p *fakePlat) Stop() error                  { p.stopped++; p.running = ""; return nil }
+func (p *fakePlat) CrashedQuickly(v string) bool { return v == p.crashV }
+func (p *fakePlat) HealthyFor(v string) bool     { return v == p.healthyV }
 
 func newExec(t *testing.T) (*Executor, *Store, *fakeFetch, *fakePlat) {
 	t.Helper()
@@ -112,6 +116,32 @@ func TestExecutorCrashLoopMarksBadThenRollback(t *testing.T) {
 	a, err := e.Tick(context.Background())
 	if err != nil || a.Kind != Steady || a.Target != "v1" {
 		t.Fatalf("post-rollback should be steady v1, got %+v err=%v", a, err)
+	}
+}
+
+// Regression: a version that crashes INSTANTLY (RunningVersion="" right
+// away) must still be detected, marked bad, and rolled back — crash
+// detection keys off lastTarget, not the running version.
+func TestExecutorImmediateCrashStillRollsBack(t *testing.T) {
+	e, st, _, p := newExec(t)
+	st.WriteDesired("v2")
+	st.WriteGood("v1")
+	p.running = ""  // v2 crashes instantly → never "running"
+	p.crashV = "v2" // CrashedQuickly("v2") == true
+
+	var last Action
+	for i := 0; i < crashThreshold+1; i++ {
+		a, err := e.Tick(context.Background())
+		if err != nil {
+			t.Fatalf("tick %d: %v", i, err)
+		}
+		last = a
+	}
+	if !st.BadSet()["v2"] {
+		t.Fatal("instantly-crashing v2 must be marked bad")
+	}
+	if last.Kind != Rollback || last.Target != "v1" || p.running != "v1" {
+		t.Fatalf("must roll back to v1, got %+v running=%q", last, p.running)
 	}
 }
 

@@ -1,0 +1,188 @@
+// Command daemon is the focusd Layer-1 daemon: it ensures the correct
+// platform version is always running (download from GitHub Releases,
+// Ed25519-verify, start; roll back a crash-looping version).
+//
+//	daemon run     [--workdir D] [--interval 10s] [--github owner/repo --asset NAME | --release-dir D]
+//	daemon once    same flags; one reconcile tick then exit
+//	daemon update  re-resolve latest now and roll forward
+//	daemon version print daemon version
+//	daemon install / uninstall   (darwin launchd; see osadapter)
+package main
+
+import (
+	"context"
+	"flag"
+	"fmt"
+	"log/slog"
+	"os"
+	"os/signal"
+	"syscall"
+	"time"
+
+	"github.com/eliteGoblin/focusd/daemon/internal/core"
+	"github.com/eliteGoblin/focusd/daemon/internal/fetch"
+	"github.com/eliteGoblin/focusd/daemon/internal/osadapter"
+	"github.com/eliteGoblin/focusd/daemon/internal/platformsvc"
+)
+
+var version = "dev"
+
+func main() { os.Exit(run(os.Args[1:])) }
+
+func run(args []string) int {
+	if len(args) == 0 {
+		usage()
+		return 2
+	}
+	switch args[0] {
+	case "version", "-v", "--version":
+		fmt.Println("focusd-daemon", version)
+		return 0
+	case "run":
+		return loop(args[1:], false)
+	case "once":
+		return loop(args[1:], true)
+	case "update":
+		return doUpdate(args[1:])
+	case "install":
+		return doInstall(args[1:])
+	case "uninstall":
+		return doUninstall(args[1:])
+	default:
+		fmt.Fprintln(os.Stderr, "unknown command:", args[0])
+		usage()
+		return 2
+	}
+}
+
+func usage() {
+	fmt.Fprintln(os.Stderr, "usage: daemon run|once|update|version|install|uninstall [flags]")
+}
+
+type opts struct {
+	workdir    string
+	interval   time.Duration
+	github     string
+	asset      string
+	releaseDir string
+}
+
+func parse(name string, args []string) opts {
+	fs := flag.NewFlagSet(name, flag.ContinueOnError)
+	wd := fs.String("workdir", defaultWorkdir(), "daemon work directory")
+	iv := fs.Duration("interval", 10*time.Second, "reconcile interval")
+	gh := fs.String("github", "eliteGoblin/focusd", "owner/repo for releases")
+	as := fs.String("asset", "", "release asset filename (per os/arch)")
+	rd := fs.String("release-dir", "", "use a local fake release dir instead of GitHub")
+	_ = fs.Parse(args)
+	return opts{*wd, *iv, *gh, *as, *rd}
+}
+
+func defaultWorkdir() string {
+	h, _ := os.UserHomeDir()
+	return h + "/Library/Application Support/focusd-daemon"
+}
+
+func build(o opts) (*core.Executor, *slog.Logger) {
+	log := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo}))
+	st := &core.Store{Dir: o.workdir}
+	var f core.Fetcher
+	if o.releaseDir != "" {
+		f = &fetch.Local{Dir: o.releaseDir}
+	} else {
+		f = &fetch.GitHub{Repo: o.github, Asset: o.asset}
+	}
+	p := platformsvc.New(o.workdir)
+	return core.NewExecutor(st, f, p, log), log
+}
+
+func loop(args []string, once bool) int {
+	o := parse("run", args)
+	e, log := build(o)
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
+
+	tick := func() {
+		a, err := e.Tick(ctx)
+		if err != nil {
+			log.Error("tick error", "err", err)
+			return
+		}
+		log.Info("tick", "action", string(a.Kind), "target", a.Target, "note", a.Note)
+	}
+
+	tick()
+	if once {
+		return 0
+	}
+	t := time.NewTicker(o.interval)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			log.Info("daemon stopping")
+			return 0
+		case <-t.C:
+			tick()
+		}
+	}
+}
+
+// doUpdate forces a re-resolve of latest and rolls forward until steady
+// (or a bounded number of ticks).
+func doUpdate(args []string) int {
+	o := parse("update", args)
+	e, log := build(o)
+	// Drop cached desired so the next tick re-resolves latest.
+	_ = os.Remove((&core.Store{Dir: o.workdir}).Dir + "/version.json")
+	ctx := context.Background()
+	for i := 0; i < 8; i++ {
+		a, err := e.Tick(ctx)
+		if err != nil {
+			log.Error("update tick error", "err", err)
+			return 1
+		}
+		log.Info("update tick", "action", string(a.Kind), "target", a.Target)
+		if a.Kind == core.Steady || a.Kind == core.Blocked {
+			return 0
+		}
+		time.Sleep(300 * time.Millisecond)
+	}
+	return 0
+}
+
+func doInstall(args []string) int {
+	fs := flag.NewFlagSet("install", flag.ContinueOnError)
+	wd := fs.String("workdir", defaultWorkdir(), "daemon work directory")
+	gh := fs.String("github", "eliteGoblin/focusd", "owner/repo")
+	as := fs.String("asset", "", "release asset filename")
+	iv := fs.Duration("interval", 10*time.Second, "reconcile interval")
+	test := fs.Bool("test-mode", false, "use the easily-removable test label")
+	_ = fs.Parse(args)
+	self, err := os.Executable()
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "executable:", err)
+		return 1
+	}
+	if err := osadapter.Install(osadapter.Spec{
+		TestMode: *test, SelfPath: self, Workdir: *wd,
+		Github: *gh, Asset: *as, Interval: *iv,
+	}); err != nil {
+		fmt.Fprintln(os.Stderr, "install:", err)
+		return 1
+	}
+	fmt.Println("installed")
+	return 0
+}
+
+func doUninstall(args []string) int {
+	fs := flag.NewFlagSet("uninstall", flag.ContinueOnError)
+	test := fs.Bool("test-mode", false, "uninstall the test label")
+	_ = fs.Parse(args)
+	if err := osadapter.Uninstall(*test); err != nil {
+		fmt.Fprintln(os.Stderr, "uninstall:", err)
+		return 1
+	}
+	fmt.Println("uninstalled")
+	return 0
+}
