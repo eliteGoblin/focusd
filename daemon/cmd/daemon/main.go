@@ -13,6 +13,7 @@ import (
 	"context"
 	"flag"
 	"fmt"
+	"io"
 	"log/slog"
 	"os"
 	"os/signal"
@@ -26,6 +27,7 @@ import (
 	"github.com/eliteGoblin/focusd/daemon/internal/osadapter"
 	"github.com/eliteGoblin/focusd/daemon/internal/platformsvc"
 	"github.com/eliteGoblin/focusd/daemon/internal/relocate"
+	"github.com/eliteGoblin/focusd/daemon/internal/uninstallgate"
 )
 
 var version = "dev"
@@ -301,8 +303,11 @@ func doUninstall(args []string) int {
 	}
 	fs := flag.NewFlagSet("uninstall", flag.ContinueOnError)
 	wantTest := registerTestMode(fs) // --test-mode only under -tags e2e
+	abort := fs.Bool("abort", false, "discard uninstall-cooldown progress and keep the protection")
 	_ = fs.Parse(args)
 	if wantTest() {
+		// e2e/test installs bypass the commitment gate entirely so CI
+		// teardown is deterministic and never blocks for hours.
 		if err := osadapter.Uninstall(true); err != nil {
 			fmt.Fprintln(os.Stderr, "uninstall:", err)
 			return 1
@@ -310,12 +315,81 @@ func doUninstall(args []string) int {
 		fmt.Println("uninstalled (test-mode)")
 		return 0
 	}
-	// user/system: labels are randomized — find ours by Ed25519 signature.
+
+	// PROD (user/system): the commitment gate runs before any teardown.
+	// It turns an impulsive removal into a deliberate, multi-hour ritual
+	// (transcribe → wait 2h → transcribe → wait 4h → transcribe). See
+	// internal/uninstallgate and daemon_design.md.
+	gpath := uninstallgate.StatePath(mode.Resolve(), homeDir())
+	if *abort {
+		if err := uninstallgate.Clear(gpath); err != nil {
+			fmt.Fprintln(os.Stderr, "uninstall --abort:", err)
+			return 1
+		}
+		fmt.Println("uninstall aborted — cooldown reset, protection kept.")
+		return 0
+	}
+	if code, proceed := runUninstallGate(gpath); !proceed {
+		return code
+	}
+
+	// Gate satisfied — labels are randomized, find ours by Ed25519 sig.
 	removed, err := osadapter.UninstallProd()
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "uninstall:", err)
 		return 1
 	}
+	_ = uninstallgate.Clear(gpath) // gate state dies with the install
 	fmt.Printf("uninstalled (prod): %v\n", removed)
 	return 0
+}
+
+func homeDir() string { h, _ := os.UserHomeDir(); return h }
+
+// runUninstallGate advances the commitment gate one interaction. It
+// returns (exitCode, proceed): proceed=true means all steps are done and
+// the caller should perform the real teardown; proceed=false means the
+// caller should return exitCode now (waiting, rejected, or step accepted
+// but more steps remain).
+func runUninstallGate(gpath string) (code int, proceed bool) {
+	st := uninstallgate.Load(gpath, time.Now())
+	o := uninstallgate.Evaluate(st, time.Now())
+
+	if o.Kind == uninstallgate.Wait {
+		fmt.Printf("Uninstall is on a cooldown. Come back in %s.\n",
+			o.Remaining.Round(time.Minute))
+		return 1, false
+	}
+
+	if o.Kind == uninstallgate.Transcribe {
+		ref := uninstallgate.Passage(o.Step)
+		fmt.Printf("Uninstall step %d of %d.\n\n"+
+			"Type the passage below EXACTLY, by hand. This is intentional "+
+			"friction: if the urge to uninstall is impulsive it will fade "+
+			"long before you finish. Finish with Ctrl-D on a blank line.\n\n"+
+			"----- BEGIN PASSAGE -----\n%s\n----- END PASSAGE -----\n\n",
+			o.Step, uninstallgate.TotalSteps, ref)
+
+		start := time.Now()
+		typed, _ := io.ReadAll(os.Stdin)
+		ok, why := uninstallgate.Accept(string(typed), ref, time.Since(start))
+		if !ok {
+			fmt.Fprintln(os.Stderr, "not accepted:", why, "(no progress lost — try again)")
+			return 1, false
+		}
+		st = uninstallgate.Advance(st, time.Now())
+		if err := uninstallgate.Save(gpath, st); err != nil {
+			fmt.Fprintln(os.Stderr, "gate save:", err)
+			return 1, false
+		}
+		o = uninstallgate.Evaluate(st, time.Now())
+		if o.Kind != uninstallgate.Proceed {
+			fmt.Printf("Step accepted. Come back in %s to continue.\n",
+				o.Remaining.Round(time.Minute))
+			return 0, false
+		}
+		// step 3 just completed → fall through to teardown
+	}
+
+	return 0, true // o.Kind == Proceed
 }

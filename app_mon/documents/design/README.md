@@ -56,6 +56,7 @@ an AI + public source defeats it, so the durable weight sits on the
 | Platform CI (`.github/workflows/platform.yml`) | ✅ added |
 | **Daemon (Layer 1)** — reconcile/executor/store, Ed25519 sign+verify, twin+ensurer mesh, relocate/camouflage, GH release pipeline | ✅ built, verified e2e on real laptop, PR #19 |
 | **Install modes** — `user`/`system` (by euid) each its own folder; `test` behind `e2e` build tag (absent from release) | 🛠️ in progress (this change) |
+| **Uninstall commitment gate** — 3-step transcribe+wait (2 h/4 h) ratchet, HMAC state, tamper→reset | 🛠️ in progress (this change), see daemon_design §10 |
 | **Server** | ❌ not built — requirements tracked |
 
 Code overview: [`platform/README.md`](../../../platform/README.md).
@@ -80,6 +81,7 @@ Code overview: [`platform/README.md`](../../../platform/README.md).
 | D14 | Peer recognition = **own embedded Ed25519 public key** (verify release signature), OS-portable, behind the OS interface. **Not RSA** (bigger, no benefit). macOS notarization / Team ID kept **separately** for Gatekeeper/install trust, *not* the recognition mechanism. Recognition works; it does not hide (symmetric — adversary runs the same check) | accepted |
 | D15 | Daemon **self-updates via the twin** (sibling-driven, staggered, last-good rollback), reusing the platform-update pattern; daemon never replaces its own running binary | accepted |
 | D16 | Launchd label scheme isolated to **one function** (`relocate.RoleLabel`); shared-prefix kept for now, deferred review tracked in [issue #20](https://github.com/eliteGoblin/focusd/issues/20) | ✅ done |
+| D18 | **Uninstall commitment gate**: `daemon uninstall` (prod) requires a 3-step ratchet — transcribe a shipped ~5–10 min passage → wait **2 h** → transcribe → wait **4 h** → transcribe → teardown. ≥97 % fuzzy match + ≥60 s anti-paste. State is HMAC-signed at a deterministic per-mode path; any tamper/corrupt/clock-rollback **resets to step 1** (cheating is self-defeating, no hard-block). `--abort` discards progress; `e2e`-tag build bypasses. Casual-grade by design (open source) — durable lever is the real-time delay; unforgeable enforcement deferred to server (D11). Full cleanup tracked in #22 | ✅ built, ~94 % cov |
 | D17 | **Install modes = `user` \| `system`, chosen by euid** (run normally → user/`~/Library`/LaunchAgent; `sudo` → system/`/Library`/LaunchDaemon). Each mode gets its **own folder** (no test↔real collision); the daemon decides the mode at bootstrap. **`test` mode compiled out of the release binary** via the `e2e` build tag (used only by CI/e2e). Single resolver (`internal/mode`). Explicit `--mode` passthrough to the *platform* deferred (YAGNI — platform doesn't consume it yet; folder isolation already enforces the mode) | accepted, building |
 
 ## 4. Document index

@@ -158,3 +158,45 @@ This is not security software; it raises the cost of the *impulse* past
 the point where the urge passes. The deliberate residual is the
 **off-box server's** job (detect silence / hold the commitment) —
 tracked in [server_requirements.md](./server_requirements.md).
+
+## 10. Uninstall — the commitment gate (built)
+
+`daemon uninstall` (prod = user/system) does **not** remove anything
+immediately. It is gated by a deliberate, multi-hour ritual whose only
+purpose is to outlast an *impulse*: the urge to rip out one's own focus
+protection is loud but short-lived; left a few hours it fades, and the
+gate makes the easy path slower than the urge.
+
+**The ritual — a 3-step ratchet:**
+
+| Step | User must… | Then |
+|---|---|---|
+| 1 | transcribe shipped passage A by hand (~5–10 min) | wait **2 h** |
+| 2 | (after 2 h) transcribe passage B | wait **4 h** |
+| 3 | (after 4 h) transcribe passage C | **teardown proceeds** |
+
+- 3 distinct passages are **`go:embed`-ed** in the binary; a typed
+  transcription is accepted at **≥97 %** normalized similarity
+  (Levenshtein — an honest typo over ~1800 chars does not nuke the
+  effort) **and** only if it took **≥60 s** (instant submit ⇒ pasted).
+- Progress is **never reset by being early** — running before a wait
+  elapses just prints the time remaining. Waits are anchored to each
+  step's own completion time.
+- State is one **HMAC-SHA256-signed** file at a deterministic per-mode
+  path (`SupportRoot/.com.apple.diagnostics.ug`; user vs system never
+  share it). **Any** tamper — bad MAC (hand-edit), corrupt, missing, or
+  a **backwards clock** — silently **resets the user to step 1**.
+  Editing the file therefore only costs the user their own progress;
+  cheating is self-defeating, and there is no hard-blocked state to get
+  stuck in.
+- `uninstall --abort` discards progress (chose *not* to quit).
+- **e2e/test installs bypass the gate entirely** (the `e2e`-tag build),
+  so CI teardown is deterministic and never blocks for hours.
+
+**Honest ceiling (same as §9):** the binary is open source, so a
+determined root user can read the secret/passages, `strings`+paste, or
+just `launchctl bootout`+`rm` manually. The gate is **casual-grade by
+design** — its durable lever is the *real-time delay*, not crypto.
+Unforgeable cooldown enforcement is the off-box **server's** job (D11).
+Full post-teardown cleanup (signal platform → stop plugins → remove
+workdir) is tracked separately in issue #22.
