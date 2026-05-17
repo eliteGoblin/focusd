@@ -65,6 +65,8 @@ type opts struct {
 	github     string
 	asset      string
 	releaseDir string
+	healthy    time.Duration
+	unhealthy  time.Duration
 }
 
 func parse(name string, args []string) opts {
@@ -74,8 +76,10 @@ func parse(name string, args []string) opts {
 	gh := fs.String("github", "eliteGoblin/focusd", "owner/repo for releases")
 	as := fs.String("asset", "", "release asset filename (per os/arch)")
 	rd := fs.String("release-dir", "", "use a local fake release dir instead of GitHub")
+	hd := fs.Duration("healthy", 5*time.Second, "alive longer than this ⇒ promote good")
+	ud := fs.Duration("unhealthy", 3*time.Second, "exit sooner than this ⇒ crashed")
 	_ = fs.Parse(args)
-	return opts{*wd, *iv, *gh, *as, *rd}
+	return opts{*wd, *iv, *gh, *as, *rd, *hd, *ud}
 }
 
 func defaultWorkdir() string {
@@ -93,6 +97,12 @@ func build(o opts) (*core.Executor, *slog.Logger) {
 		f = &fetch.GitHub{Repo: o.github, Asset: o.asset}
 	}
 	p := platformsvc.New(o.workdir)
+	if o.healthy > 0 {
+		p.Healthy = o.healthy
+	}
+	if o.unhealthy > 0 {
+		p.Unhealthy = o.unhealthy
+	}
 	return core.NewExecutor(st, f, p, log), log
 }
 
@@ -136,17 +146,28 @@ func doUpdate(args []string) int {
 	// Drop cached desired so the next tick re-resolves latest.
 	_ = os.Remove((&core.Store{Dir: o.workdir}).Dir + "/version.json")
 	ctx := context.Background()
-	for i := 0; i < 8; i++ {
+	// Settle: run ticks until the system is STABLE — two consecutive
+	// terminal actions (Steady/Blocked). A single transient Steady is
+	// NOT enough: a bad version looks steady for a tick or two before
+	// crash-detection (crashThreshold ticks) marks it bad and rolls
+	// back. Capped so a flapping version can't loop forever.
+	stableNeeded, stable := 2, 0
+	for i := 0; i < 20; i++ {
 		a, err := e.Tick(ctx)
 		if err != nil {
 			log.Error("update tick error", "err", err)
 			return 1
 		}
-		log.Info("update tick", "action", string(a.Kind), "target", a.Target)
+		log.Info("update tick", "i", i, "action", string(a.Kind), "target", a.Target)
 		if a.Kind == core.Steady || a.Kind == core.Blocked {
-			return 0
+			stable++
+			if stable >= stableNeeded {
+				return 0
+			}
+		} else {
+			stable = 0
 		}
-		time.Sleep(300 * time.Millisecond)
+		time.Sleep(400 * time.Millisecond)
 	}
 	return 0
 }

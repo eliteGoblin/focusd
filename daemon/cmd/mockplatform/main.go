@@ -22,6 +22,11 @@ import (
 
 var version = "dev"
 
+// crashOnStart, when "1" (set via -ldflags at build time), makes the
+// binary exit non-zero immediately even on a normal run — used to e2e
+// a "bad release" that the daemon must detect and roll back.
+var crashOnStart = ""
+
 func main() {
 	showVer := flag.Bool("version", false, "print version and exit")
 	workdir := flag.String("workdir", "", "dir to write running marker")
@@ -32,7 +37,7 @@ func main() {
 		fmt.Println(version)
 		return
 	}
-	if *crash {
+	if *crash || crashOnStart == "1" {
 		fmt.Fprintf(os.Stderr, "mockplatform %s: simulated crash\n", version)
 		os.Exit(7)
 	}
