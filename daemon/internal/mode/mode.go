@@ -45,8 +45,11 @@ func resolveFor(euid int) Mode {
 }
 
 // SupportRoot is the "Application Support" base the hidden workdir is
-// created under for this mode. (Test does not relocate — the harness
-// passes an explicit workdir — so it has no support root.)
+// created under. Only System differs (/Library); User and Test both
+// resolve to the user's ~/Library. Test never actually relocates (the
+// e2e harness passes an explicit workdir, and main.go only relocates
+// when mode != Test), so SupportRoot(Test, …) is effectively unused —
+// it returns the user path rather than a misleading empty string.
 func SupportRoot(m Mode, home string) string {
 	if m == System {
 		return "/Library/Application Support"

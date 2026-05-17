@@ -16,6 +16,7 @@ import (
 	"log/slog"
 	"os"
 	"os/signal"
+	"runtime"
 	"syscall"
 	"time"
 
@@ -216,7 +217,17 @@ func doUpdate(args []string) int {
 	return 0
 }
 
+// osSupportsLaunchd reports whether launchd install/uninstall is
+// available. Guards against filesystem side effects (relocation into the
+// mode SupportRoot, plist writes) on platforms where osadapter.Install /
+// Uninstall is only an ErrUnsupported stub.
+func osSupportsLaunchd() bool { return runtime.GOOS == "darwin" }
+
 func doInstall(args []string) int {
+	if !osSupportsLaunchd() {
+		fmt.Fprintln(os.Stderr, "install: unsupported on", runtime.GOOS, "(darwin/launchd only)")
+		return 1
+	}
 	fs := flag.NewFlagSet("install", flag.ContinueOnError)
 	wd := fs.String("workdir", defaultWorkdir(), "daemon work directory")
 	gh := fs.String("github", "eliteGoblin/focusd", "owner/repo")
@@ -284,6 +295,10 @@ func doEnsure(args []string) int {
 }
 
 func doUninstall(args []string) int {
+	if !osSupportsLaunchd() {
+		fmt.Fprintln(os.Stderr, "uninstall: unsupported on", runtime.GOOS, "(darwin/launchd only)")
+		return 1
+	}
 	fs := flag.NewFlagSet("uninstall", flag.ContinueOnError)
 	wantTest := registerTestMode(fs) // --test-mode only under -tags e2e
 	_ = fs.Parse(args)
