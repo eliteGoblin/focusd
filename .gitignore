@@ -58,3 +58,13 @@ chrome/.venv/
 *.log
 *.tmp
 .cache/
+
+# Go
+coverage.out
+coverage-*.out
+*.test
+/dist/
+# SQLite runtime state (never commit observed state)
+*.db
+*.db-shm
+*.db-wal

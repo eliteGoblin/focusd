@@ -1,0 +1,66 @@
+name: Daemon Release
+
+# Tag push like `daemon-v1.0.0` (or manual) → build the daemon for
+# macOS arm64+amd64, Ed25519-sign each with the offline key (from the
+# repo secret), and publish a GitHub Release. The daemon's self-update
+# downloads the verified signed asset from these releases.
+on:
+  push:
+    tags: ['daemon-v*']
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'release tag (e.g. daemon-v1.0.0)'
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.25'
+
+      - name: Resolve tag
+        id: t
+        run: echo "tag=${{ github.event.inputs.tag || github.ref_name }}" >> "$GITHUB_OUTPUT"
+
+      - name: Build + sign (darwin arm64/amd64)
+        working-directory: daemon
+        env:
+          FOCUSD_ED25519_PRIVATE_KEY: ${{ secrets.FOCUSD_ED25519_PRIVATE_KEY }}
+        run: |
+          set -euo pipefail
+          test -n "$FOCUSD_ED25519_PRIVATE_KEY" || { echo "missing signing secret"; exit 1; }
+          go build -o /tmp/focusd-sign ./cmd/focusd-sign
+          mkdir -p /tmp/out
+          V="${{ steps.t.outputs.tag }}"
+          # macOS = supported now. Linux/Windows = future-ready: the
+          # daemon is CGO-free and signing is pure-Go, so they build &
+          # sign today; launchd lifecycle is darwin-only (osadapter
+          # returns ErrUnsupported elsewhere) until systemd/SCM land.
+          targets="darwin/arm64 darwin/amd64 linux/amd64 linux/arm64 windows/amd64"
+          for t in $targets; do
+            os=${t%/*}; arch=${t#*/}; ext=""
+            [ "$os" = windows ] && ext=".exe"
+            CGO_ENABLED=0 GOOS=$os GOARCH=$arch \
+              go build -trimpath -ldflags "-s -w -X main.version=$V" \
+              -o /tmp/daemon-$os-$arch$ext ./cmd/daemon
+            /tmp/focusd-sign -in /tmp/daemon-$os-$arch$ext \
+              -out /tmp/out/daemon-$os-$arch$ext
+          done
+          ( cd /tmp/out && shasum -a 256 daemon-* > checksums.txt )
+          ls -l /tmp/out
+
+      - name: Publish GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release create "${{ steps.t.outputs.tag }}" \
+            --title "${{ steps.t.outputs.tag }}" \
+            --notes "Signed daemon release (Ed25519, embedded-key verified). macOS supported; linux/windows future-ready." \
+            /tmp/out/*

@@ -1,0 +1,287 @@
+// Command daemon is the focusd Layer-1 daemon: it ensures the correct
+// platform version is always running (download from GitHub Releases,
+// Ed25519-verify, start; roll back a crash-looping version).
+//
+//	daemon run     [--workdir D] [--interval 10s] [--github owner/repo --asset NAME | --release-dir D]
+//	daemon once    same flags; one reconcile tick then exit
+//	daemon update  re-resolve latest now and roll forward
+//	daemon version print daemon version
+//	daemon install / uninstall   (darwin launchd; see osadapter)
+package main
+
+import (
+	"context"
+	"flag"
+	"fmt"
+	"log/slog"
+	"os"
+	"os/signal"
+	"syscall"
+	"time"
+
+	"github.com/eliteGoblin/focusd/daemon/internal/core"
+	"github.com/eliteGoblin/focusd/daemon/internal/fetch"
+	"github.com/eliteGoblin/focusd/daemon/internal/osadapter"
+	"github.com/eliteGoblin/focusd/daemon/internal/platformsvc"
+	"github.com/eliteGoblin/focusd/daemon/internal/relocate"
+)
+
+var version = "dev"
+
+func main() { os.Exit(run(os.Args[1:])) }
+
+func run(args []string) int {
+	if len(args) == 0 {
+		usage()
+		return 2
+	}
+	switch args[0] {
+	case "version", "-v", "--version":
+		fmt.Println("focusd-daemon", version)
+		return 0
+	case "run":
+		return loop(args[1:], false)
+	case "once":
+		return loop(args[1:], true)
+	case "update":
+		return doUpdate(args[1:])
+	case "ensure":
+		return doEnsure(args[1:])
+	case "install":
+		return doInstall(args[1:])
+	case "uninstall":
+		return doUninstall(args[1:])
+	default:
+		fmt.Fprintln(os.Stderr, "unknown command:", args[0])
+		usage()
+		return 2
+	}
+}
+
+func usage() {
+	fmt.Fprintln(os.Stderr, "usage: daemon run|once|update|version|install|uninstall [flags]")
+}
+
+type opts struct {
+	workdir    string
+	interval   time.Duration
+	github     string
+	asset      string
+	releaseDir string
+	healthy    time.Duration
+	unhealthy  time.Duration
+	role       string
+	testMode   bool
+	mesh       bool
+	base       string
+}
+
+func (o opts) spec(self string) osadapter.Spec {
+	return osadapter.Spec{
+		TestMode: o.testMode, SelfPath: self, Workdir: o.workdir,
+		Github: o.github, Asset: o.asset, Interval: o.interval,
+		Base: o.base,
+	}
+}
+
+func parse(name string, args []string) opts {
+	fs := flag.NewFlagSet(name, flag.ContinueOnError)
+	wd := fs.String("workdir", defaultWorkdir(), "daemon work directory")
+	iv := fs.Duration("interval", 10*time.Second, "reconcile interval")
+	gh := fs.String("github", "eliteGoblin/focusd", "owner/repo for releases")
+	as := fs.String("asset", "", "release asset filename (per os/arch)")
+	rd := fs.String("release-dir", "", "use a local fake release dir instead of GitHub")
+	hd := fs.Duration("healthy", 5*time.Second, "alive longer than this ⇒ promote good")
+	ud := fs.Duration("unhealthy", 3*time.Second, "exit sooner than this ⇒ crashed")
+	rl := fs.String("r", "a", "mesh role: a|b")
+	tm := fs.String("test-mode-flag", "false", "use test-mode launchd labels")
+	mesh := fs.Bool("mesh", false, "self-heal the launchd mesh (set only by the installer)")
+	mb := fs.String("mesh-base", "", "disguised launchd label base (set by the installer)")
+	_ = fs.Parse(args)
+	return opts{*wd, *iv, *gh, *as, *rd, *hd, *ud, *rl, *tm == "true", *mesh, *mb}
+}
+
+func defaultWorkdir() string {
+	h, _ := os.UserHomeDir()
+	return h + "/Library/Application Support/focusd-daemon"
+}
+
+func build(o opts) (*core.Executor, *slog.Logger) {
+	log := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo}))
+	st := &core.Store{Dir: o.workdir}
+	var f core.Fetcher
+	if o.releaseDir != "" {
+		f = &fetch.Local{Dir: o.releaseDir}
+	} else {
+		f = &fetch.GitHub{Repo: o.github, Asset: o.asset}
+	}
+	p := platformsvc.New(o.workdir)
+	if o.healthy > 0 {
+		p.Healthy = o.healthy
+	}
+	if o.unhealthy > 0 {
+		p.Unhealthy = o.unhealthy
+	}
+	return core.NewExecutor(st, f, p, log), log
+}
+
+func loop(args []string, once bool) int {
+	o := parse("run", args)
+	e, log := build(o)
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
+
+	self, _ := os.Executable()
+	spec := o.spec(self)
+
+	tick := func() {
+		a, err := e.Tick(ctx)
+		if err != nil {
+			log.Error("tick error", "err", err)
+		} else {
+			log.Info("tick", "role", o.role, "action", string(a.Kind),
+				"target", a.Target, "note", a.Note)
+		}
+		// Mesh self-heal: only when launched as part of an installed
+		// mesh (--mesh, set solely by the installer). A plain
+		// `daemon run` (e2e/foreground) never touches launchd.
+		if o.mesh {
+			if rec, eerr := osadapter.EnsureAll(spec); eerr != nil {
+				log.Warn("ensure-all", "err", eerr)
+			} else if len(rec) > 0 {
+				log.Info("mesh recreated", "roles", rec)
+			}
+		}
+	}
+
+	tick()
+	if once {
+		return 0
+	}
+	t := time.NewTicker(o.interval)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			log.Info("daemon stopping")
+			return 0
+		case <-t.C:
+			tick()
+		}
+	}
+}
+
+// doUpdate forces a re-resolve of latest and rolls forward until steady
+// (or a bounded number of ticks).
+func doUpdate(args []string) int {
+	o := parse("update", args)
+	e, log := build(o)
+	// Drop cached desired so the next tick re-resolves latest.
+	_ = os.Remove((&core.Store{Dir: o.workdir}).Dir + "/version.json")
+	ctx := context.Background()
+	// Settle: run ticks until the system is STABLE — two consecutive
+	// terminal actions (Steady/Blocked). A single transient Steady is
+	// NOT enough: a bad version looks steady for a tick or two before
+	// crash-detection (crashThreshold ticks) marks it bad and rolls
+	// back. Capped so a flapping version can't loop forever.
+	stableNeeded, stable := 2, 0
+	for i := 0; i < 20; i++ {
+		a, err := e.Tick(ctx)
+		if err != nil {
+			log.Error("update tick error", "err", err)
+			return 1
+		}
+		log.Info("update tick", "i", i, "action", string(a.Kind), "target", a.Target)
+		if a.Kind == core.Steady || a.Kind == core.Blocked {
+			stable++
+			if stable >= stableNeeded {
+				return 0
+			}
+		} else {
+			stable = 0
+		}
+		time.Sleep(400 * time.Millisecond)
+	}
+	return 0
+}
+
+func doInstall(args []string) int {
+	fs := flag.NewFlagSet("install", flag.ContinueOnError)
+	wd := fs.String("workdir", defaultWorkdir(), "daemon work directory")
+	gh := fs.String("github", "eliteGoblin/focusd", "owner/repo")
+	as := fs.String("asset", "", "release asset filename")
+	iv := fs.Duration("interval", 10*time.Second, "reconcile interval")
+	test := fs.Bool("test-mode", false, "use the easily-removable test label")
+	_ = fs.Parse(args)
+	self, err := os.Executable()
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "executable:", err)
+		return 1
+	}
+	spec := osadapter.Spec{
+		TestMode: *test, SelfPath: self, Workdir: *wd,
+		Github: *gh, Asset: *as, Interval: *iv,
+	}
+	if !*test {
+		// PROD: self-relocate into a hidden random workdir + disguised
+		// per-install label base. (test-mode stays fixed/deterministic
+		// so e2e is safe & removable.)
+		home, _ := os.UserHomeDir()
+		wd := relocate.HiddenWorkdir(home)
+		reloc, rerr := relocate.RelocateInto(self, wd)
+		if rerr != nil {
+			fmt.Fprintln(os.Stderr, "relocate:", rerr)
+			return 1
+		}
+		spec.SelfPath = reloc
+		spec.Workdir = wd
+		spec.Base = relocate.RandomBase()
+		fmt.Printf("relocated → %s (base %s)\n", reloc, spec.Base)
+	}
+	if err := osadapter.Install(spec); err != nil {
+		fmt.Fprintln(os.Stderr, "install:", err)
+		return 1
+	}
+	fmt.Println("installed")
+	return 0
+}
+
+// doEnsure is the ensurer role (StartInterval): recreate any missing
+// mesh entry (A/B/ensure), then exit. The mesh's periodic backstop.
+func doEnsure(args []string) int {
+	o := parse("ensure", args)
+	self, err := os.Executable()
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "executable:", err)
+		return 1
+	}
+	rec, eerr := osadapter.EnsureAll(o.spec(self))
+	if eerr != nil {
+		fmt.Fprintln(os.Stderr, "ensure:", eerr)
+		return 1
+	}
+	fmt.Printf("ensure ok (recreated=%v)\n", rec)
+	return 0
+}
+
+func doUninstall(args []string) int {
+	fs := flag.NewFlagSet("uninstall", flag.ContinueOnError)
+	test := fs.Bool("test-mode", false, "uninstall the test label")
+	_ = fs.Parse(args)
+	if *test {
+		if err := osadapter.Uninstall(true); err != nil {
+			fmt.Fprintln(os.Stderr, "uninstall:", err)
+			return 1
+		}
+		fmt.Println("uninstalled (test-mode)")
+		return 0
+	}
+	// PROD: labels are randomized — find ours by Ed25519 signature.
+	removed, err := osadapter.UninstallProd()
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "uninstall:", err)
+		return 1
+	}
+	fmt.Printf("uninstalled (prod): %v\n", removed)
+	return 0
+}
