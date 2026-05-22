@@ -36,16 +36,40 @@ func pick(s []string) string {
 
 // RandomBase is a disguised, Apple-looking launchd label base, e.g.
 // "com.apple.metadata.helper.7f3a2c11". Generated once at install and
-// persisted (baked into the plists); never re-randomized.
+// persisted (baked into the plists); never re-randomized. The SAME base
+// is shared by all three mesh roles — see [RoleLabel] for the per-role
+// label scheme and the deferred-review note.
 func RandomBase() string {
 	return fmt.Sprintf("%s.%s.%s", pick(prefixes), pick(suffixes), randHex(4))
 }
 
+// RoleLabel is the SINGLE authoritative function that turns an install
+// base + a role into a launchd label. Every label for the daemon mesh
+// (roles "a"/"b") and the periodic ensurer/cron ("ensure") is produced
+// here and nowhere else — osadapter.Spec.Label delegates to it.
+//
+// Current implementation (intentionally kept): all three roles share one
+// random base, so the label set is:
+//
+//	<base>.a   <base>.b   <base>.ensure      e.g. com.apple.security.worker.ca800c0c.{a,b,ensure}
+//
+// Known trade-off (accepted for now): the shared prefix means finding one
+// label reveals the other two via a prefix grep. This is acceptable under
+// the casual-grade-friction philosophy (durable weight is the server, not
+// secrecy). Deferred for future review — to switch to independent
+// per-role random labels, change ONLY this function (and how the base(s)
+// are persisted in osadapter.Spec). Tracked in:
+// https://github.com/eliteGoblin/focusd/issues/20
+func RoleLabel(base, role string) string {
+	return base + "." + role
+}
+
 // HiddenWorkdir is a dotted, Apple-metadata-looking directory under the
-// user's Application Support (hidden from casual Finder/`ls`).
-func HiddenWorkdir(home string) string {
-	return filepath.Join(home, "Library", "Application Support",
-		"."+pick(prefixes)+"."+randHex(6))
+// given Application Support root (hidden from casual Finder/`ls`). The
+// root is mode-specific (user → ~/Library/..., system → /Library/...),
+// so a user and a system install never share a directory.
+func HiddenWorkdir(supportRoot string) string {
+	return filepath.Join(supportRoot, "."+pick(prefixes)+"."+randHex(6))
 }
 
 // RelocateInto copies src into dir under a random disguised basename,

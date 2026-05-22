@@ -4,7 +4,7 @@ This is the **hub**. It tracks status, **all major decisions**, and links
 to deep-dive docs. When a section grows too big, it gets its own markdown
 and is linked from here — keep this page scannable.
 
-_Last updated: 2026-05-17 · branch: `feat/platform-refactor`_
+_Last updated: 2026-05-18 · branch: `feat/platform-refactor`_
 
 ---
 
@@ -54,7 +54,9 @@ an AI + public source defeats it, so the durable weight sits on the
 | Plugins: `kill-steam`, `browser-monitor` | ✅ built, tested |
 | Reconcile spine (`platform/internal/core/reconcile`, pure Decide + Engine) | ✅ built, 91%, race-clean |
 | Platform CI (`.github/workflows/platform.yml`) | ✅ added |
-| **Daemon (Layer 1)** | ❌ not built — design agreed, see deep-dive |
+| **Daemon (Layer 1)** — reconcile/executor/store, Ed25519 sign+verify, twin+ensurer mesh, relocate/camouflage, GH release pipeline | ✅ built, verified e2e on real laptop, PR #19 |
+| **Install modes** — `user`/`system` (by euid) each its own folder; `test` behind `e2e` build tag (absent from release) | 🛠️ in progress (this change) |
+| **Uninstall commitment gate** — 3-step transcribe+wait (2 h/4 h) ratchet, HMAC state, tamper→reset | 🛠️ in progress (this change), see daemon_design §10 |
 | **Server** | ❌ not built — requirements tracked |
 
 Code overview: [`platform/README.md`](../../../platform/README.md).
@@ -78,13 +80,16 @@ Code overview: [`platform/README.md`](../../../platform/README.md).
 | D13 | Plugins: job/service model; `kill-steam` + `browser-monitor` | ✅ built |
 | D14 | Peer recognition = **own embedded Ed25519 public key** (verify release signature), OS-portable, behind the OS interface. **Not RSA** (bigger, no benefit). macOS notarization / Team ID kept **separately** for Gatekeeper/install trust, *not* the recognition mechanism. Recognition works; it does not hide (symmetric — adversary runs the same check) | accepted |
 | D15 | Daemon **self-updates via the twin** (sibling-driven, staggered, last-good rollback), reusing the platform-update pattern; daemon never replaces its own running binary | accepted |
+| D16 | Launchd label scheme isolated to **one function** (`relocate.RoleLabel`); shared-prefix kept for now, deferred review tracked in [issue #20](https://github.com/eliteGoblin/focusd/issues/20) | ✅ done |
+| D18 | **Uninstall commitment gate**: `daemon uninstall` (prod) requires a 3-step ratchet — transcribe a shipped ~5–10 min passage → wait **2 h** → transcribe → wait **4 h** → transcribe → teardown. ≥97 % fuzzy match + ≥60 s anti-paste. State is HMAC-signed at a deterministic per-mode path; any tamper/corrupt/clock-rollback **resets to step 1** (cheating is self-defeating, no hard-block). `--abort` discards progress; `e2e`-tag build bypasses. Casual-grade by design (open source) — durable lever is the real-time delay; unforgeable enforcement deferred to server (D11). Full cleanup tracked in #22 | ✅ built, ~94 % cov |
+| D17 | **Install modes = `user` \| `system`, chosen by euid** (run normally → user/`~/Library`/LaunchAgent; `sudo` → system/`/Library`/LaunchDaemon). Each mode gets its **own folder** (no test↔real collision); the daemon decides the mode at bootstrap. **`test` mode compiled out of the release binary** via the `e2e` build tag (used only by CI/e2e). Single resolver (`internal/mode`). Explicit `--mode` passthrough to the *platform* deferred (YAGNI — platform doesn't consume it yet; folder isolation already enforces the mode) | accepted, building |
 
 ## 4. Document index
 
 | Doc | Scope | Status |
 |---|---|---|
-| [daemon_design.md](./daemon_design.md) | **Daemon** self-protection & lifecycle (launchd, bootstrap, pair+ensurer, concern→response) — deep-dive | agreed, not built |
-| [self_protecting_reconcile_platform.md](./self_protecting_reconcile_platform.md) | Reconcile / upgrade / 3-layer architecture & threat model — deep-dive | agreed, not built |
+| [daemon_design.md](./daemon_design.md) | **Daemon** self-protection & lifecycle (launchd, bootstrap, pair+ensurer, concern→response) — deep-dive | ✅ built (PR #19); +install modes (this change) |
+| [self_protecting_reconcile_platform.md](./self_protecting_reconcile_platform.md) | Reconcile / upgrade / 3-layer architecture & threat model — deep-dive | ✅ built (PR #19) |
 | [server_requirements.md](./server_requirements.md) | Server requirements & TODO tracker | not started |
 | [release_and_shipment.md](./release_and_shipment.md) | Signing / release / shipment (own Ed25519 now; Apple notarization far-future, additive) | not started |
 | [platform/README.md](../../../platform/README.md) | Built platform + plugins (code-level) | current |
@@ -95,12 +100,10 @@ Code overview: [`platform/README.md`](../../../platform/README.md).
 
 ## 5. What's next
 
-1. **Design: closed.** Only the daemon remains to build (server deferred).
-2. Build the **minimal daemon** (Layer 1) per
-   [daemon_design.md](./daemon_design.md): stateless reconciler — read
-   `version` file → `pgrep bin/<v>/platform` → download+SHA-256 if
-   missing → start; flock singleton; launchd pair+ensurer; OS-interface;
-   rollback via `good`/`bad-` files; ≤500 LoC stdlib-only.
+1. **Daemon: built & verified e2e** (PR #19).
+2. **Install modes (this change):** `user`/`system` by euid, each its own
+   folder; `test` behind the `e2e` build tag so the release binary has no
+   test mode. Single `internal/mode` resolver. See D17.
 3. Server later — see `server_requirements.md` (SR-F-1..4 first).
 
 Honest ceiling: root + deliberate effort defeats this. Commitment

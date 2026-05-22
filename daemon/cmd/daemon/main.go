@@ -13,17 +13,21 @@ import (
 	"context"
 	"flag"
 	"fmt"
+	"io"
 	"log/slog"
 	"os"
 	"os/signal"
+	"runtime"
 	"syscall"
 	"time"
 
 	"github.com/eliteGoblin/focusd/daemon/internal/core"
 	"github.com/eliteGoblin/focusd/daemon/internal/fetch"
+	"github.com/eliteGoblin/focusd/daemon/internal/mode"
 	"github.com/eliteGoblin/focusd/daemon/internal/osadapter"
 	"github.com/eliteGoblin/focusd/daemon/internal/platformsvc"
 	"github.com/eliteGoblin/focusd/daemon/internal/relocate"
+	"github.com/eliteGoblin/focusd/daemon/internal/uninstallgate"
 )
 
 var version = "dev"
@@ -78,10 +82,20 @@ type opts struct {
 
 func (o opts) spec(self string) osadapter.Spec {
 	return osadapter.Spec{
-		TestMode: o.testMode, SelfPath: self, Workdir: o.workdir,
+		Mode: o.modeVal(), SelfPath: self, Workdir: o.workdir,
 		Github: o.github, Asset: o.asset, Interval: o.interval,
 		Base: o.base,
 	}
+}
+
+// modeVal is the install mode for a running mesh member: test when the
+// installer baked --test-mode-flag into the plist, otherwise the real
+// deployment mode resolved from euid (sudo → system, else user).
+func (o opts) modeVal() mode.Mode {
+	if o.testMode {
+		return mode.Test
+	}
+	return mode.Resolve()
 }
 
 func parse(name string, args []string) opts {
@@ -205,29 +219,47 @@ func doUpdate(args []string) int {
 	return 0
 }
 
+// osSupportsLaunchd reports whether launchd install/uninstall is
+// available. Guards against filesystem side effects (relocation into the
+// mode SupportRoot, plist writes) on platforms where osadapter.Install /
+// Uninstall is only an ErrUnsupported stub.
+func osSupportsLaunchd() bool { return runtime.GOOS == "darwin" }
+
 func doInstall(args []string) int {
+	if !osSupportsLaunchd() {
+		fmt.Fprintln(os.Stderr, "install: unsupported on", runtime.GOOS, "(darwin/launchd only)")
+		return 1
+	}
 	fs := flag.NewFlagSet("install", flag.ContinueOnError)
 	wd := fs.String("workdir", defaultWorkdir(), "daemon work directory")
 	gh := fs.String("github", "eliteGoblin/focusd", "owner/repo")
 	as := fs.String("asset", "", "release asset filename")
 	iv := fs.Duration("interval", 10*time.Second, "reconcile interval")
-	test := fs.Bool("test-mode", false, "use the easily-removable test label")
+	wantTest := registerTestMode(fs) // --test-mode only under -tags e2e
 	_ = fs.Parse(args)
 	self, err := os.Executable()
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "executable:", err)
 		return 1
 	}
+	// The daemon decides the install mode at bootstrap: test (e2e builds
+	// only), else system when run as root (sudo), else user.
+	m := mode.Resolve()
+	if wantTest() {
+		m = mode.Test
+	}
 	spec := osadapter.Spec{
-		TestMode: *test, SelfPath: self, Workdir: *wd,
+		Mode: m, SelfPath: self, Workdir: *wd,
 		Github: *gh, Asset: *as, Interval: *iv,
 	}
-	if !*test {
-		// PROD: self-relocate into a hidden random workdir + disguised
-		// per-install label base. (test-mode stays fixed/deterministic
-		// so e2e is safe & removable.)
+	if m != mode.Test {
+		// user/system: self-relocate into a hidden random workdir under
+		// this mode's Application Support root (user → ~/Library,
+		// system → /Library) + a disguised per-install label base. Test
+		// mode stays fixed/deterministic + uses the given workdir so e2e
+		// is safe & removable.
 		home, _ := os.UserHomeDir()
-		wd := relocate.HiddenWorkdir(home)
+		wd := relocate.HiddenWorkdir(mode.SupportRoot(m, home))
 		reloc, rerr := relocate.RelocateInto(self, wd)
 		if rerr != nil {
 			fmt.Fprintln(os.Stderr, "relocate:", rerr)
@@ -236,7 +268,7 @@ func doInstall(args []string) int {
 		spec.SelfPath = reloc
 		spec.Workdir = wd
 		spec.Base = relocate.RandomBase()
-		fmt.Printf("relocated → %s (base %s)\n", reloc, spec.Base)
+		fmt.Printf("relocated → %s (mode %s, base %s)\n", reloc, m, spec.Base)
 	}
 	if err := osadapter.Install(spec); err != nil {
 		fmt.Fprintln(os.Stderr, "install:", err)
@@ -265,10 +297,17 @@ func doEnsure(args []string) int {
 }
 
 func doUninstall(args []string) int {
+	if !osSupportsLaunchd() {
+		fmt.Fprintln(os.Stderr, "uninstall: unsupported on", runtime.GOOS, "(darwin/launchd only)")
+		return 1
+	}
 	fs := flag.NewFlagSet("uninstall", flag.ContinueOnError)
-	test := fs.Bool("test-mode", false, "uninstall the test label")
+	wantTest := registerTestMode(fs) // --test-mode only under -tags e2e
+	abort := fs.Bool("abort", false, "discard uninstall-cooldown progress and keep the protection")
 	_ = fs.Parse(args)
-	if *test {
+	if wantTest() {
+		// e2e/test installs bypass the commitment gate entirely so CI
+		// teardown is deterministic and never blocks for hours.
 		if err := osadapter.Uninstall(true); err != nil {
 			fmt.Fprintln(os.Stderr, "uninstall:", err)
 			return 1
@@ -276,12 +315,92 @@ func doUninstall(args []string) int {
 		fmt.Println("uninstalled (test-mode)")
 		return 0
 	}
-	// PROD: labels are randomized — find ours by Ed25519 signature.
+
+	// PROD (user/system): the commitment gate runs before any teardown.
+	// It turns an impulsive removal into a deliberate, multi-hour ritual
+	// (transcribe → wait 2h → transcribe → wait 4h → transcribe). See
+	// internal/uninstallgate and daemon_design.md.
+	home, herr := os.UserHomeDir()
+	if herr != nil {
+		// Without a real home the gate state path would be relative and
+		// land in CWD — silently weakening the gate. Fail instead.
+		fmt.Fprintln(os.Stderr, "uninstall: cannot resolve home directory:", herr)
+		return 1
+	}
+	gpath := uninstallgate.StatePath(mode.Resolve(), home)
+	if *abort {
+		if err := uninstallgate.Clear(gpath); err != nil {
+			fmt.Fprintln(os.Stderr, "uninstall --abort:", err)
+			return 1
+		}
+		fmt.Println("uninstall aborted — cooldown reset, protection kept.")
+		return 0
+	}
+	if code, proceed := runUninstallGate(gpath); !proceed {
+		return code
+	}
+
+	// Gate satisfied — labels are randomized, find ours by Ed25519 sig.
 	removed, err := osadapter.UninstallProd()
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "uninstall:", err)
 		return 1
 	}
+	_ = uninstallgate.Clear(gpath) // gate state dies with the install
 	fmt.Printf("uninstalled (prod): %v\n", removed)
 	return 0
+}
+
+// runUninstallGate advances the commitment gate one interaction. It
+// returns (exitCode, proceed): proceed=true means all steps are done and
+// the caller should perform the real teardown; proceed=false means the
+// caller should return exitCode now (waiting, rejected, or step accepted
+// but more steps remain).
+func runUninstallGate(gpath string) (code int, proceed bool) {
+	st := uninstallgate.Load(gpath, time.Now())
+	o := uninstallgate.Evaluate(st, time.Now())
+
+	if o.Kind == uninstallgate.Wait {
+		fmt.Printf("Uninstall is on a cooldown. Come back in %s.\n",
+			o.Remaining.Round(time.Minute))
+		return 1, false
+	}
+
+	if o.Kind == uninstallgate.Transcribe {
+		ref := uninstallgate.Passage(o.Step)
+		fmt.Printf("Uninstall step %d of %d.\n\n"+
+			"Type the passage below EXACTLY, by hand. This is intentional "+
+			"friction: if the urge to uninstall is impulsive it will fade "+
+			"long before you finish. Finish with Ctrl-D on a blank line.\n\n"+
+			"----- BEGIN PASSAGE -----\n%s\n----- END PASSAGE -----\n\n",
+			o.Step, uninstallgate.TotalSteps, ref)
+
+		start := time.Now()
+		typed, rerr := io.ReadAll(os.Stdin)
+		if rerr != nil {
+			// A read failure must not be treated as a transcription
+			// attempt — don't advance or save.
+			fmt.Fprintln(os.Stderr, "could not read input:", rerr, "(no progress lost)")
+			return 1, false
+		}
+		ok, why := uninstallgate.Accept(string(typed), ref, time.Since(start))
+		if !ok {
+			fmt.Fprintln(os.Stderr, "not accepted:", why, "(no progress lost — try again)")
+			return 1, false
+		}
+		st = uninstallgate.Advance(st, time.Now())
+		if err := uninstallgate.Save(gpath, st); err != nil {
+			fmt.Fprintln(os.Stderr, "gate save:", err)
+			return 1, false
+		}
+		o = uninstallgate.Evaluate(st, time.Now())
+		if o.Kind != uninstallgate.Proceed {
+			fmt.Printf("Step accepted. Come back in %s to continue.\n",
+				o.Remaining.Round(time.Minute))
+			return 0, false
+		}
+		// step 3 just completed → fall through to teardown
+	}
+
+	return 0, true // o.Kind == Proceed
 }

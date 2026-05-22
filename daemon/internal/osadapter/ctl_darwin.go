@@ -7,35 +7,39 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"strconv"
 	"strings"
 
+	"github.com/eliteGoblin/focusd/daemon/internal/mode"
 	"github.com/eliteGoblin/focusd/daemon/internal/sig"
 )
 
-type launchctlCtl struct{}
+// launchctlCtl + laFS are mode-aware: user → gui/<uid> + ~/Library/
+// LaunchAgents; system (sudo) → system domain + /Library/LaunchDaemons;
+// test behaves like user. The mode is decided once at bootstrap and
+// threaded in from the Spec.
+type launchctlCtl struct{ m mode.Mode }
 
-func domain() string { return "gui/" + strconv.Itoa(os.Getuid()) }
+func (c launchctlCtl) domain() string { return mode.LaunchDomain(c.m, os.Getuid()) }
 
-func (launchctlCtl) loaded(label string) bool {
-	return exec.Command("launchctl", "print", domain()+"/"+label).Run() == nil
+func (c launchctlCtl) loaded(label string) bool {
+	return exec.Command("launchctl", "print", c.domain()+"/"+label).Run() == nil
 }
-func (launchctlCtl) bootout(label string) error {
-	return exec.Command("launchctl", "bootout", domain()+"/"+label).Run()
+func (c launchctlCtl) bootout(label string) error {
+	return exec.Command("launchctl", "bootout", c.domain()+"/"+label).Run()
 }
-func (launchctlCtl) bootstrap(pp string) error {
-	out, err := exec.Command("launchctl", "bootstrap", domain(), pp).CombinedOutput()
+func (c launchctlCtl) bootstrap(pp string) error {
+	out, err := exec.Command("launchctl", "bootstrap", c.domain(), pp).CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("%w: %s", err, out)
 	}
 	return nil
 }
 
-type laFS struct{}
+type laFS struct{ m mode.Mode }
 
-func (laFS) plistPath(label string) string {
+func (f laFS) plistPath(label string) string {
 	home, _ := os.UserHomeDir()
-	return filepath.Join(home, "Library", "LaunchAgents", label+".plist")
+	return filepath.Join(mode.LaunchDir(f.m, home), label+".plist")
 }
 func (f laFS) write(path, content string) error {
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
@@ -53,33 +57,46 @@ func (laFS) remove(path string) error {
 // Install writes + loads all three mesh entries.
 func Install(s Spec) error {
 	_ = os.MkdirAll(s.Workdir, 0o755)
-	return installAll(s, launchctlCtl{}, laFS{})
+	return installAll(s, launchctlCtl{m: s.Mode}, laFS{m: s.Mode})
 }
 
 // Uninstall boots out + removes all three entries.
 func Uninstall(testMode bool) error {
-	return uninstallAll(Spec{TestMode: testMode}, launchctlCtl{}, laFS{})
+	m := modeFromTestFlag(testMode)
+	return uninstallAll(Spec{Mode: m}, launchctlCtl{m: m}, laFS{m: m})
 }
 
 // EnsureAll recreates any missing mesh entry (mutual self-healing).
 func EnsureAll(s Spec) ([]Role, error) {
-	return ensureAll(s, launchctlCtl{}, laFS{})
+	return ensureAll(s, launchctlCtl{m: s.Mode}, laFS{m: s.Mode})
 }
 
 // IsLoaded reports whether a role's launchd entry is registered.
 func IsLoaded(testMode bool, r Role) bool {
-	return launchctlCtl{}.loaded(LabelFor(testMode, r))
+	return launchctlCtl{m: modeFromTestFlag(testMode)}.loaded(LabelFor(testMode, r))
 }
 
-// UninstallProd removes a disguised prod install whose labels are
-// randomized/unknown. It scans LaunchAgents and treats a plist as
-// "ours" iff the binary it launches passes Ed25519 verification with
-// the embedded public key (the design's signature recognition), then
-// bootout + rm + pkill. Owner-driven teardown of a hidden install
-// without needing to know the random names.
+// modeFromTestFlag maps the legacy test-mode bool to a Mode: test when
+// set, otherwise the real deployment mode resolved from euid (sudo →
+// system, else user).
+func modeFromTestFlag(testMode bool) mode.Mode {
+	if testMode {
+		return mode.Test
+	}
+	return mode.Resolve()
+}
+
+// UninstallProd removes a disguised user/system install whose labels are
+// randomized/unknown. It scans the launch dir for the current mode
+// (resolved from euid: sudo → /Library/LaunchDaemons, else
+// ~/Library/LaunchAgents) and treats a plist as "ours" iff the binary it
+// launches passes Ed25519 verification with the embedded public key (the
+// design's signature recognition), then bootout + rm + pkill. Owner-
+// driven teardown of a hidden install without needing the random names.
 func UninstallProd() (removed []string, err error) {
+	m := mode.Resolve()
 	home, _ := os.UserHomeDir()
-	laDir := filepath.Join(home, "Library", "LaunchAgents")
+	laDir := mode.LaunchDir(m, home)
 	entries, rerr := os.ReadDir(laDir)
 	if rerr != nil {
 		if os.IsNotExist(rerr) {
@@ -100,7 +117,7 @@ func UninstallProd() (removed []string, err error) {
 			continue // not a genuine focusd binary → not ours
 		}
 		_ = exec.Command("pkill", "-f", bin).Run()
-		_ = launchctlCtl{}.bootout(label)
+		_ = launchctlCtl{m: m}.bootout(label)
 		_ = os.Remove(pp)
 		removed = append(removed, label)
 	}
