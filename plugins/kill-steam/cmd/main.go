@@ -15,6 +15,7 @@ import (
 	"os"
 
 	"github.com/eliteGoblin/focusd/plugins/kill-steam/internal/killer"
+	"github.com/eliteGoblin/focusd/plugins/kill-steam/internal/uninstaller"
 )
 
 var version = "dev"
@@ -58,6 +59,7 @@ func run(args []string) int {
 		return 2
 	}
 
+	// Phase 1 — kill any live Steam/Dota processes (the existing logic).
 	out, err := killer.New(names).Run()
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "kill error:", err)
@@ -65,21 +67,37 @@ func run(args []string) int {
 		return 2
 	}
 
+	// Phase 2 — if Steam.app exists on disk, full auto-uninstall:
+	// remove the app + every user's Steam appdata + caches + launchd
+	// helper. Cheap when Steam is absent (one os.Stat → return).
+	un := (&uninstaller.Reconciler{}).Reconcile()
+
 	res := result{
-		Status:  "ok",
-		Message: fmt.Sprintf("scanned %d, killed %d", out.Scanned, out.KilledCount()),
+		Status: "ok",
+		Message: fmt.Sprintf("scanned=%d killed=%d uninstall_detected=%v removed=%d",
+			out.Scanned, out.KilledCount(), un.Detected, len(un.Removed)),
 		Details: map[string]any{
-			"scanned":      out.Scanned,
-			"killed_count": out.KilledCount(),
-			"killed_pids":  out.KilledPIDs,
+			"scanned":            out.Scanned,
+			"killed_count":       out.KilledCount(),
+			"killed_pids":        out.KilledPIDs,
+			"uninstall_detected": un.Detected,
+			"uninstall_removed":  un.Removed,
+			"uninstall_errors":   un.Errors,
+			"uninstall_reason":   un.Reason,
 		},
 	}
 	if len(out.Failed) > 0 {
 		res.Status = "failed"
-		res.Message = fmt.Sprintf("killed %d, %d failed", out.KilledCount(), len(out.Failed))
+		res.Message = fmt.Sprintf("killed %d, %d failed; %s",
+			out.KilledCount(), len(out.Failed), res.Message)
 		res.Details["failed"] = out.Failed
 		emit(res)
 		return 1 // controlled failure
+	}
+	if len(un.Errors) > 0 {
+		res.Status = "failed"
+		emit(res)
+		return 1
 	}
 	emit(res)
 	return 0
