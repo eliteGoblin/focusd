@@ -106,27 +106,45 @@ func (e *Executor) Tick(ctx context.Context) (Action, error) {
 
 func (e *Executor) apply(ctx context.Context, a Action) error {
 	switch a.Kind {
-	case ResolveLatest:
-		v, err := e.Fetch.ResolveLatest(ctx)
-		if err != nil {
-			return fmt.Errorf("resolve latest: %w", err)
-		}
-		e.logf("resolved latest = %s", v)
-		return e.Store.WriteDesired(v)
-
 	case EnsureRunning, Rollback:
 		v := a.Target
+
+		// Step 1 — ensure the new binary is on disk AND Ed25519-verified
+		// BEFORE we touch the running platform. If the fetch fails (e.g.
+		// network outage, a bad release on GitHub), we return the error
+		// WITHOUT having stopped anything — the old platform keeps
+		// running uninterrupted. Replacement-running invariant first.
 		if !e.Store.HaveBin(v) {
 			if err := e.Fetch.EnsureBinary(ctx, e.Store, v); err != nil {
 				return fmt.Errorf("ensure binary %s: %w", v, err)
 			}
 		}
-		if cur, _ := e.Plat.RunningVersion(); cur != "" && cur != v {
+
+		// Step 2 — snapshot the current running version BEFORE stopping
+		// it, so a failed start can roll back.
+		prevRunning, _ := e.Plat.RunningVersion()
+
+		// Step 3 — only now stop the old, if it's a different version.
+		if prevRunning != "" && prevRunning != v {
 			if err := e.Plat.Stop(); err != nil {
-				return fmt.Errorf("stop %s: %w", cur, err)
+				return fmt.Errorf("stop %s: %w", prevRunning, err)
 			}
 		}
+
+		// Step 4 — start the new. If this fails AND we just stopped a
+		// previously-running version, roll back to it (its binary is
+		// still on disk). Best-effort: even a failed rollback is
+		// preferable to silently leaving focusd in a stopped state.
 		if err := e.Plat.Start(e.Store.BinPath(v), v); err != nil {
+			if prevRunning != "" && prevRunning != v && e.Store.HaveBin(prevRunning) {
+				if rbErr := e.Plat.Start(e.Store.BinPath(prevRunning), prevRunning); rbErr == nil {
+					e.logf("start %s failed (%v); rolled back to previously-running %s",
+						v, err, prevRunning)
+				} else {
+					e.logf("start %s failed (%v); rollback to %s ALSO failed (%v) — focusd is down",
+						v, err, prevRunning, rbErr)
+				}
+			}
 			return fmt.Errorf("start %s: %w", v, err)
 		}
 		e.logf("%s → running %s", a.Kind, v)

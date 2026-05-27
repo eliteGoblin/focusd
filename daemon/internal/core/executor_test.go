@@ -51,20 +51,32 @@ func newExec(t *testing.T) (*Executor, *Store, *fakeFetch, *fakePlat) {
 	return NewExecutor(st, f, p, nil), st, f, p
 }
 
-func TestExecutorResolveLatestThenStart(t *testing.T) {
-	e, st, f, p := newExec(t)
-	f.latest = "v1"
+// With no version config, the reconcile loop must be Blocked — NOT
+// auto-resolve via the network. The desired version is pinned out-of-
+// band by `daemon install -v` / `daemon update vX.Y.Z`.
+func TestExecutorBlockedWithNoDesired(t *testing.T) {
+	e, st, _, p := newExec(t)
 
-	// 1st tick: no config → resolve latest, write config.
-	if a, err := e.Tick(context.Background()); err != nil || a.Kind != ResolveLatest {
-		t.Fatalf("tick1 = %+v err=%v", a, err)
+	if a, err := e.Tick(context.Background()); err != nil || a.Kind != Blocked {
+		t.Fatalf("no desired ⇒ Blocked, got %+v err=%v", a, err)
 	}
-	if st.Desired() != "v1" {
-		t.Fatalf("desired not written: %q", st.Desired())
+	if st.Desired() != "" {
+		t.Fatalf("Blocked tick must NOT write desired: %q", st.Desired())
 	}
-	// 2nd tick: config present, nothing running → ensure+start v1.
+	if p.running != "" {
+		t.Fatalf("Blocked tick must NOT start anything: %q", p.running)
+	}
+}
+
+// Once the user pins a desired version, the next tick brings the
+// platform up via EnsureRunning (fetch-if-missing + start).
+func TestExecutorPinnedDesiredStarts(t *testing.T) {
+	e, st, _, p := newExec(t)
+	if err := st.WriteDesired("v1"); err != nil {
+		t.Fatal(err)
+	}
 	if a, err := e.Tick(context.Background()); err != nil || a.Kind != EnsureRunning {
-		t.Fatalf("tick2 = %+v err=%v", a, err)
+		t.Fatalf("pinned desired ⇒ EnsureRunning, got %+v err=%v", a, err)
 	}
 	if p.running != "v1" || !st.HaveBin("v1") {
 		t.Fatalf("v1 not started/installed: running=%q bin=%v", p.running, st.HaveBin("v1"))
