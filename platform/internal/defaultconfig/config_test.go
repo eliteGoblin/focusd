@@ -8,7 +8,7 @@ import (
 
 // The embedded default must always parse — no override required.
 func TestLoadDefaultOnlyParses(t *testing.T) {
-	cfg, err := LoadWithOverrides("")
+	cfg, _, err := LoadWithOverrides("")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -20,11 +20,11 @@ func TestLoadDefaultOnlyParses(t *testing.T) {
 // A missing override file is silently ignored (no error) — useful for
 // fresh installs that have never written one.
 func TestLoadMissingOverrideIsDefaultOnly(t *testing.T) {
-	cfg, err := LoadWithOverrides(filepath.Join(t.TempDir(), "does-not-exist.yaml"))
+	cfg, _, err := LoadWithOverrides(filepath.Join(t.TempDir(), "does-not-exist.yaml"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	defaultCfg, _ := LoadWithOverrides("")
+	defaultCfg, _, _ := LoadWithOverrides("")
 	if len(cfg.Jobs) != len(defaultCfg.Jobs) {
 		t.Fatalf("missing override should equal default-only; got %d vs %d",
 			len(cfg.Jobs), len(defaultCfg.Jobs))
@@ -34,7 +34,7 @@ func TestLoadMissingOverrideIsDefaultOnly(t *testing.T) {
 // An override replaces an existing job by ID (e.g. user wants
 // dns-block-reconcile disabled), and does NOT remove other defaults.
 func TestOverrideReplacesByIDPreservesOthers(t *testing.T) {
-	defaultCfg, _ := LoadWithOverrides("")
+	defaultCfg, _, _ := LoadWithOverrides("")
 	// Pick the first job ID from defaults to override.
 	targetID := defaultCfg.Jobs[0].ID
 
@@ -54,7 +54,7 @@ jobs:
 	if err := os.WriteFile(p, []byte(override), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	cfg, err := LoadWithOverrides(p)
+	cfg, _, err := LoadWithOverrides(p)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -83,7 +83,7 @@ jobs:
 // New IDs in the override are appended (lets a user add custom jobs
 // alongside the bundled defaults).
 func TestOverrideNewIDIsAppended(t *testing.T) {
-	defaultCfg, _ := LoadWithOverrides("")
+	defaultCfg, _, _ := LoadWithOverrides("")
 	p := filepath.Join(t.TempDir(), "override.yaml")
 	override := `jobs:
   - id: my-custom-job
@@ -98,7 +98,7 @@ func TestOverrideNewIDIsAppended(t *testing.T) {
 	if err := os.WriteFile(p, []byte(override), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	cfg, err := LoadWithOverrides(p)
+	cfg, _, err := LoadWithOverrides(p)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -117,7 +117,7 @@ func TestOverrideNewIDIsAppended(t *testing.T) {
 func TestOverrideMalformedIsError(t *testing.T) {
 	p := filepath.Join(t.TempDir(), "override.yaml")
 	os.WriteFile(p, []byte("this is not: valid: yaml: at: all:\n  - {"), 0o644)
-	if _, err := LoadWithOverrides(p); err == nil {
+	if _, _, err := LoadWithOverrides(p); err == nil {
 		t.Fatal("malformed override must surface as an error")
 	}
 }

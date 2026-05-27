@@ -135,14 +135,27 @@ func (e *Executor) apply(ctx context.Context, a Action) error {
 		// previously-running version, roll back to it (its binary is
 		// still on disk). Best-effort: even a failed rollback is
 		// preferable to silently leaving focusd in a stopped state.
+		//
+		// Architect-review #3: after a successful rollback the crash
+		// detector must track the actually-running version (prev), not
+		// the failed-to-start target. Override lastTarget here so the
+		// next tick's CrashedQuickly check keys off the right version
+		// (otherwise a crashing prev would never be detected because
+		// the detector would still be watching the dead target).
 		if err := e.Plat.Start(e.Store.BinPath(v), v); err != nil {
 			if prevRunning != "" && prevRunning != v && e.Store.HaveBin(prevRunning) {
 				if rbErr := e.Plat.Start(e.Store.BinPath(prevRunning), prevRunning); rbErr == nil {
-					e.logf("start %s failed (%v); rolled back to previously-running %s",
-						v, err, prevRunning)
+					e.lastTarget = prevRunning
+					if e.Log != nil {
+						e.Log.Warn("start failed; rolled back to previously-running version",
+							"target", v, "rolled_back_to", prevRunning, "err", err)
+					}
 				} else {
-					e.logf("start %s failed (%v); rollback to %s ALSO failed (%v) — focusd is down",
-						v, err, prevRunning, rbErr)
+					if e.Log != nil {
+						e.Log.Error("start failed; rollback ALSO failed — focusd is down",
+							"target", v, "rollback_target", prevRunning,
+							"err", err, "rollback_err", rbErr)
+					}
 				}
 			}
 			return fmt.Errorf("start %s: %w", v, err)

@@ -92,6 +92,15 @@ func TestDaemonE2E_DownloadRunRollback(t *testing.T) {
 	}
 
 	st := &core.Store{Dir: wd}
+	// Bug 3 contract change: the reconcile loop no longer auto-resolves
+	// "Latest" — `daemon install -v vX.Y.Z` (production) writes the
+	// desired version up front, the reconcile loop just acts on it. This
+	// e2e test mirrors that by pre-seeding the desired version before
+	// driving ticks. (Without this, the executor returns Blocked every
+	// tick and nothing downloads — see go-reviewer CRITICAL #1.)
+	if err := st.WriteDesired(good); err != nil {
+		t.Fatalf("pre-seed desired: %v", err)
+	}
 	ps := platformsvc.New(wd)
 	ps.Healthy = 400 * time.Millisecond
 	ps.Unhealthy = 300 * time.Millisecond
@@ -134,7 +143,13 @@ func TestDaemonE2E_DownloadRunRollback(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(rel, "latest"), []byte(bad), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	_ = os.Remove(filepath.Join(wd, "version.json")) // `update` re-resolve
+	// Bug 3 contract: `daemon update vX.Y.Z` now writes the desired
+	// version directly instead of wiping it to trigger an auto-resolve.
+	// Mirror that here — write the bad version as desired and let the
+	// reconcile loop drive the swap.
+	if err := st.WriteDesired(bad); err != nil {
+		t.Fatalf("set desired=bad: %v", err)
+	}
 	_ = ps.Stop()
 
 	var lastSteadyGood bool

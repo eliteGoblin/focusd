@@ -109,10 +109,15 @@ func parseCommon(name string, args []string) app.Options {
 		// Load embedded default merged with the optional override file.
 		// Pass through opts.Config so app.Bootstrap skips its own
 		// path-based load. A malformed override surfaces fail-fast here.
-		cfg, err := defaultconfig.LoadWithOverrides(opts.ConfigPath)
+		// Warnings (e.g. plugin-id typos in the override) print to
+		// stderr — visible without crashing.
+		cfg, warnings, err := defaultconfig.LoadWithOverrides(opts.ConfigPath)
 		if err != nil {
 			fmt.Fprintln(os.Stderr, "config:", err)
 			os.Exit(1)
+		}
+		for _, w := range warnings {
+			fmt.Fprintln(os.Stderr, "config warning:", w)
 		}
 		opts.Config = cfg
 	}

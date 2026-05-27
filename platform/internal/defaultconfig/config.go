@@ -26,41 +26,46 @@ var raw []byte
 func Bytes() []byte { return raw }
 
 // LoadWithOverrides returns the active platform Config built by merging
-// the embedded default with the optional override file at overridePath.
-// Behaviour:
+// the embedded default with the optional override file at overridePath,
+// plus a list of warnings the caller should log (e.g. plugin-id swap
+// detected; possible typo). Behaviour:
 //
-//   - overridePath == ""        → embedded default only.
+//   - overridePath == ""        → embedded default only, no warnings.
 //   - overridePath does not exist → embedded default only (no error).
 //   - overridePath exists       → parse + merge per Merge().
 //
 // Validation of both files happens via config.Parse so a malformed
-// override is rejected at the boundary.
-func LoadWithOverrides(overridePath string) (*config.Config, error) {
+// override is rejected at the boundary. A race-deleted override surfaces
+// as a read error (not a silent fallback) — fail loud, by design.
+func LoadWithOverrides(overridePath string) (*config.Config, []string, error) {
 	base, err := config.Parse(raw)
 	if err != nil {
-		return nil, fmt.Errorf("parse embedded default config: %w", err)
+		return nil, nil, fmt.Errorf("parse embedded default config: %w", err)
 	}
 	if overridePath == "" {
-		return base, nil
+		return base, nil, nil
 	}
 	if _, err := os.Stat(overridePath); err != nil {
 		if os.IsNotExist(err) {
-			return base, nil
+			return base, nil, nil
 		}
-		return nil, fmt.Errorf("stat override %s: %w", overridePath, err)
+		return nil, nil, fmt.Errorf("stat override %s: %w", overridePath, err)
 	}
 	overrideRaw, err := os.ReadFile(overridePath)
 	if err != nil {
-		return nil, fmt.Errorf("read override %s: %w", overridePath, err)
+		return nil, nil, fmt.Errorf("read override %s: %w", overridePath, err)
 	}
 	over, err := config.Parse(overrideRaw)
 	if err != nil {
-		return nil, fmt.Errorf("parse override %s: %w", overridePath, err)
+		return nil, nil, fmt.Errorf("parse override %s: %w", overridePath, err)
 	}
-	return Merge(base, over), nil
+	cfg, warnings := Merge(base, over)
+	return cfg, warnings, nil
 }
 
-// Merge returns base with per-field overlays from over applied:
+// Merge returns base with per-field overlays from over applied + a list
+// of human-readable warnings (e.g. a same-ID override pointing at a
+// different plugin — possibly a typo on the user's part):
 //
 //   - Platform.LogLevel / Platform.RunMode: replaced if set in over.
 //   - Jobs / Services: per-ID. An override entry replaces the
@@ -71,7 +76,12 @@ func LoadWithOverrides(overridePath string) (*config.Config, error) {
 // false`. To remove it entirely from the active set, override + disable
 // (we deliberately do not provide a "delete" — accidental deletion of
 // the default protections is exactly what this whole design avoids).
-func Merge(base, over *config.Config) *config.Config {
+//
+// NOTE on map aliasing: `Job.Config` and `Service.Config` are reference
+// maps; base entries that aren't overridden share their map with the
+// embedded default. The merged Config is treated as read-only after
+// construction, so this is intentional (zero-copy of unchanged jobs).
+func Merge(base, over *config.Config) (*config.Config, []string) {
 	out := *base
 	if over.Platform.LogLevel != "" {
 		out.Platform.LogLevel = over.Platform.LogLevel
@@ -79,12 +89,13 @@ func Merge(base, over *config.Config) *config.Config {
 	if over.Platform.RunMode != "" {
 		out.Platform.RunMode = over.Platform.RunMode
 	}
-	out.Jobs = mergeJobs(base.Jobs, over.Jobs)
-	out.Services = mergeServices(base.Services, over.Services)
-	return &out
+	var warnings []string
+	out.Jobs, warnings = mergeJobs(base.Jobs, over.Jobs, warnings)
+	out.Services, warnings = mergeServices(base.Services, over.Services, warnings)
+	return &out, warnings
 }
 
-func mergeJobs(base, over []config.Job) []config.Job {
+func mergeJobs(base, over []config.Job, warnings []string) ([]config.Job, []string) {
 	idx := make(map[string]int, len(base))
 	out := make([]config.Job, 0, len(base)+len(over))
 	for _, j := range base {
@@ -93,16 +104,26 @@ func mergeJobs(base, over []config.Job) []config.Job {
 	}
 	for _, j := range over {
 		if i, ok := idx[j.ID]; ok {
+			// Architect-review #4: a same-ID override pointing at a
+			// different plugin is almost always a user typo (e.g.
+			// `plugin: kil-steam`) that would silently no-op the
+			// default. Surface it as a warning; do not refuse — power
+			// users may legitimately want to swap implementations.
+			if j.Plugin != out[i].Plugin {
+				warnings = append(warnings, fmt.Sprintf(
+					"job %q overrides default plugin %q with %q (possible typo?)",
+					j.ID, out[i].Plugin, j.Plugin))
+			}
 			out[i] = j
 			continue
 		}
 		out = append(out, j)
 		idx[j.ID] = len(out) - 1
 	}
-	return out
+	return out, warnings
 }
 
-func mergeServices(base, over []config.Service) []config.Service {
+func mergeServices(base, over []config.Service, warnings []string) ([]config.Service, []string) {
 	idx := make(map[string]int, len(base))
 	out := make([]config.Service, 0, len(base)+len(over))
 	for _, s := range base {
@@ -111,11 +132,16 @@ func mergeServices(base, over []config.Service) []config.Service {
 	}
 	for _, s := range over {
 		if i, ok := idx[s.ID]; ok {
+			if s.Plugin != out[i].Plugin {
+				warnings = append(warnings, fmt.Sprintf(
+					"service %q overrides default plugin %q with %q (possible typo?)",
+					s.ID, out[i].Plugin, s.Plugin))
+			}
 			out[i] = s
 			continue
 		}
 		out = append(out, s)
 		idx[s.ID] = len(out) - 1
 	}
-	return out
+	return out, warnings
 }

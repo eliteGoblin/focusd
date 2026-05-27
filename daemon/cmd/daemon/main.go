@@ -18,6 +18,7 @@ import (
 	"os"
 	"os/signal"
 	"runtime"
+	"strings"
 	"syscall"
 	"time"
 
@@ -197,22 +198,30 @@ func loop(args []string, once bool) int {
 // — see executor.go). This command itself is a thin write + (optional)
 // one-shot resolve; it does NOT loop on ticks or wipe state.
 func doUpdate(args []string) int {
-	o := parse("update", args)
-	_, log := build(o)
+	// Use a dedicated FlagSet so we can correctly pick up the trailing
+	// positional version after all flags (handles `--workdir=/x v1.0.0`
+	// AND `--workdir /x v1.0.0` AND `v1.0.0`). The hand-rolled "first
+	// arg without a `-` prefix" scan was wrong for `--flag value` form,
+	// where `value` is non-flag but not the version. Go-review HIGH #2.
+	fs := flag.NewFlagSet("update", flag.ContinueOnError)
+	wd := fs.String("workdir", defaultWorkdir(), "daemon work directory")
+	gh := fs.String("github", "eliteGoblin/focusd", "owner/repo (for `update` with no version arg)")
+	as := fs.String("asset", "", "release asset filename")
+	_ = fs.Parse(args)
+	explicit := fs.Arg(0) // optional positional version, e.g. v1.2.3
 
-	// Separate flag and positional args. The first non-flag arg, if
-	// present, is the explicit version.
-	var explicit string
-	for _, a := range args {
-		if len(a) > 0 && a[0] != '-' {
-			explicit = a
-			break
-		}
-	}
+	o := opts{workdir: *wd, github: *gh, asset: *as}
+	_, log := build(o)
 
 	st := &core.Store{Dir: o.workdir}
 
 	if explicit != "" {
+		// LOW #7: same format guard as install.
+		if !strings.HasPrefix(explicit, "v") {
+			log.Error("update: version must be a tag starting with 'v' (e.g. v0.9.0)",
+				"got", explicit)
+			return 2
+		}
 		if err := st.WriteDesired(explicit); err != nil {
 			log.Error("write desired failed", "err", err)
 			return 1
@@ -265,6 +274,14 @@ func doInstall(args []string) int {
 			"install: -v vX.Y.Z is required (the daemon does NOT auto-update; pin a version explicitly)")
 		return 2
 	}
+	// LOW #7: a soft format guard so accidental `-v latest` / `-v master`
+	// surface as a clear "must start with v" error here, not as a
+	// confusing fetch failure five seconds later in the reconcile loop.
+	if !strings.HasPrefix(*desired, "v") {
+		fmt.Fprintln(os.Stderr,
+			"install: -v must be a tag starting with 'v' (e.g. v0.9.0), got:", *desired)
+		return 2
+	}
 	self, err := os.Executable()
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "executable:", err)
@@ -298,16 +315,19 @@ func doInstall(args []string) int {
 		spec.Base = relocate.RandomBase()
 		fmt.Printf("relocated → %s (mode %s, base %s)\n", reloc, m, spec.Base)
 	}
-	if err := osadapter.Install(spec); err != nil {
-		fmt.Fprintln(os.Stderr, "install:", err)
-		return 1
-	}
-	// Pin the desired platform version BEFORE the launchd mesh comes up,
-	// so the first reconcile tick has a target and never enters the
-	// "no desired" Blocked state. The daemon does not auto-resolve.
+	// Pin the desired platform version BEFORE calling Install so the
+	// launchd mesh comes up with version.json already in place. If we
+	// wrote it AFTER osadapter.Install, the first reconcile tick can
+	// race in, observe no desired, and log a spurious "Blocked" — fine
+	// in steady state but cosmetically alarming on first install. Go-
+	// review HIGH #3.
 	st := &core.Store{Dir: spec.Workdir}
 	if err := st.WriteDesired(*desired); err != nil {
 		fmt.Fprintln(os.Stderr, "write desired:", err)
+		return 1
+	}
+	if err := osadapter.Install(spec); err != nil {
+		fmt.Fprintln(os.Stderr, "install:", err)
 		return 1
 	}
 	fmt.Printf("installed (desired platform = %s)\n", *desired)

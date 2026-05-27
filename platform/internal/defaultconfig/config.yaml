@@ -1,0 +1,21 @@
+platform:
+  log_level: info
+
+jobs:
+  - id: dns-block-reconcile
+    plugin: dns-block
+    enabled: true
+    schedule: "@every 10s"
+    timeout: 5s
+    retry: 0
+    allow_overlap: false
+    config: {}
+
+  - id: kill-steam-reconcile
+    plugin: kill-steam
+    enabled: true
+    schedule: "@every 10s"
+    timeout: 20s
+    retry: 0
+    allow_overlap: false
+    config: {}
