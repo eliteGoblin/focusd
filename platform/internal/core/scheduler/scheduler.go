@@ -16,6 +16,7 @@ import (
 	"github.com/eliteGoblin/focusd/platform/internal/core/plugin"
 	"github.com/eliteGoblin/focusd/platform/internal/core/runner"
 	"github.com/eliteGoblin/focusd/platform/internal/core/state"
+	"github.com/eliteGoblin/focusd/platform/internal/osadapter"
 	"github.com/robfig/cron/v3"
 )
 
@@ -25,19 +26,48 @@ type Scheduler struct {
 	run  *runner.Runner
 	db   *state.DB
 	log  *slog.Logger
+	mode osadapter.RunMode // platform run mode; gates plugin run_as
 
 	mu        sync.Mutex
 	triggered map[string]int // jobID -> trigger count (test/observability)
 }
 
-// New builds a scheduler. The runner and DB must be ready.
-func New(r *runner.Runner, db *state.DB, log *slog.Logger) *Scheduler {
+// New builds a scheduler. The runner and DB must be ready. mode is the
+// platform's run mode; it gates dispatch against each plugin's run_as
+// so a system-mode platform never executes user-domain plugins (which
+// would, e.g., chown ~/.claude/ to root).
+func New(r *runner.Runner, db *state.DB, log *slog.Logger, mode osadapter.RunMode) *Scheduler {
 	return &Scheduler{
 		cron:      cron.New(),
 		run:       r,
 		db:        db,
 		log:       log,
+		mode:      mode,
 		triggered: map[string]int{},
+	}
+}
+
+// RunAsMatches reports whether a plugin manifest's run_as is compatible
+// with the platform's current run mode.
+//
+//   - "system"       runs only under ModeSystem
+//   - "current_user" / "active_user" run only under ModeUser
+//   - ""             is legacy / unknown: always run (no gate)
+//
+// Mismatched jobs are skipped at dispatch time without recording a
+// failed run — they are a no-op for this platform instance.
+func RunAsMatches(runAs string, mode osadapter.RunMode) bool {
+	switch runAs {
+	case "":
+		return true // legacy behavior: no gate
+	case plugin.RunAsSystem:
+		return mode == osadapter.ModeSystem
+	case plugin.RunAsCurrentUser, plugin.RunAsActiveUser:
+		return mode == osadapter.ModeUser
+	default:
+		// Unknown values shouldn't reach here (manifest validation
+		// rejects them), but be conservative: skip rather than run.
+		return false
 	}
 }
 
@@ -84,6 +114,20 @@ func (s *Scheduler) trigger(j config.Job, p plugin.Discovered) {
 	s.mu.Lock()
 	s.triggered[j.ID]++
 	s.mu.Unlock()
+
+	// run_as gate: a plugin whose run_as does not match the platform's
+	// run mode is a no-op for this instance — not a failed run. This
+	// keeps user-domain plugins (skill-protector et al.) from being
+	// executed by a system-mode platform, which would corrupt user
+	// file ownership.
+	if p.Manifest != nil && !RunAsMatches(p.Manifest.RunAs, s.mode) {
+		msg := fmt.Sprintf("skipped: run_as=%s does not match platform mode=%s",
+			p.Manifest.RunAs, s.mode)
+		s.event(state.SeverityInfo, "job_skipped_run_as", msg, j.ID)
+		s.log.Info("job skipped (run_as mismatch)",
+			"job", j.ID, "run_as", p.Manifest.RunAs, "mode", string(s.mode))
+		return
+	}
 
 	if !j.AllowOverlap {
 		// Lock TTL = timeout + slack so a crashed run self-heals.

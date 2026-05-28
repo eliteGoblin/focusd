@@ -11,10 +11,16 @@ import (
 	"github.com/eliteGoblin/focusd/platform/internal/core/plugin"
 	"github.com/eliteGoblin/focusd/platform/internal/core/runner"
 	"github.com/eliteGoblin/focusd/platform/internal/core/state"
+	"github.com/eliteGoblin/focusd/platform/internal/osadapter"
 	"github.com/eliteGoblin/focusd/platform/internal/testutil"
 )
 
 func newSched(t *testing.T) (*Scheduler, *state.DB) {
+	t.Helper()
+	return newSchedMode(t, osadapter.ModeUser)
+}
+
+func newSchedMode(t *testing.T, mode osadapter.RunMode) (*Scheduler, *state.DB) {
 	t.Helper()
 	db, err := state.Open(filepath.Join(t.TempDir(), "s.db"))
 	if err != nil {
@@ -22,7 +28,7 @@ func newSched(t *testing.T) (*Scheduler, *state.DB) {
 	}
 	t.Cleanup(func() { db.Close() })
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
-	return New(runner.New(db), db, log), db
+	return New(runner.New(db), db, log, mode), db
 }
 
 func dur(d time.Duration) config.Duration { return config.Duration(d) }
@@ -152,6 +158,83 @@ func TestTriggerAllowOverlapIgnoresLock(t *testing.T) {
 
 	if _, err := db.Runs.LastByStatus("j1", state.RunStatusOK); err != nil {
 		t.Errorf("allow_overlap job should run despite lock: %v", err)
+	}
+}
+
+func TestRunAsMatches(t *testing.T) {
+	cases := []struct {
+		name  string
+		runAs string
+		mode  osadapter.RunMode
+		want  bool
+	}{
+		{"empty always runs (user)", "", osadapter.ModeUser, true},
+		{"empty always runs (system)", "", osadapter.ModeSystem, true},
+		{"system on system", plugin.RunAsSystem, osadapter.ModeSystem, true},
+		{"system on user", plugin.RunAsSystem, osadapter.ModeUser, false},
+		{"current_user on user", plugin.RunAsCurrentUser, osadapter.ModeUser, true},
+		{"current_user on system", plugin.RunAsCurrentUser, osadapter.ModeSystem, false},
+		{"active_user on user", plugin.RunAsActiveUser, osadapter.ModeUser, true},
+		{"active_user on system", plugin.RunAsActiveUser, osadapter.ModeSystem, false},
+		{"unknown runs nowhere", "wat", osadapter.ModeUser, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := RunAsMatches(tc.runAs, tc.mode); got != tc.want {
+				t.Errorf("RunAsMatches(%q,%q) = %v, want %v",
+					tc.runAs, tc.mode, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestTriggerRunAsGate is the integration check at the trigger layer.
+// It mirrors the table above but verifies the side effects: when the
+// gate matches, the job runs and a run row is recorded; when it does
+// not, no run row appears and a skip event is logged instead.
+func TestTriggerRunAsGate(t *testing.T) {
+	cases := []struct {
+		name      string
+		mode      osadapter.RunMode
+		runAs     string
+		wantRun   bool
+		wantEvent string
+	}{
+		{"system platform + system job runs", osadapter.ModeSystem, plugin.RunAsSystem, true, ""},
+		{"system platform + user job skipped", osadapter.ModeSystem, plugin.RunAsCurrentUser, false, "job_skipped_run_as"},
+		{"user platform + user job runs", osadapter.ModeUser, plugin.RunAsCurrentUser, true, ""},
+		{"user platform + system job skipped", osadapter.ModeUser, plugin.RunAsSystem, false, "job_skipped_run_as"},
+		{"user platform + empty run_as runs", osadapter.ModeUser, "", true, ""},
+		{"system platform + empty run_as runs", osadapter.ModeSystem, "", true, ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			s, db := newSchedMode(t, tc.mode)
+			p := testutil.ScriptPlugin(t, "x",
+				`echo '{"status":"ok"}'`)
+			p.Manifest.RunAs = tc.runAs
+			j := config.Job{ID: "j1", Plugin: "x", Enabled: true,
+				Schedule: "* * * * *", Timeout: dur(2 * time.Second)}
+			s.trigger(j, p)
+
+			_, runErr := db.Runs.LastByStatus("j1", state.RunStatusOK)
+			didRun := runErr == nil
+			if didRun != tc.wantRun {
+				t.Errorf("didRun=%v want=%v (err=%v)", didRun, tc.wantRun, runErr)
+			}
+			if tc.wantEvent != "" {
+				ev, _ := db.Events.Recent(10)
+				found := false
+				for _, e := range ev {
+					if e.EventType == tc.wantEvent {
+						found = true
+					}
+				}
+				if !found {
+					t.Errorf("expected event %q, got %+v", tc.wantEvent, ev)
+				}
+			}
+		})
 	}
 }
 
