@@ -29,15 +29,15 @@ type daemonAssetFetcher interface {
 // the CLI test can build it directly and exercise runSelfUpdate
 // without round-tripping through flag.NewFlagSet.
 type selfUpdateOpts struct {
-	tag             string
-	workdir         string
-	github          string
-	assetPattern    string
-	releaseDir      string
-	dryRun          bool
-	keepOld         bool
-	healthyTimeout  time.Duration
-	probeInterval   time.Duration
+	tag            string
+	workdir        string
+	github         string
+	assetPattern   string
+	releaseDir     string
+	dryRun         bool
+	keepOld        bool
+	healthyTimeout time.Duration
+	probeInterval  time.Duration
 }
 
 // doSelfUpdate is the CLI dispatch for `daemon self-update`. macOS-

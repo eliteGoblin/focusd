@@ -13,11 +13,12 @@ import (
 // later behind this same package API.
 var ErrUnsupported = errors.New("osadapter: launchd lifecycle is macOS-only")
 
-func Install(Spec) error                               { return ErrUnsupported }
-func Uninstall(bool) error                             { return ErrUnsupported }
-func EnsureAll(Spec) ([]Role, error)                   { return nil, ErrUnsupported }
-func IsLoaded(bool, Role) bool                         { return false }
-func UninstallProd() ([]string, error)                 { return nil, ErrUnsupported }
+func Install(Spec) error               { return ErrUnsupported }
+func Uninstall(bool) error             { return ErrUnsupported }
+func EnsureAll(Spec) ([]Role, error)   { return nil, ErrUnsupported }
+func IsLoaded(bool, Role) bool         { return false }
+func UninstallProd() ([]string, error) { return nil, ErrUnsupported }
+
 // Verifier is the signature-check seam (no-op on non-darwin since
 // FindCurrentInstall returns ErrUnsupported here).
 type Verifier func(path string) (bool, error)

@@ -16,8 +16,8 @@ type fakeProber struct {
 	mu           sync.Mutex
 	loaded       map[string]bool
 	pids         map[string]bool
-	probeRounds  int  // each isLoaded call for label[0] increments this
-	gateRounds   int  // first N rounds report not-healthy
+	probeRounds  int // each isLoaded call for label[0] increments this
+	gateRounds   int // first N rounds report not-healthy
 	firstLabel   string
 	neverHealthy bool // always report not-healthy (timeout path)
 }
@@ -97,9 +97,9 @@ func (b *fakeBinPlacer) remove(p string) error {
 
 func curInstall() CurInstall {
 	return CurInstall{
-		Mode:    mode.User,
-		Base:    "com.apple.metadata.helper.OLD",
-		Workdir: "/wd",
+		Mode:       mode.User,
+		Base:       "com.apple.metadata.helper.OLD",
+		Workdir:    "/wd",
 		BinaryPath: "/wd/com.apple.metadata.helper.OLD",
 		PlistPaths: []string{
 			"/p/com.apple.metadata.helper.OLD.a.plist",
