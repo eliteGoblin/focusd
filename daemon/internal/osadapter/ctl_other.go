@@ -18,7 +18,13 @@ func Uninstall(bool) error                             { return ErrUnsupported }
 func EnsureAll(Spec) ([]Role, error)                   { return nil, ErrUnsupported }
 func IsLoaded(bool, Role) bool                         { return false }
 func UninstallProd() ([]string, error)                 { return nil, ErrUnsupported }
-func FindCurrentInstall(mode.Mode) (CurInstall, error) { return CurInstall{}, ErrUnsupported }
+// Verifier is the signature-check seam (no-op on non-darwin since
+// FindCurrentInstall returns ErrUnsupported here).
+type Verifier func(path string) (bool, error)
+
+func FindCurrentInstall(mode.Mode, Verifier) (CurInstall, error) {
+	return CurInstall{}, ErrUnsupported
+}
 func SelfUpdateProd(CurInstall, Spec, []byte, time.Duration, time.Duration, bool) error {
 	return ErrUnsupported
 }

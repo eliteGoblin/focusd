@@ -53,6 +53,16 @@ var daemonVersionTagRE = regexp.MustCompile(`^daemon-v\d+\.\d+\.\d+(-[A-Za-z0-9]
 
 func isValidDaemonTag(s string) bool { return daemonVersionTagRE.MatchString(s) }
 
+// githubRepoRE matches a plain `owner/repo` value for the --github
+// flag. The owner+repo each must be a non-empty token of allowed chars
+// — anything fancier (paths, query strings, URL fragments) is rejected
+// upfront so the value can't subvert the GH API URL it's interpolated
+// into: `https://api.github.com/repos/<owner>/<repo>/releases/...`.
+// (Security-reviewer MEDIUM #2.)
+var githubRepoRE = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]*/[A-Za-z0-9][A-Za-z0-9._-]*$`)
+
+func isValidGithubRepo(s string) bool { return githubRepoRE.MatchString(s) }
+
 func main() { os.Exit(run(os.Args[1:])) }
 
 func run(args []string) int {

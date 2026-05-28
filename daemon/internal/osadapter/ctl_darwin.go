@@ -3,6 +3,7 @@
 package osadapter
 
 import (
+	"bytes"
 	"fmt"
 	"io"
 	"os"
@@ -121,12 +122,20 @@ type CurInstall struct {
 // All three mesh entries must agree on the same binary path and the
 // same disguised label base; otherwise the function returns whatever
 // it could parse and the caller decides.
-// verifyFn is the verifier seam — production uses sig.VerifyFile (the
-// real Ed25519 check against the embedded public key); tests override
-// it to avoid needing the offline private key in CI.
-var verifyFn = sig.VerifyFile
+// Verifier is the signature-check seam — production passes sig.VerifyFile
+// (the real Ed25519 check against the embedded public key); tests pass
+// a fake to avoid needing the offline private key in CI. Replaces the
+// prior package-global `verifyFn`, which was a data-race hazard if any
+// test ever ran subtests in parallel (Go-reviewer HIGH).
+type Verifier func(path string) (bool, error)
 
-func FindCurrentInstall(m mode.Mode) (CurInstall, error) {
+// FindCurrentInstall scans laDir for plists, verifies each candidate
+// binary with `verify`, and returns the install if any. Pass
+// sig.VerifyFile from production; tests pass a fake.
+func FindCurrentInstall(m mode.Mode, verify Verifier) (CurInstall, error) {
+	if verify == nil {
+		verify = sig.VerifyFile
+	}
 	home, _ := os.UserHomeDir()
 	laDir := mode.LaunchDir(m, home)
 	entries, rerr := os.ReadDir(laDir)
@@ -146,7 +155,7 @@ func FindCurrentInstall(m mode.Mode) (CurInstall, error) {
 		if label == "" || bin == "" {
 			continue
 		}
-		if ok, verr := verifyFn(bin); verr != nil || !ok {
+		if ok, verr := verify(bin); verr != nil || !ok {
 			continue // not a genuine focusd binary → not ours
 		}
 		// Establish the install's binary path + base from the FIRST
@@ -202,7 +211,7 @@ func workdirFromArgv(argv []string) string {
 // of a hidden install without needing the random names.
 func UninstallProd() (removed []string, err error) {
 	m := mode.Resolve()
-	cur, ferr := FindCurrentInstall(m)
+	cur, ferr := FindCurrentInstall(m, sig.VerifyFile)
 	if ferr != nil {
 		return nil, ferr
 	}
@@ -310,7 +319,7 @@ func (binPlacerFS) place(srcBytes []byte, dstPath string) error {
 	if err != nil {
 		return err
 	}
-	if _, err := io.Copy(out, byteReader(srcBytes)); err != nil {
+	if _, err := io.Copy(out, bytes.NewReader(srcBytes)); err != nil {
 		out.Close()
 		os.Remove(tmp)
 		return err
@@ -327,19 +336,6 @@ func (binPlacerFS) remove(path string) error {
 		return err
 	}
 	return nil
-}
-
-// byteReader is a tiny io.Reader over a []byte without pulling in
-// bytes.NewReader at the call site — kept inline so binPlacer stays
-// stdlib-shaped and dep-free.
-type byteReader []byte
-
-func (b byteReader) Read(p []byte) (int, error) {
-	if len(b) == 0 {
-		return 0, io.EOF
-	}
-	n := copy(p, b)
-	return n, nil
 }
 
 // SelfUpdateProd is the darwin entry-point that wires the real launchd

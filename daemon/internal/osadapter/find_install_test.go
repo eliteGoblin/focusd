@@ -3,6 +3,7 @@
 package osadapter
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -121,12 +122,11 @@ func TestFindCurrentInstallHappyPath(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Stub verifyFn to accept ONLY the install's binary.
-	orig := verifyFn
-	verifyFn = func(p string) (bool, error) { return p == binPath, nil }
-	defer func() { verifyFn = orig }()
+	// Pass a verifier that accepts ONLY the install's binary. The
+	// signature is the seam (no package-global = no data race).
+	verify := Verifier(func(p string) (bool, error) { return p == binPath, nil })
 
-	cur, err := FindCurrentInstall(mode.User)
+	cur, err := FindCurrentInstall(mode.User, verify)
 	if err != nil {
 		t.Fatalf("FindCurrentInstall: %v", err)
 	}
@@ -154,11 +154,69 @@ func TestFindCurrentInstallNoneInstalled(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 	// LaunchAgents directory doesn't exist → zero install, nil error.
-	cur, err := FindCurrentInstall(mode.User)
+	reject := Verifier(func(string) (bool, error) { return false, nil })
+	cur, err := FindCurrentInstall(mode.User, reject)
 	if err != nil {
 		t.Fatalf("err = %v", err)
 	}
 	if cur.BinaryPath != "" || len(cur.PlistPaths) != 0 {
 		t.Fatalf("expected empty CurInstall, got %+v", cur)
+	}
+}
+
+// Go-reviewer MEDIUM #6: a broken install (plist references a binary
+// that the verifier rejects — e.g. the binary was deleted or replaced
+// with a non-focusd binary) is silently skipped, not returned as part
+// of the install. Without this test, a future refactor could turn the
+// silent-skip into a false-positive without anything catching it.
+func TestFindCurrentInstallVerifyFailsSkipsPlist(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	laDir := filepath.Join(home, "Library", "LaunchAgents")
+	if err := os.MkdirAll(laDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	binPath := filepath.Join(home, "hidden", "com.apple.metadata.helper.7f3a")
+	if err := os.MkdirAll(filepath.Dir(binPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(binPath, []byte("FAKE-DAEMON"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	wd := filepath.Join(home, "Library", "Application Support", ".com.apple.metadata.7f3a")
+	s := Spec{
+		Mode: mode.User, SelfPath: binPath, Workdir: wd,
+		Github: "o/r", Asset: "daemon-darwin-arm64",
+		Interval: 10 * time.Second, Base: "com.apple.metadata.helper.7f3a",
+	}
+	for _, r := range AllRoles {
+		pp := filepath.Join(laDir, s.Label(r)+".plist")
+		if err := os.WriteFile(pp, []byte(Plist(s, r)), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	// Verifier rejects every binary (simulates binary deleted /
+	// replaced / unsigned). All 3 plists must be skipped → zero install.
+	rejectAll := Verifier(func(string) (bool, error) { return false, nil })
+	cur, err := FindCurrentInstall(mode.User, rejectAll)
+	if err != nil {
+		t.Fatalf("err = %v", err)
+	}
+	if cur.BinaryPath != "" || len(cur.PlistPaths) != 0 {
+		t.Fatalf("expected zero install when verifier rejects, got %+v", cur)
+	}
+
+	// And: a verifier that returns an ERROR (vs just false) must
+	// also skip — not be treated as "valid".
+	rejectWithErr := Verifier(func(string) (bool, error) {
+		return false, errors.New("verifier blew up")
+	})
+	cur, err = FindCurrentInstall(mode.User, rejectWithErr)
+	if err != nil {
+		t.Fatalf("err = %v", err)
+	}
+	if cur.BinaryPath != "" || len(cur.PlistPaths) != 0 {
+		t.Fatalf("expected zero install when verifier errs, got %+v", cur)
 	}
 }

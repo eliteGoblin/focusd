@@ -15,6 +15,7 @@ import (
 	"github.com/eliteGoblin/focusd/daemon/internal/mode"
 	"github.com/eliteGoblin/focusd/daemon/internal/osadapter"
 	"github.com/eliteGoblin/focusd/daemon/internal/relocate"
+	"github.com/eliteGoblin/focusd/daemon/internal/sig"
 )
 
 // daemonAssetFetcher is the verified-download seam used by self-update.
@@ -89,6 +90,16 @@ func parseSelfUpdate(args []string) (selfUpdateOpts, int) {
 			"self-update: tag must match `daemon-vX.Y.Z` (got:", tag+")")
 		return selfUpdateOpts{}, 2
 	}
+	// Security-reviewer MEDIUM #2: --github is interpolated into the
+	// GH API URL `repos/<owner>/<repo>/releases/tags/<tag>`. Reject
+	// anything that's not a plain `owner/repo` to defeat URL-fragment
+	// injection. (Public-key trust still gates the asset, but tightening
+	// here gives a clear error instead of a confusing 404.)
+	if !isValidGithubRepo(*gh) {
+		fmt.Fprintln(os.Stderr,
+			"self-update: --github must be `owner/repo` (got:", *gh+")")
+		return selfUpdateOpts{}, 2
+	}
 	return selfUpdateOpts{
 		tag: tag, workdir: *wd, github: *gh, assetPattern: *ap,
 		releaseDir: *rd, dryRun: *dr, keepOld: *ko,
@@ -102,7 +113,7 @@ func runSelfUpdate(o selfUpdateOpts) int {
 	// installed with the OTHER mode — the operator must invoke with
 	// the matching privilege.
 	invokeMode := mode.Resolve()
-	cur, err := osadapter.FindCurrentInstall(invokeMode)
+	cur, err := osadapter.FindCurrentInstall(invokeMode, sig.VerifyFile)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "self-update: discover install:", err)
 		return 1
@@ -115,8 +126,10 @@ func runSelfUpdate(o selfUpdateOpts) int {
 		}
 		fmt.Fprintf(os.Stderr,
 			"self-update: no %s-mode install found in %s.\n"+
-				"  Hint: a %s-mode install is removed with sudo; a user-mode install without.\n",
-			invokeMode, otherDirHint(invokeMode), other)
+				"  Hint: try %s mode (look in %s); %s-mode requires %s.\n",
+			invokeMode, otherDirHint(invokeMode),
+			other, otherDirHint(other),
+			other, sudoHintFor(other))
 		return 1
 	}
 
@@ -232,6 +245,16 @@ func printDryRun(cur osadapter.CurInstall, newSpec osadapter.Spec, o selfUpdateO
 func otherDirHint(m mode.Mode) string {
 	home, _ := os.UserHomeDir()
 	return mode.LaunchDir(m, home)
+}
+
+// sudoHintFor names the privilege needed to manage a given install
+// mode — used in the "no install found" error message so the operator
+// knows whether to re-invoke with or without sudo.
+func sudoHintFor(m mode.Mode) string {
+	if m == mode.System {
+		return "sudo"
+	}
+	return "no sudo"
 }
 
 // defaultInterval is the reconcile interval baked into self-update's

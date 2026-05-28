@@ -168,7 +168,12 @@ func pollHealthy(p prober, newLabels []string, timeout, interval time.Duration) 
 		} else {
 			consecutive = 0
 		}
-		if time.Now().After(deadline) {
+		// Go-reviewer MEDIUM #5: check deadline BEFORE sleeping. The
+		// previous order (sleep then check) meant the last probe could
+		// extend wall-clock timeout by ~1 full interval — minor but
+		// real (15s budget could actually take 16s). Now: if the next
+		// sleep would push us past the deadline, declare timeout now.
+		if time.Now().Add(interval).After(deadline) {
 			return fmt.Errorf("health-poll timeout after %s (last consecutive ok = %d)",
 				timeout, consecutive)
 		}
