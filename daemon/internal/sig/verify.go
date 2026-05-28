@@ -1,31 +1,53 @@
 // Package sig verifies that a binary is a genuine, unmodified focusd
 // release: signed by the offline Ed25519 private key. The matching
-// PUBLIC key is compiled in (safe to ship); only verification happens
-// here — the daemon can never sign.
+// PUBLIC key is compiled in XOR-masked (see pubkey.go +
+// pubkey_masked.go) so a trivial `strings | grep "BEGIN PUBLIC"`
+// against the daemon binary doesn't locate it. The daemon can never
+// sign.
+//
+// Regenerate the masked pubkey if the offline PEM rotates:
+//
+//	go generate ./daemon/internal/sig
+//
+//go:generate go run ./gen/mask/main.go
 package sig
 
 import (
 	"crypto/ed25519"
 	"crypto/x509"
-	_ "embed"
 	"encoding/pem"
 	"errors"
 	"fmt"
 	"os"
+	"sync"
 )
 
 // SigLen is the fixed Ed25519 signature length appended as the binary's
 // trailer (the last SigLen bytes of a signed release file).
 const SigLen = ed25519.SignatureSize // 64
 
-//go:embed focusd_ed25519_public.pem
-var publicPEM []byte
-
 var errTooSmall = errors.New("sig: file smaller than signature trailer")
 
-// PublicKey parses the embedded PEM (PKIX) into an Ed25519 public key.
+// cachedPubKey holds the parsed Ed25519 public key after first use; the
+// underlying PEM bytes are XOR-decoded from maskedPubkey lazily so the
+// decoded form is short-lived rather than a long-lived package variable.
+var (
+	cachedPubKey ed25519.PublicKey
+	cachedErr    error
+	cacheOnce    sync.Once
+)
+
+// PublicKey returns the Ed25519 public key, decoding + parsing the
+// XOR-masked PEM on first call.
 func PublicKey() (ed25519.PublicKey, error) {
-	block, _ := pem.Decode(publicPEM)
+	cacheOnce.Do(func() {
+		cachedPubKey, cachedErr = parsePublicKey(loadPublicKeyPEM())
+	})
+	return cachedPubKey, cachedErr
+}
+
+func parsePublicKey(pemBytes []byte) (ed25519.PublicKey, error) {
+	block, _ := pem.Decode(pemBytes)
 	if block == nil {
 		return nil, errors.New("sig: embedded public key is not valid PEM")
 	}
