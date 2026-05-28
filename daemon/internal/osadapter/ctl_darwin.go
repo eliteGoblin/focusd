@@ -4,10 +4,12 @@ package osadapter
 
 import (
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/eliteGoblin/focusd/daemon/internal/mode"
 	"github.com/eliteGoblin/focusd/daemon/internal/sig"
@@ -260,6 +262,100 @@ func parsePlist(path string) (label, bin string, argv []string) {
 		bin = argv[0]
 	}
 	return label, bin, argv
+}
+
+// launchctlProber introspects launchd for the health poll. The label
+// is loaded iff `launchctl print` returns 0; a worker has a PID iff
+// the `state = …` or `pid = …` line in the print output reports one.
+type launchctlProber struct{ m mode.Mode }
+
+func (p launchctlProber) domain() string { return mode.LaunchDomain(p.m, os.Getuid()) }
+
+func (p launchctlProber) isLoaded(label string) bool {
+	return exec.Command("launchctl", "print", p.domain()+"/"+label).Run() == nil
+}
+
+func (p launchctlProber) hasPID(label string) bool {
+	out, err := exec.Command("launchctl", "print", p.domain()+"/"+label).Output()
+	if err != nil {
+		return false
+	}
+	// `launchctl print` output is verbose; look for "pid = N" (N > 0).
+	// Format: "    pid = 12345" or "state = running"+"pid = N".
+	for _, line := range strings.Split(string(out), "\n") {
+		l := strings.TrimSpace(line)
+		if strings.HasPrefix(l, "pid = ") {
+			v := strings.TrimSpace(strings.TrimPrefix(l, "pid = "))
+			if v != "" && v != "0" {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// binPlacerFS writes raw bytes atomically with exec mode. On macOS the
+// Go linker's adhoc Mach-O signature is part of the file content, so a
+// plain rename of the verified bytes is enough — we do NOT shell out
+// to `codesign` here. (The CDHash is fresh because the file is a
+// fresh inode at a fresh path; that is the whole AMFI workaround.)
+type binPlacerFS struct{}
+
+func (binPlacerFS) place(srcBytes []byte, dstPath string) error {
+	if err := os.MkdirAll(filepath.Dir(dstPath), 0o700); err != nil {
+		return err
+	}
+	tmp := dstPath + ".tmp"
+	out, err := os.OpenFile(tmp, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o755)
+	if err != nil {
+		return err
+	}
+	if _, err := io.Copy(out, byteReader(srcBytes)); err != nil {
+		out.Close()
+		os.Remove(tmp)
+		return err
+	}
+	if err := out.Close(); err != nil {
+		os.Remove(tmp)
+		return err
+	}
+	return os.Rename(tmp, dstPath)
+}
+
+func (binPlacerFS) remove(path string) error {
+	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	return nil
+}
+
+// byteReader is a tiny io.Reader over a []byte without pulling in
+// bytes.NewReader at the call site — kept inline so binPlacer stays
+// stdlib-shaped and dep-free.
+type byteReader []byte
+
+func (b byteReader) Read(p []byte) (int, error) {
+	if len(b) == 0 {
+		return 0, io.EOF
+	}
+	n := copy(p, b)
+	return n, nil
+}
+
+// SelfUpdateProd is the darwin entry-point that wires the real launchd
+// controller + plist filesystem + launchctl-print prober + atomic
+// binary placer into the pure SelfUpdate orchestration. cur is the
+// discovered current install (FindCurrentInstall); newSpec carries the
+// rotated SelfPath/Base; newBin is the verified daemon bytes.
+func SelfUpdateProd(
+	cur CurInstall, newSpec Spec, newBin []byte,
+	healthyTimeout, probeInterval time.Duration, keepOld bool,
+) error {
+	c := launchctlCtl{m: newSpec.Mode}
+	fs := laFS{m: newSpec.Mode}
+	p := launchctlProber{m: newSpec.Mode}
+	return SelfUpdate(cur, newSpec, newBin, c, fs, p, binPlacerFS{},
+		healthyTimeout, probeInterval, keepOld)
 }
 
 func between(s, a, b string) string {

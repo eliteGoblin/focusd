@@ -4,6 +4,7 @@ package osadapter
 
 import (
 	"errors"
+	"time"
 
 	"github.com/eliteGoblin/focusd/daemon/internal/mode"
 )
@@ -18,6 +19,9 @@ func EnsureAll(Spec) ([]Role, error)                   { return nil, ErrUnsuppor
 func IsLoaded(bool, Role) bool                         { return false }
 func UninstallProd() ([]string, error)                 { return nil, ErrUnsupported }
 func FindCurrentInstall(mode.Mode) (CurInstall, error) { return CurInstall{}, ErrUnsupported }
+func SelfUpdateProd(CurInstall, Spec, []byte, time.Duration, time.Duration, bool) error {
+	return ErrUnsupported
+}
 
 // CurInstall mirrors the darwin definition so cross-platform code that
 // references it still compiles on non-darwin (where it is always zero).
