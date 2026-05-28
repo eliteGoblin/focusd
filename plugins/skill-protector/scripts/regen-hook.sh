@@ -14,6 +14,14 @@ if [ ! -f "${RULE}" ]; then
   exit 1
 fi
 
+# Sentinel guard: the rule must contain this header line, not just be
+# >= 512 bytes. Stops a weak-moment self from writing a 600-byte decoy
+# that satisfies the old size-only check. (Security-reviewer HIGH.)
+if ! grep -q '^## Override Passphrase$' "${RULE}"; then
+  echo "rule.md missing the '## Override Passphrase' sentinel header" >&2
+  exit 1
+fi
+
 TMP="${HOOK}.tmp.$$"
 cat > "${TMP}" <<'__FOCUSD_HOOK_HEAD__'
 #!/bin/sh
@@ -30,14 +38,21 @@ HOME_DIR="${HOME:?HOME unset}"
 RULE_DIR="${HOME_DIR}/.claude/rules/frank"
 RULE="${RULE_DIR}/focusd-protection.md"
 SENTINEL_BYTES=512
+SENTINEL_PATTERN='^## Override Passphrase$'
 
 mkdir -p "${RULE_DIR}"
 chmod 700 "${RULE_DIR}" 2>/dev/null || true
 
-# If the rule file exists and is large enough, assume it is intact.
+# The rule is "intact" iff it (a) exists, (b) is at least
+# SENTINEL_BYTES bytes, AND (c) contains the structural sentinel
+# heading. Size-only is bypassable with a >= 512 byte decoy file;
+# the grep check rejects a decoy unless it also happens to include
+# the exact heading line, which is much harder to fake without
+# making the file effectively a legitimate rule file.
 if [ -f "${RULE}" ]; then
   size=$(wc -c < "${RULE}" 2>/dev/null || echo 0)
-  if [ "${size}" -ge "${SENTINEL_BYTES}" ]; then
+  if [ "${size}" -ge "${SENTINEL_BYTES}" ] \
+      && grep -q "${SENTINEL_PATTERN}" "${RULE}"; then
     exit 0
   fi
 fi

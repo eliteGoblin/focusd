@@ -61,6 +61,18 @@ func (r *Reconciler) Reconcile() (Outcome, error) {
 	if r.HomeDir == "" {
 		return Outcome{}, errors.New("reconciler: HomeDir is empty")
 	}
+	// Refuse to write under a symlinked ~/.claude — the user-as-attacker
+	// model is explicit (they can pre-plant a symlink to a privileged
+	// path, then ask the plugin to write embedded content there). Reject
+	// without following. (Security-reviewer MEDIUM.) Plain non-existent
+	// dir is fine — atomic write creates it 0o700.
+	claudeDir := filepath.Join(r.HomeDir, ".claude")
+	if info, err := os.Lstat(claudeDir); err == nil && info.Mode()&os.ModeSymlink != 0 {
+		target, _ := os.Readlink(claudeDir)
+		return Outcome{}, fmt.Errorf("reconciler: refusing to write under symlinked %s "+
+			"(target: %s) — remove the symlink and let the plugin create a real dir",
+			claudeDir, target)
+	}
 	skill, err := embedded.ReadFile("data/SKILL.md")
 	if err != nil {
 		return Outcome{}, fmt.Errorf("read embedded SKILL.md: %w", err)
@@ -124,47 +136,11 @@ func reconcileFile(t target) (bool, error) {
 	default:
 		return false, fmt.Errorf("read: %w", err)
 	}
-	if err := os.MkdirAll(filepath.Dir(t.path), 0o700); err != nil {
-		return false, fmt.Errorf("mkdir: %w", err)
-	}
-	if err := atomicWrite(t.path, t.want, t.mode); err != nil {
+	// AtomicWrite creates the parent dir (0o700) internally; no
+	// separate MkdirAll needed. Single source of truth for the write
+	// primitive lives in settingsjson. (Go-reviewer HIGH.)
+	if err := settingsjson.AtomicWrite(t.path, t.want, t.mode); err != nil {
 		return false, err
 	}
 	return true, nil
-}
-
-// atomicWrite mirrors the helper in settingsjson — kept here to avoid
-// exporting it; the contracts are identical.
-func atomicWrite(path string, data []byte, perm os.FileMode) error {
-	dir := filepath.Dir(path)
-	tmp, err := os.CreateTemp(dir, ".skillproto.")
-	if err != nil {
-		return fmt.Errorf("create temp: %w", err)
-	}
-	tmpName := tmp.Name()
-	clean := func() { _ = os.Remove(tmpName) }
-
-	if _, err := tmp.Write(data); err != nil {
-		tmp.Close()
-		clean()
-		return fmt.Errorf("write temp: %w", err)
-	}
-	if err := tmp.Sync(); err != nil {
-		tmp.Close()
-		clean()
-		return fmt.Errorf("sync temp: %w", err)
-	}
-	if err := tmp.Close(); err != nil {
-		clean()
-		return fmt.Errorf("close temp: %w", err)
-	}
-	if err := os.Chmod(tmpName, perm); err != nil {
-		clean()
-		return fmt.Errorf("chmod temp: %w", err)
-	}
-	if err := os.Rename(tmpName, path); err != nil {
-		clean()
-		return fmt.Errorf("rename: %w", err)
-	}
-	return nil
 }

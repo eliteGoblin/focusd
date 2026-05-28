@@ -198,6 +198,103 @@ func TestAtomicWrite_TempCleanedOnError(t *testing.T) {
 	}
 }
 
+// Go-reviewer CRITICAL #2: a non-map "hooks" value (e.g. a string from
+// a hand-edit gone wrong) must NOT be silently replaced — that drops
+// the user's existing data. Merge must refuse + leave the file
+// untouched, just like the malformed-JSON case.
+func TestSettingsJSON_HooksNotMap_RefusesAndPreservesFile(t *testing.T) {
+	cases := []struct {
+		name    string
+		hookVal string
+	}{
+		{"hooks as string", `"a string, not a map"`},
+		{"hooks as array", `["one","two"]`},
+		{"hooks as number", `42`},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			settingsPath := filepath.Join(dir, "settings.json")
+			hookPath := filepath.Join(dir, "hook.sh")
+			original := `{"hooks":` + tc.hookVal + `,"model":"sonnet"}`
+			if err := os.WriteFile(settingsPath, []byte(original), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			err := Merge(settingsPath, hookPath)
+			if err == nil {
+				t.Fatalf("Merge accepted non-map hooks; should have refused")
+			}
+			if !strings.Contains(err.Error(), "hooks") {
+				t.Errorf("error should mention \"hooks\" to help the user fix it: %v", err)
+			}
+			if readFile(t, settingsPath) != original {
+				t.Errorf("non-map hooks file was clobbered:\n%s", readFile(t, settingsPath))
+			}
+		})
+	}
+}
+
+// Go-reviewer CRITICAL #3: legacy single-object SessionStart form is
+// silently dropped by `value, _ := … .([]any)`. Must be preserved by
+// wrapping into a one-element array, then prepending our entry.
+func TestSettingsJSON_SessionStartLegacyObject_PreservedAsWrappedArray(t *testing.T) {
+	dir := t.TempDir()
+	settingsPath := filepath.Join(dir, "settings.json")
+	hookPath := filepath.Join(dir, "hook.sh")
+	legacy := `{
+  "hooks": {
+    "SessionStart": {"matcher":"*","hooks":[{"type":"command","command":"echo other","description":"legacy"}]}
+  }
+}`
+	if err := os.WriteFile(settingsPath, []byte(legacy), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := Merge(settingsPath, hookPath); err != nil {
+		t.Fatalf("Merge: %v", err)
+	}
+	ss := hookEntries(t, decode(t, readFile(t, settingsPath)))
+	if len(ss) != 2 {
+		t.Fatalf("SessionStart len = %d, want 2 (us + wrapped-legacy)", len(ss))
+	}
+	// Find the legacy entry — must NOT have been dropped.
+	foundLegacy := false
+	for _, e := range ss {
+		em, _ := e.(map[string]any)
+		inner, _ := em["hooks"].([]any)
+		for _, h := range inner {
+			hm, _ := h.(map[string]any)
+			if hm["command"] == "echo other" {
+				foundLegacy = true
+			}
+		}
+	}
+	if !foundLegacy {
+		t.Errorf("legacy single-object SessionStart entry was silently dropped: %+v", ss)
+	}
+}
+
+// Belt-and-braces: a SessionStart value that's neither array nor
+// object (e.g. a string) is rejected with an explanatory error.
+func TestSettingsJSON_SessionStartWrongType_Refuses(t *testing.T) {
+	dir := t.TempDir()
+	settingsPath := filepath.Join(dir, "settings.json")
+	hookPath := filepath.Join(dir, "hook.sh")
+	original := `{"hooks":{"SessionStart":"not a hook"}}`
+	if err := os.WriteFile(settingsPath, []byte(original), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	err := Merge(settingsPath, hookPath)
+	if err == nil {
+		t.Fatal("Merge accepted bogus SessionStart; should have refused")
+	}
+	if !strings.Contains(err.Error(), "SessionStart") {
+		t.Errorf("error should mention SessionStart: %v", err)
+	}
+	if readFile(t, settingsPath) != original {
+		t.Errorf("file was clobbered")
+	}
+}
+
 func TestMerge_FilePermissionsAre0600(t *testing.T) {
 	dir := t.TempDir()
 	settingsPath := filepath.Join(dir, "settings.json")

@@ -220,6 +220,36 @@ func TestReconcile_AtomicWriteNoTempLeftBehind(t *testing.T) {
 	}
 }
 
+// Security-reviewer MEDIUM: refuse to write under a symlinked
+// ~/.claude. The user-as-attacker model includes pre-planting a
+// symlink to a privileged path; we must Lstat and reject.
+func TestReconcile_ClaudeDirIsSymlink_Refuses(t *testing.T) {
+	home := t.TempDir()
+	target := t.TempDir() // any other real dir
+	symPath := filepath.Join(home, ".claude")
+	if err := os.Symlink(target, symPath); err != nil {
+		t.Fatalf("symlink: %v", err)
+	}
+
+	r := New(home)
+	_, err := r.Reconcile()
+	if err == nil {
+		t.Fatal("Reconcile accepted symlinked ~/.claude; should have refused")
+	}
+	if !strings.Contains(err.Error(), "symlink") {
+		t.Errorf("error should mention symlink: %v", err)
+	}
+	// Belt-and-braces: no files written to the target dir.
+	entries, _ := os.ReadDir(target)
+	if len(entries) != 0 {
+		var names []string
+		for _, e := range entries {
+			names = append(names, e.Name())
+		}
+		t.Errorf("symlink target was written to: %v", names)
+	}
+}
+
 func contains(ss []string, want string) bool {
 	for _, s := range ss {
 		if s == want {

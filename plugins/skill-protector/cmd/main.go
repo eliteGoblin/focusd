@@ -97,7 +97,16 @@ func run(args []string) int {
 	return 0
 }
 
+// emit writes the result JSON to stdout for the runner to parse. A
+// blank stdout makes the runner treat exit 0 as "exit 0 but invalid
+// result JSON" and triggers an error retry storm — so we MUST emit
+// valid JSON even when Marshal somehow fails. (Go-reviewer HIGH.)
 func emit(r result) {
-	b, _ := json.Marshal(r)
+	b, err := json.Marshal(r)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "emit: marshal:", err)
+		fmt.Println(`{"status":"error","message":"emit marshal failed"}`)
+		return
+	}
 	fmt.Println(string(b))
 }

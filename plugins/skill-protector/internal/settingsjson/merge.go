@@ -53,11 +53,37 @@ func Merge(settingsPath, absHookPath string) error {
 		}
 	}
 
-	hooks, _ := top["hooks"].(map[string]any)
-	if hooks == nil {
+	// Type-strict descent: a non-map "hooks" value (e.g. a string from a
+	// hand-edit gone wrong) would be silently REPLACED by a fresh empty
+	// map under the old `value, _ := top["hooks"].(...)` pattern, dropping
+	// the user's existing data. Refuse instead. (Go-reviewer CRITICAL.)
+	var hooks map[string]any
+	if hv, exists := top["hooks"]; exists && hv != nil {
+		m, ok := hv.(map[string]any)
+		if !ok {
+			return fmt.Errorf("settings.json: \"hooks\" is not a JSON object "+
+				"(got %T) — refusing to write, user must fix manually", hv)
+		}
+		hooks = m
+	} else {
 		hooks = map[string]any{}
 	}
-	ss, _ := hooks["SessionStart"].([]any)
+
+	// SessionStart: usually an array, but Claude Code's schema history
+	// also includes a single-object form for one-entry configs. Both must
+	// be preserved; anything else (string, number) is malformed → refuse.
+	var ss []any
+	if sv, exists := hooks["SessionStart"]; exists && sv != nil {
+		switch v := sv.(type) {
+		case []any:
+			ss = v
+		case map[string]any:
+			ss = []any{v} // legacy single-object form — wrap, don't drop.
+		default:
+			return fmt.Errorf("settings.json: \"hooks.SessionStart\" is not an "+
+				"array or object (got %T) — refusing to write", sv)
+		}
+	}
 
 	// Idempotency check: walk every existing entry and every inner hook;
 	// if our absolute command is already present, no write needed.
@@ -91,11 +117,11 @@ func Merge(settingsPath, absHookPath string) error {
 	if !missing && len(raw) > 0 {
 		backup := settingsPath + ".focusd-backup"
 		if _, err := os.Stat(backup); errors.Is(err, fs.ErrNotExist) {
-			_ = atomicWrite(backup, raw, 0o600)
+			_ = AtomicWrite(backup, raw, 0o600)
 		}
 	}
 
-	return atomicWrite(settingsPath, data, 0o600)
+	return AtomicWrite(settingsPath, data, 0o600)
 }
 
 // hasOurHook returns true when our absolute command appears anywhere
@@ -123,10 +149,17 @@ func hasOurHook(entries []any, cmd string) bool {
 	return false
 }
 
-// atomicWrite writes data to path via a temp file in the same dir,
+// AtomicWrite writes data to path via a temp file in the same dir,
 // chmod-ing to perm before rename. On any error after CreateTemp, the
-// temp file is removed so no partials remain.
-func atomicWrite(path string, data []byte, perm os.FileMode) error {
+// temp file is removed so no partials remain. The parent directory is
+// created with 0o700 if absent.
+//
+// Exported so plugins/skill-protector/internal/reconciler can reuse
+// the same primitive without maintaining a divergent copy. The
+// previous duplication (Go-reviewer HIGH) made it possible to ship
+// one variant with MkdirAll and another without — a latent
+// "works-on-first-write, fails-on-clean-dir-deletion" bug.
+func AtomicWrite(path string, data []byte, perm os.FileMode) error {
 	dir := filepath.Dir(path)
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return fmt.Errorf("mkdir %s: %w", dir, err)

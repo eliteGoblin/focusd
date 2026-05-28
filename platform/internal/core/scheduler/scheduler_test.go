@@ -197,15 +197,14 @@ func TestTriggerRunAsGate(t *testing.T) {
 		name      string
 		mode      osadapter.RunMode
 		runAs     string
-		wantRun   bool
-		wantEvent string
+		wantRun bool
 	}{
-		{"system platform + system job runs", osadapter.ModeSystem, plugin.RunAsSystem, true, ""},
-		{"system platform + user job skipped", osadapter.ModeSystem, plugin.RunAsCurrentUser, false, "job_skipped_run_as"},
-		{"user platform + user job runs", osadapter.ModeUser, plugin.RunAsCurrentUser, true, ""},
-		{"user platform + system job skipped", osadapter.ModeUser, plugin.RunAsSystem, false, "job_skipped_run_as"},
-		{"user platform + empty run_as runs", osadapter.ModeUser, "", true, ""},
-		{"system platform + empty run_as runs", osadapter.ModeSystem, "", true, ""},
+		{"system platform + system job runs", osadapter.ModeSystem, plugin.RunAsSystem, true},
+		{"system platform + user job skipped", osadapter.ModeSystem, plugin.RunAsCurrentUser, false},
+		{"user platform + user job runs", osadapter.ModeUser, plugin.RunAsCurrentUser, true},
+		{"user platform + system job skipped", osadapter.ModeUser, plugin.RunAsSystem, false},
+		{"user platform + empty run_as runs", osadapter.ModeUser, "", true},
+		{"system platform + empty run_as runs", osadapter.ModeSystem, "", true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -222,16 +221,16 @@ func TestTriggerRunAsGate(t *testing.T) {
 			if didRun != tc.wantRun {
 				t.Errorf("didRun=%v want=%v (err=%v)", didRun, tc.wantRun, runErr)
 			}
-			if tc.wantEvent != "" {
-				ev, _ := db.Events.Recent(10)
-				found := false
-				for _, e := range ev {
-					if e.EventType == tc.wantEvent {
-						found = true
-					}
-				}
-				if !found {
-					t.Errorf("expected event %q, got %+v", tc.wantEvent, ev)
+
+			// Go-reviewer HIGH + MEDIUM #9: skips do NOT record a DB
+			// event (the old behavior produced 288×/day spam at @every
+			// 5m), AND a successful run does NOT incorrectly record a
+			// "job_skipped_run_as" event. Both cases verified here.
+			ev, _ := db.Events.Recent(10)
+			for _, e := range ev {
+				if e.EventType == "job_skipped_run_as" {
+					t.Errorf("unexpected job_skipped_run_as event recorded "+
+						"(this event was removed to avoid DB spam): %+v", e)
 				}
 			}
 		})
