@@ -74,8 +74,9 @@ func HiddenWorkdir(supportRoot string) string {
 
 // RandomBinaryName is the disguised basename pattern used for the
 // daemon binary inside its hidden workdir, e.g.
-// "com.apple.metadata.helper.7f3a". Extracted as its own primitive so
-// the self-update path can rotate the binary path on every update
+// "com.apple.metadata.helper.7f3a2c4d" (randHex(4) yields 8 hex chars,
+// not 4 — Copilot #7). Extracted as its own primitive so the
+// self-update path can rotate the binary path on every update
 // (macOS AMFI caches the CDHash per executable path, so re-using the
 // same path defeats adhoc-resign + restart for the swap; see
 // internal/osadapter/selfupdate.go).

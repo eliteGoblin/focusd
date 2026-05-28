@@ -61,14 +61,25 @@ func SelfUpdate(
 	keepOld bool,
 ) error {
 	// Pre-flight: the caller's FindCurrentInstall must have found a
-	// real install. Bail loudly if not — silently bootstrapping into
-	// a fresh mesh is the kind of footgun that turns a self-update
-	// into an unintended install.
-	if cur.BinaryPath == "" || len(cur.PlistPaths) == 0 {
-		return errors.New("osadapter/selfupdate: no current install found (nothing to update)")
+	// COMPLETE install. Bail loudly if not — silently bootstrapping
+	// into a fresh mesh is the kind of footgun that turns a
+	// self-update into an unintended install. Copilot #1: tightened
+	// from binary+plists-only check to full-mesh check.
+	if cur.BinaryPath == "" || len(cur.PlistPaths) != len(AllRoles) {
+		return fmt.Errorf("osadapter/selfupdate: incomplete install — found %d of %d mesh plists, binary=%q",
+			len(cur.PlistPaths), len(AllRoles), cur.BinaryPath)
 	}
-	if newSpec.SelfPath == "" || newSpec.Workdir == "" || newSpec.base() == "" {
+	// newSpec.base() returns the dev-fallback "com.focusd.daemon" when
+	// newSpec.Base is empty, so checking base() != "" always passes
+	// and is useless. Check the raw field. Copilot #1.
+	if newSpec.SelfPath == "" || newSpec.Workdir == "" || newSpec.Base == "" {
 		return errors.New("osadapter/selfupdate: newSpec missing SelfPath/Workdir/Base")
+	}
+	if newSpec.Workdir != cur.Workdir {
+		// Workdir migration is OUT of scope and would strand state.db,
+		// version.json, the bin/v* cache, daemon.log. Copilot #1.
+		return fmt.Errorf("osadapter/selfupdate: newSpec.Workdir=%q must match current install workdir=%q (workdir is preserved across self-update)",
+			newSpec.Workdir, cur.Workdir)
 	}
 	if newSpec.SelfPath == cur.BinaryPath {
 		// The whole point of self-update is path rotation; same path
@@ -127,16 +138,20 @@ func SelfUpdate(
 	// then A) so the ensurer cannot respawn an old sibling between
 	// bootouts. We launchctl-bootout only; we do NOT pkill -f because
 	// argv overlap with the new daemon would kill them too.
+	//
+	// Copilot #3: errors from bootout-old are SILENTLY IGNORED here
+	// (truthful description). The new mesh is healthy and serving;
+	// a stuck-old bootout would require operator cleanup but does NOT
+	// roll back the swap. No plumbed error reporter today — see
+	// follow-up if log-noise tolerance demands one.
 	for i := len(cur.Labels) - 1; i >= 0; i-- {
-		// Per spec: "bootout-old failure handled" — log via the
-		// returned error wrapping but do NOT roll back the new mesh.
-		// (The new mesh is healthy; a stuck-old bootout is rare and
-		// the operator can clean it up manually if needed.)
-		_ = c.bootout(cur.Labels[i])
+		_ = c.bootout(cur.Labels[i]) // see comment above re: discarded err
 	}
 
-	// H. Best-effort cleanup of old plists + old binary. Errors logged
-	// (returned wrapped, not fatal) — the new mesh is already serving.
+	// H. Best-effort cleanup of old plists + old binary. Errors are
+	// SILENTLY IGNORED (truthful description). The new mesh is
+	// serving; leftover old files are dead weight, not a correctness
+	// problem. Copilot #4.
 	if !keepOld {
 		for _, pp := range cur.PlistPaths {
 			_ = fs.remove(pp)
@@ -168,16 +183,23 @@ func pollHealthy(p prober, newLabels []string, timeout, interval time.Duration) 
 		} else {
 			consecutive = 0
 		}
-		// Go-reviewer MEDIUM #5: check deadline BEFORE sleeping. The
-		// previous order (sleep then check) meant the last probe could
-		// extend wall-clock timeout by ~1 full interval — minor but
-		// real (15s budget could actually take 16s). Now: if the next
-		// sleep would push us past the deadline, declare timeout now.
-		if time.Now().Add(interval).After(deadline) {
+		// Copilot #2: declare timeout ONLY after the deadline passes;
+		// sleep min(interval, time.Until(deadline)) so we still probe
+		// once near the deadline even when interval > remaining. The
+		// previous "check before sleep" form bailed early (e.g.
+		// timeout=15s, interval=10s would exit at ~10s without a
+		// final probe).
+		now := time.Now()
+		if !now.Before(deadline) {
 			return fmt.Errorf("health-poll timeout after %s (last consecutive ok = %d)",
 				timeout, consecutive)
 		}
-		time.Sleep(interval)
+		remaining := deadline.Sub(now)
+		sleep := interval
+		if sleep > remaining {
+			sleep = remaining
+		}
+		time.Sleep(sleep)
 	}
 }
 

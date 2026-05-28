@@ -133,14 +133,23 @@ func runSelfUpdate(o selfUpdateOpts) int {
 		return 1
 	}
 
-	// Recover workdir: explicit --workdir overrides; otherwise we
-	// trust the value baked into the install's plist argv.
+	// Recover workdir: prefer the value baked into the install's plist
+	// argv (authoritative). --workdir is accepted ONLY as a fallback
+	// when discovery couldn't recover it — never as an override.
+	// Copilot #5: allowing override risked silent workdir migration
+	// that strands state.db / version.json / bin/v* in the old dir.
 	workdir := cur.Workdir
-	if o.workdir != "" {
-		workdir = o.workdir
-	}
 	if workdir == "" {
-		fmt.Fprintln(os.Stderr, "self-update: could not recover --workdir from install; pass --workdir")
+		if o.workdir == "" {
+			fmt.Fprintln(os.Stderr, "self-update: could not recover --workdir from install; pass --workdir")
+			return 1
+		}
+		workdir = o.workdir
+	} else if o.workdir != "" && o.workdir != workdir {
+		fmt.Fprintf(os.Stderr,
+			"self-update: --workdir=%q disagrees with discovered install workdir=%q; "+
+				"refusing to migrate workdir (omit --workdir to use the discovered one)\n",
+			o.workdir, workdir)
 		return 1
 	}
 
@@ -189,13 +198,21 @@ func runSelfUpdate(o selfUpdateOpts) int {
 		return 1
 	}
 	newBase := relocate.RandomBase()
+	// Preserve the install-time --interval instead of clobbering it
+	// with the package default. Operators who tuned it (e.g. via
+	// `daemon install --interval 30s`) shouldn't see cadence change
+	// silently across self-update. Copilot #6.
+	interval := cur.Interval
+	if interval == 0 {
+		interval = defaultInterval
+	}
 	newSpec := osadapter.Spec{
 		Mode:     invokeMode,
 		SelfPath: newPath,
 		Workdir:  workdir,
 		Github:   o.github,
 		Asset:    asset,
-		Interval: defaultInterval,
+		Interval: interval,
 		Base:     newBase,
 	}
 

@@ -223,7 +223,7 @@ func TestSelfUpdate_PreflightNoInstall(t *testing.T) {
 	b := &fakeBinPlacer{}
 	p := newFakeProber(nil, nil)
 	err := SelfUpdate(CurInstall{}, newSpec(), []byte("X"), c, fs, p, &fakeBinPlacerWrap{b}, time.Second, 5*time.Millisecond, false)
-	if err == nil || !strings.Contains(err.Error(), "no current install") {
+	if err == nil || !strings.Contains(err.Error(), "incomplete install") {
 		t.Fatalf("expected preflight failure, got %v", err)
 	}
 	if len(b.placed) != 0 {

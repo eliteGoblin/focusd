@@ -104,12 +104,13 @@ func modeFromTestFlag(testMode bool) mode.Mode {
 // incomplete the entries that were found are still returned in the
 // slices in scan order (caller decides whether that is fatal).
 type CurInstall struct {
-	Mode       mode.Mode // user | system (Test is not discovered this way)
-	Base       string    // disguised label base, e.g. "com.apple.metadata.helper.7f3a"
-	Workdir    string    // recovered from the plist's --workdir argv
-	BinaryPath string    // the ProgramArguments[0] binary path
-	PlistPaths []string  // up to 3, in scan order
-	Labels     []string  // up to 3, in scan order (aligned with PlistPaths)
+	Mode       mode.Mode     // user | system (Test is not discovered this way)
+	Base       string        // disguised label base, e.g. "com.apple.metadata.helper.7f3a"
+	Workdir    string        // recovered from the plist's --workdir argv
+	BinaryPath string        // the ProgramArguments[0] binary path
+	Interval   time.Duration // reconcile interval recovered from --interval argv (0 if absent)
+	PlistPaths []string      // up to 3, in scan order
+	Labels     []string      // up to 3, in scan order (aligned with PlistPaths)
 }
 
 // FindCurrentInstall scans the LaunchDir for the given mode and returns
@@ -174,6 +175,9 @@ func FindCurrentInstall(m mode.Mode, verify Verifier) (CurInstall, error) {
 		if cur.Workdir == "" {
 			cur.Workdir = workdirFromArgv(argv)
 		}
+		if cur.Interval == 0 {
+			cur.Interval = intervalFromArgv(argv)
+		}
 		cur.PlistPaths = append(cur.PlistPaths, pp)
 		cur.Labels = append(cur.Labels, label)
 	}
@@ -203,6 +207,33 @@ func workdirFromArgv(argv []string) string {
 		}
 	}
 	return ""
+}
+
+// intervalFromArgv pulls the reconcile interval following "--interval"
+// out of a parsed argv. Returns 0 when the flag is absent or the
+// value doesn't parse — caller substitutes a default. Used by
+// self-update to preserve the install-time interval across rotations
+// instead of forcing the default on every update. (Copilot #6.)
+func intervalFromArgv(argv []string) time.Duration {
+	var raw string
+	for i, a := range argv {
+		if a == "--interval" && i+1 < len(argv) {
+			raw = argv[i+1]
+			break
+		}
+		if strings.HasPrefix(a, "--interval=") {
+			raw = strings.TrimPrefix(a, "--interval=")
+			break
+		}
+	}
+	if raw == "" {
+		return 0
+	}
+	d, err := time.ParseDuration(raw)
+	if err != nil {
+		return 0
+	}
+	return d
 }
 
 // UninstallProd removes a disguised user/system install whose labels are

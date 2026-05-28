@@ -28,8 +28,9 @@ func TestRandomBinaryNameShapeAndUnique(t *testing.T) {
 	if strings.Contains(a, "focusd") || strings.Contains(a, "daemon") {
 		t.Fatalf("disguised name leaked project string: %s", a)
 	}
-	// Shape: <prefix>.<suffix>.<4hex> → 3 dots minimum (prefixes are
-	// dotted Apple-style themselves), suffix is alpha, 4-hex tail.
+	// Shape: <prefix>.<suffix>.<8hex> → 3 dots minimum (prefixes are
+	// dotted Apple-style themselves), suffix is alpha, 8-hex tail
+	// (4 random bytes hex-encoded — Copilot #8 doc fix).
 	if n := strings.Count(a, "."); n < 3 {
 		t.Fatalf("name should have at least 3 dots (apple-style prefix.suffix.hex): %s", a)
 	}
