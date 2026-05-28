@@ -36,16 +36,28 @@ func (l *Local) ResolveLatest(context.Context) (string, error) {
 	return v, nil
 }
 
-func (l *Local) EnsureBinary(_ context.Context, st *core.Store, version string) error {
-	src := filepath.Join(l.Dir, version, "platform")
+func (l *Local) EnsureBinary(ctx context.Context, st *core.Store, version string) error {
+	// EnsureBinary is the platform-update path; the asset filename
+	// here is hardcoded "platform" (one per <version>). Self-update
+	// can route through DownloadVerified with a custom dst.
+	return l.DownloadVerified(ctx, version, "platform", st.BinPath(version))
+}
+
+// DownloadVerified reads <Dir>/<tag>/<asset>, Ed25519-verifies it, and
+// writes the verified bytes atomically (mode 0o755) to dstPath. This
+// is the local-test counterpart to GitHub.DownloadVerified — same
+// primitive shape so `daemon self-update --release-dir <fake>` works
+// without network.
+func (l *Local) DownloadVerified(_ context.Context, tag, asset, dstPath string) error {
+	src := filepath.Join(l.Dir, tag, asset)
 	ok, err := sig.VerifyFile(src)
 	if err != nil {
 		return fmt.Errorf("fetch/local: verify %s: %w", src, err)
 	}
 	if !ok {
-		return fmt.Errorf("fetch/local: %s failed signature verification — refusing", version)
+		return fmt.Errorf("fetch/local: %s failed signature verification — refusing", tag)
 	}
-	return placeVerified(src, st.BinPath(version))
+	return placeVerified(src, dstPath)
 }
 
 // placeVerified copies an already-verified file to dst atomically with
