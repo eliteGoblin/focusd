@@ -5,5 +5,6 @@ use (
 	./platform
 	./plugins/browser-monitor
 	./plugins/kill-steam
+	./plugins/network-block
 	./plugins/skill-protector
 )

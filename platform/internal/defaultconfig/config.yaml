@@ -45,4 +45,33 @@ jobs:
     allow_overlap: false
     config: {}
 
+  # NOTE: disabled by default — the network-block plugin needs MANUAL
+  # prerequisites before it can do anything useful:
+  #   1. /etc/pf.anchors/focusd-block-steam exists with the table + rule
+  #   2. /etc/pf.conf has `anchor "focusd-block-steam"` + load anchor
+  #   3. (optional) /etc/sudoers.d/focusd-network-block grants pfctl
+  # Without these the job fails every 30m with the same error. Operators
+  # should enable this via an on-disk override config after installing
+  # the prerequisites (see plugins/network-block/README.md). (Copilot.)
+  - id: network-block-reconcile
+    plugin: network-block
+    enabled: false
+    schedule: "@every 30m"
+    timeout: 60s
+    retry: 1
+    allow_overlap: false
+    config:
+      anchor: "focusd-block-steam"
+      table: "steam_ips"
+      domains:
+        - steampowered.com
+        - store.steampowered.com
+        - api.steampowered.com
+        - steamcommunity.com
+        - cdn.akamai.steamstatic.com
+        - cdn.cloudflare.steamstatic.com
+        - dota2.com
+        - www.dota2.com
+      resolver: "https://cloudflare-dns.com/dns-query"
+
 services: []

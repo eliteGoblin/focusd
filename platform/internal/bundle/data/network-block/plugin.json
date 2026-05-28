@@ -1,0 +1,13 @@
+{
+  "id": "network-block",
+  "name": "Network Block (pfctl table reconciler for Steam IPs)",
+  "version": "1.0.0",
+  "type": "job",
+  "runtime": "native_binary",
+  "protocol_version": "1",
+  "entrypoint": "./network-block",
+  "supported_os": ["darwin"],
+  "supported_arch": ["arm64", "amd64"],
+  "required_privilege": "system",
+  "run_as": "system"
+}
