@@ -220,33 +220,62 @@ func TestReconcile_AtomicWriteNoTempLeftBehind(t *testing.T) {
 	}
 }
 
-// Security-reviewer MEDIUM: refuse to write under a symlinked
-// ~/.claude. The user-as-attacker model includes pre-planting a
-// symlink to a privileged path; we must Lstat and reject.
-func TestReconcile_ClaudeDirIsSymlink_Refuses(t *testing.T) {
-	home := t.TempDir()
-	target := t.TempDir() // any other real dir
-	symPath := filepath.Join(home, ".claude")
-	if err := os.Symlink(target, symPath); err != nil {
-		t.Fatalf("symlink: %v", err)
+// Security-reviewer MEDIUM + Copilot follow-up: refuse to write under
+// a symlinked path inside ~/.claude at ANY depth, not just the root.
+// User-as-attacker model includes pre-planting symlinks like
+// ~/.claude/skills → /etc or ~/.claude/rules/frank → /tmp.
+func TestReconcile_SymlinkInAncestorRefuses(t *testing.T) {
+	cases := []struct {
+		name        string
+		symlinkPath func(home string) string // path inside ~/.claude that's the symlink
+	}{
+		{"~/.claude itself", func(h string) string {
+			return filepath.Join(h, ".claude")
+		}},
+		{"~/.claude/skills", func(h string) string {
+			_ = os.MkdirAll(filepath.Join(h, ".claude"), 0o700)
+			return filepath.Join(h, ".claude", "skills")
+		}},
+		{"~/.claude/skills/focusd-protection", func(h string) string {
+			_ = os.MkdirAll(filepath.Join(h, ".claude", "skills"), 0o700)
+			return filepath.Join(h, ".claude", "skills", "focusd-protection")
+		}},
+		{"~/.claude/rules/frank", func(h string) string {
+			_ = os.MkdirAll(filepath.Join(h, ".claude", "rules"), 0o700)
+			return filepath.Join(h, ".claude", "rules", "frank")
+		}},
+		{"~/.claude/hooks", func(h string) string {
+			_ = os.MkdirAll(filepath.Join(h, ".claude"), 0o700)
+			return filepath.Join(h, ".claude", "hooks")
+		}},
 	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			home := t.TempDir()
+			target := t.TempDir() // any real dir to be the symlink target
+			symPath := tc.symlinkPath(home)
+			if err := os.Symlink(target, symPath); err != nil {
+				t.Fatalf("symlink %s -> %s: %v", symPath, target, err)
+			}
 
-	r := New(home)
-	_, err := r.Reconcile()
-	if err == nil {
-		t.Fatal("Reconcile accepted symlinked ~/.claude; should have refused")
-	}
-	if !strings.Contains(err.Error(), "symlink") {
-		t.Errorf("error should mention symlink: %v", err)
-	}
-	// Belt-and-braces: no files written to the target dir.
-	entries, _ := os.ReadDir(target)
-	if len(entries) != 0 {
-		var names []string
-		for _, e := range entries {
-			names = append(names, e.Name())
-		}
-		t.Errorf("symlink target was written to: %v", names)
+			r := New(home)
+			_, err := r.Reconcile()
+			if err == nil {
+				t.Fatalf("Reconcile accepted symlinked %s; should have refused", symPath)
+			}
+			if !strings.Contains(err.Error(), "symlink") {
+				t.Errorf("error should mention symlink: %v", err)
+			}
+			// Belt-and-braces: no files written to the symlink target dir.
+			entries, _ := os.ReadDir(target)
+			if len(entries) != 0 {
+				var names []string
+				for _, e := range entries {
+					names = append(names, e.Name())
+				}
+				t.Errorf("symlink target was written to: %v", names)
+			}
+		})
 	}
 }
 

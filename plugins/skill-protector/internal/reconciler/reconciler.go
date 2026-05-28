@@ -17,6 +17,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/eliteGoblin/focusd/plugins/skill-protector/internal/settingsjson"
@@ -61,17 +62,24 @@ func (r *Reconciler) Reconcile() (Outcome, error) {
 	if r.HomeDir == "" {
 		return Outcome{}, errors.New("reconciler: HomeDir is empty")
 	}
-	// Refuse to write under a symlinked ~/.claude — the user-as-attacker
-	// model is explicit (they can pre-plant a symlink to a privileged
-	// path, then ask the plugin to write embedded content there). Reject
-	// without following. (Security-reviewer MEDIUM.) Plain non-existent
-	// dir is fine — atomic write creates it 0o700.
+	// Refuse to write under any symlinked path inside ~/.claude — the
+	// user-as-attacker model is explicit (they can pre-plant a symlink
+	// at any depth: ~/.claude → /etc, OR ~/.claude/skills → /etc, OR
+	// ~/.claude/skills/focusd-protection → /etc, etc.). Reject before
+	// any MkdirAll / write would follow the symlink off-tree.
+	// (Security-reviewer MEDIUM, Copilot follow-up — deeper paths.)
+	// Non-existent ancestors are fine: AtomicWrite's MkdirAll creates
+	// them as real dirs with 0o700. TOCTOU window between check and
+	// write is closed by the 5-min reconcile loop.
 	claudeDir := filepath.Join(r.HomeDir, ".claude")
-	if info, err := os.Lstat(claudeDir); err == nil && info.Mode()&os.ModeSymlink != 0 {
-		target, _ := os.Readlink(claudeDir)
-		return Outcome{}, fmt.Errorf("reconciler: refusing to write under symlinked %s "+
-			"(target: %s) — remove the symlink and let the plugin create a real dir",
-			claudeDir, target)
+	for _, leaf := range []string{
+		filepath.Join(r.HomeDir, ".claude", "skills", "focusd-protection"),
+		filepath.Join(r.HomeDir, ".claude", "rules", "frank"),
+		filepath.Join(r.HomeDir, ".claude", "hooks"),
+	} {
+		if err := assertNoSymlinkAncestors(claudeDir, leaf); err != nil {
+			return Outcome{}, err
+		}
 	}
 	skill, err := embedded.ReadFile("data/SKILL.md")
 	if err != nil {
@@ -120,6 +128,40 @@ func (r *Reconciler) Reconcile() (Outcome, error) {
 	}
 	out.SettingsStatus = "ok"
 	return out, nil
+}
+
+// assertNoSymlinkAncestors walks from rootDir down to leafDir (both
+// must be absolute, rootDir must be a prefix of leafDir) and rejects
+// if any EXISTING segment is a symlink. Non-existent segments are
+// ignored — the caller will create them as real dirs with MkdirAll.
+//
+// Why: the user-as-attacker model allows pre-planting a symlink at
+// any depth under ~/.claude. A simple `os.Lstat("~/.claude")` only
+// catches the root; this catches every intermediate dir we'll later
+// MkdirAll into or AtomicWrite under.
+func assertNoSymlinkAncestors(rootDir, leafDir string) error {
+	rel, err := filepath.Rel(rootDir, leafDir)
+	if err != nil || strings.HasPrefix(rel, "..") {
+		return fmt.Errorf("internal: %q is not under %q", leafDir, rootDir)
+	}
+	cur := rootDir
+	segments := append([]string{""}, strings.Split(rel, string(filepath.Separator))...)
+	for _, seg := range segments {
+		if seg != "" {
+			cur = filepath.Join(cur, seg)
+		}
+		info, err := os.Lstat(cur)
+		if err != nil {
+			return nil // non-existent ancestor; MkdirAll will create real dir
+		}
+		if info.Mode()&os.ModeSymlink != 0 {
+			target, _ := os.Readlink(cur)
+			return fmt.Errorf("reconciler: refusing to write — %s is a symlink "+
+				"(target: %s); user-as-attacker model rejects pre-planted symlinks",
+				cur, target)
+		}
+	}
+	return nil
 }
 
 // reconcileFile returns (wrote, err). wrote=false means on-disk
