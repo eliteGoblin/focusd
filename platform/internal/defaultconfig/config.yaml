@@ -1,5 +1,21 @@
+# Default focusd platform configuration.
+#
+# This file is the canonical reference for which plugins ship with the
+# platform and how each is scheduled. A real installation copies this
+# to the OS-default config path (see osadapter.DefaultConfigPath) and
+# the operator may edit jobs there. Validate against this file with:
+#
+#   platform validate --config platform/internal/defaultconfig/config.yaml \
+#                     --plugin-dir <plugins-root>
+#
+# run_as on each plugin's manifest determines which run_mode of the
+# platform can dispatch it. The scheduler skips jobs whose run_as
+# does not match the platform mode (a no-op, not a failure).
+
 platform:
   log_level: info
+  # run_mode is left unset: the platform picks user|system based on
+  # whether the agent process has root.
 
 jobs:
   - id: dns-block-reconcile
@@ -19,3 +35,14 @@ jobs:
     retry: 0
     allow_overlap: false
     config: {}
+
+  - id: skill-protector-reconcile
+    plugin: skill-protector
+    enabled: true
+    schedule: "@every 5m"
+    timeout: 30s
+    retry: 0
+    allow_overlap: false
+    config: {}
+
+services: []

@@ -233,7 +233,7 @@ func (a *App) BuildScheduler() (*scheduler.Scheduler, int, error) {
 			byID[p.Manifest.ID] = p
 		}
 	}
-	s := scheduler.New(runner.New(a.State), a.State, a.Log)
+	s := scheduler.New(runner.New(a.State), a.State, a.Log, a.Mode)
 	n, err := s.Register(a.Config.Jobs, byID)
 	if err != nil {
 		return nil, 0, err

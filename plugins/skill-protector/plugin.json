@@ -1,0 +1,13 @@
+{
+  "id": "skill-protector",
+  "name": "Skill Protector (re-inject Claude refusal stance)",
+  "version": "1.0.0",
+  "type": "job",
+  "runtime": "native_binary",
+  "protocol_version": "1",
+  "entrypoint": "./skill-protector",
+  "supported_os": ["darwin"],
+  "supported_arch": ["arm64", "amd64"],
+  "required_privilege": "user",
+  "run_as": "current_user"
+}

@@ -1,0 +1,4 @@
+# Bundled plugin binaries are build artifacts, not source. The Makefile
+# in each plugin's directory (plugins/<id>/Makefile bundle) writes here.
+*
+!.gitignore
