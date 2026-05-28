@@ -28,6 +28,22 @@ jobs:
         run: |
           out="$(gofmt -s -l daemon)"
           if [ -n "$out" ]; then echo "not gofmt:"; echo "$out"; exit 1; fi
+      - name: Masked pubkey is up-to-date
+        # Guard against the "PEM rotated but generator wasn't re-run"
+        # footgun: regenerate pubkey_masked.go and fail if it drifts from
+        # what's checked in.
+        working-directory: daemon
+        run: |
+          set -e
+          go generate ./internal/sig
+          # Whole-tree diff catches BOTH a stale pubkey_masked.go AND any
+          # auxiliary file the generator might gain in the future.
+          # (Copilot review.) `set -e` already ensures `go generate`
+          # failure aborts the step.
+          if ! git diff --exit-code; then
+            echo "go generate produced uncommitted changes — run 'go generate ./daemon/internal/sig' locally and commit the result"
+            exit 1
+          fi
 
   test:
     name: Test (${{ matrix.os }})
