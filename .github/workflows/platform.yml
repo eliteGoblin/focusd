@@ -45,6 +45,7 @@ jobs:
           - plugins/kill-steam
           - plugins/browser-monitor
           - plugins/skill-protector
+          - plugins/network-block
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
