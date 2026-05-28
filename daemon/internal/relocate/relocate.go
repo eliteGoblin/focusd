@@ -72,13 +72,24 @@ func HiddenWorkdir(supportRoot string) string {
 	return filepath.Join(supportRoot, "."+pick(prefixes)+"."+randHex(6))
 }
 
+// RandomBinaryName is the disguised basename pattern used for the
+// daemon binary inside its hidden workdir, e.g.
+// "com.apple.metadata.helper.7f3a". Extracted as its own primitive so
+// the self-update path can rotate the binary path on every update
+// (macOS AMFI caches the CDHash per executable path, so re-using the
+// same path defeats adhoc-resign + restart for the swap; see
+// internal/osadapter/selfupdate.go).
+func RandomBinaryName() string {
+	return pick(prefixes) + "." + pick(suffixes) + "." + randHex(4)
+}
+
 // RelocateInto copies src into dir under a random disguised basename,
 // 0755, and returns the new path (hard-link first; copy fallback).
 func RelocateInto(src, dir string) (string, error) {
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return "", fmt.Errorf("relocate: mkdir %s: %w", dir, err)
 	}
-	dst := filepath.Join(dir, pick(prefixes)+"."+pick(suffixes)+"."+randHex(4))
+	dst := filepath.Join(dir, RandomBinaryName())
 	if err := os.Link(src, dst); err == nil {
 		_ = os.Chmod(dst, 0o755)
 		return dst, nil
