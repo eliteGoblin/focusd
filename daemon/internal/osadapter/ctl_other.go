@@ -2,7 +2,12 @@
 
 package osadapter
 
-import "errors"
+import (
+	"errors"
+	"time"
+
+	"github.com/eliteGoblin/focusd/daemon/internal/mode"
+)
 
 // ErrUnsupported: launchd lifecycle is macOS-only. Linux/Windows land
 // later behind this same package API.
@@ -13,3 +18,26 @@ func Uninstall(bool) error             { return ErrUnsupported }
 func EnsureAll(Spec) ([]Role, error)   { return nil, ErrUnsupported }
 func IsLoaded(bool, Role) bool         { return false }
 func UninstallProd() ([]string, error) { return nil, ErrUnsupported }
+
+// Verifier is the signature-check seam (no-op on non-darwin since
+// FindCurrentInstall returns ErrUnsupported here).
+type Verifier func(path string) (bool, error)
+
+func FindCurrentInstall(mode.Mode, Verifier) (CurInstall, error) {
+	return CurInstall{}, ErrUnsupported
+}
+func SelfUpdateProd(CurInstall, Spec, []byte, time.Duration, time.Duration, bool) error {
+	return ErrUnsupported
+}
+
+// CurInstall mirrors the darwin definition so cross-platform code that
+// references it still compiles on non-darwin (where it is always zero).
+type CurInstall struct {
+	Mode       mode.Mode
+	Base       string
+	Workdir    string
+	BinaryPath string
+	Interval   time.Duration
+	PlistPaths []string
+	Labels     []string
+}

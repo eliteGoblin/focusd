@@ -7,15 +7,20 @@ import (
 )
 
 type fakeCtl struct {
-	loadedSet map[string]bool
-	boots     []string
-	bouts     []string
+	loadedSet       map[string]bool
+	boots           []string
+	bouts           []string
+	bootstrapFailOn string           // plist path that should fail bootstrap
+	bootoutErrOn    map[string]error // label → error to return from bootout
 }
 
 func newFakeCtl() *fakeCtl { return &fakeCtl{loadedSet: map[string]bool{}} }
 
 func (f *fakeCtl) loaded(l string) bool { return f.loadedSet[l] }
 func (f *fakeCtl) bootstrap(pp string) error {
+	if pp == f.bootstrapFailOn {
+		return errCtlSynthetic
+	}
 	f.boots = append(f.boots, pp)
 	f.loadedSet[labelFromPath(pp)] = true
 	return nil
@@ -23,15 +28,33 @@ func (f *fakeCtl) bootstrap(pp string) error {
 func (f *fakeCtl) bootout(l string) error {
 	f.bouts = append(f.bouts, l)
 	delete(f.loadedSet, l)
+	if err, ok := f.bootoutErrOn[l]; ok {
+		return err
+	}
 	return nil
 }
 
-type fakeFS struct{ files map[string]string }
+var errCtlSynthetic = errSentinel("synthetic ctl failure")
+
+type errSentinel string
+
+func (e errSentinel) Error() string { return string(e) }
+
+type fakeFS struct {
+	files       map[string]string
+	writeFailOn string // path that should fail write
+}
 
 func newFakeFS() *fakeFS                    { return &fakeFS{files: map[string]string{}} }
 func (f *fakeFS) plistPath(l string) string { return "/p/" + l + ".plist" }
-func (f *fakeFS) write(p, c string) error   { f.files[p] = c; return nil }
-func (f *fakeFS) remove(p string) error     { delete(f.files, p); return nil }
+func (f *fakeFS) write(p, c string) error {
+	if p == f.writeFailOn {
+		return errSentinel("synthetic write failure")
+	}
+	f.files[p] = c
+	return nil
+}
+func (f *fakeFS) remove(p string) error { delete(f.files, p); return nil }
 func labelFromPath(p string) string {
 	p = strings.TrimPrefix(p, "/p/")
 	return strings.TrimSuffix(p, ".plist")

@@ -44,6 +44,25 @@ var versionTagRE = regexp.MustCompile(`^v\d+\.\d+\.\d+(-[A-Za-z0-9][A-Za-z0-9.\-
 
 func isValidVersionTag(s string) bool { return versionTagRE.MatchString(s) }
 
+// daemonVersionTagRE matches strict daemon release tags:
+// `daemon-v1.2.3` + optional pre-release/build (same shape as
+// versionTagRE, just with the `daemon-` prefix). This is the ONLY
+// shape `daemon self-update <tag>` accepts — same path-traversal
+// concern as versionTagRE.
+var daemonVersionTagRE = regexp.MustCompile(`^daemon-v\d+\.\d+\.\d+(-[A-Za-z0-9][A-Za-z0-9.\-]*)?(\+[A-Za-z0-9][A-Za-z0-9.\-]*)?$`)
+
+func isValidDaemonTag(s string) bool { return daemonVersionTagRE.MatchString(s) }
+
+// githubRepoRE matches a plain `owner/repo` value for the --github
+// flag. The owner+repo each must be a non-empty token of allowed chars
+// — anything fancier (paths, query strings, URL fragments) is rejected
+// upfront so the value can't subvert the GH API URL it's interpolated
+// into: `https://api.github.com/repos/<owner>/<repo>/releases/...`.
+// (Security-reviewer MEDIUM #2.)
+var githubRepoRE = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]*/[A-Za-z0-9][A-Za-z0-9._-]*$`)
+
+func isValidGithubRepo(s string) bool { return githubRepoRE.MatchString(s) }
+
 func main() { os.Exit(run(os.Args[1:])) }
 
 func run(args []string) int {
@@ -67,6 +86,8 @@ func run(args []string) int {
 		return doInstall(args[1:])
 	case "uninstall":
 		return doUninstall(args[1:])
+	case "self-update":
+		return doSelfUpdate(args[1:])
 	default:
 		fmt.Fprintln(os.Stderr, "unknown command:", args[0])
 		usage()
@@ -75,7 +96,7 @@ func run(args []string) int {
 }
 
 func usage() {
-	fmt.Fprintln(os.Stderr, "usage: daemon run|once|update|version|install|uninstall [flags]")
+	fmt.Fprintln(os.Stderr, "usage: daemon run|once|update|version|install|uninstall|self-update [flags]")
 }
 
 type opts struct {

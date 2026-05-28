@@ -23,6 +23,32 @@ func TestRandomBaseDisguisedAndUnique(t *testing.T) {
 	}
 }
 
+func TestRandomBinaryNameShapeAndUnique(t *testing.T) {
+	a, b := RandomBinaryName(), RandomBinaryName()
+	if strings.Contains(a, "focusd") || strings.Contains(a, "daemon") {
+		t.Fatalf("disguised name leaked project string: %s", a)
+	}
+	// Shape: <prefix>.<suffix>.<8hex> → 3 dots minimum (prefixes are
+	// dotted Apple-style themselves), suffix is alpha, 8-hex tail
+	// (4 random bytes hex-encoded — Copilot #8 doc fix).
+	if n := strings.Count(a, "."); n < 3 {
+		t.Fatalf("name should have at least 3 dots (apple-style prefix.suffix.hex): %s", a)
+	}
+	parts := strings.Split(a, ".")
+	tail := parts[len(parts)-1]
+	if len(tail) != 8 { // 4 bytes hex-encoded = 8 chars
+		t.Fatalf("tail must be 8 hex chars (4 random bytes), got %q in %s", tail, a)
+	}
+	for _, c := range tail {
+		if !((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f')) {
+			t.Fatalf("tail %q must be lowercase hex: %s", tail, a)
+		}
+	}
+	if a == b {
+		t.Fatalf("names must be per-call unique: %s == %s", a, b)
+	}
+}
+
 func TestHiddenWorkdir(t *testing.T) {
 	wd := HiddenWorkdir("/Users/x/Library/Application Support")
 	if !strings.HasPrefix(wd, "/Users/x/Library/Application Support/.") {
