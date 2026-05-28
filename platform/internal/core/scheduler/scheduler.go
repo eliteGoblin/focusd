@@ -28,9 +28,9 @@ type Scheduler struct {
 	log  *slog.Logger
 	mode osadapter.RunMode // platform run mode; gates plugin run_as
 
-	mu          sync.Mutex
-	triggered   map[string]int  // jobID -> trigger count (test/observability)
-	skipLogged  map[string]bool // jobID -> Info-logged "first run_as skip"
+	mu         sync.Mutex
+	triggered  map[string]int  // jobID -> trigger count (test/observability)
+	skipLogged map[string]bool // jobID -> Info-logged "first run_as skip"
 }
 
 // New builds a scheduler. The runner and DB must be ready. mode is the

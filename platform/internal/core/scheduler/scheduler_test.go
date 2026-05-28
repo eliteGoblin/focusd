@@ -194,9 +194,9 @@ func TestRunAsMatches(t *testing.T) {
 // not, no run row appears and a skip event is logged instead.
 func TestTriggerRunAsGate(t *testing.T) {
 	cases := []struct {
-		name      string
-		mode      osadapter.RunMode
-		runAs     string
+		name    string
+		mode    osadapter.RunMode
+		runAs   string
 		wantRun bool
 	}{
 		{"system platform + system job runs", osadapter.ModeSystem, plugin.RunAsSystem, true},
