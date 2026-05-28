@@ -68,15 +68,31 @@ func (g *GitHub) ResolveLatest(ctx context.Context) (string, error) {
 	return rel.TagName, nil
 }
 
+// EnsureBinary downloads + Ed25519-verifies the configured asset for
+// version and places it at st.BinPath(version). Thin wrapper around
+// DownloadVerified, kept so existing reconcile callers don't change.
 func (g *GitHub) EnsureBinary(ctx context.Context, st *core.Store, version string) error {
-	url := fmt.Sprintf("https://api.github.com/repos/%s/releases/tags/%s", g.Repo, version)
+	return g.DownloadVerified(ctx, version, g.Asset, st.BinPath(version))
+}
+
+// DownloadVerified fetches asset `asset` from release `tag` of g.Repo,
+// Ed25519-verifies it, and atomically writes the verified bytes (mode
+// 0755) to dstPath. Returns nil only when the bytes at dstPath are
+// signed by the embedded focusd public key.
+//
+// Used by both `daemon run` (place into <workdir>/bin/<v>/platform via
+// EnsureBinary) and `daemon self-update` (place at a new rotated
+// disguised binary basename in <workdir>). Pure boundary primitive —
+// no launchd, no relocation, no Spec.
+func (g *GitHub) DownloadVerified(ctx context.Context, tag, asset, dstPath string) error {
+	url := fmt.Sprintf("https://api.github.com/repos/%s/releases/tags/%s", g.Repo, tag)
 	resp, err := g.get(ctx, url)
 	if err != nil {
-		return fmt.Errorf("fetch/github: release %s: %w", version, err)
+		return fmt.Errorf("fetch/github: release %s: %w", tag, err)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != 200 {
-		return fmt.Errorf("fetch/github: release %s status %d", version, resp.StatusCode)
+		return fmt.Errorf("fetch/github: release %s status %d", tag, resp.StatusCode)
 	}
 	var rel ghRelease
 	if err := json.NewDecoder(resp.Body).Decode(&rel); err != nil {
@@ -84,13 +100,13 @@ func (g *GitHub) EnsureBinary(ctx context.Context, st *core.Store, version strin
 	}
 	dlURL := ""
 	for _, a := range rel.Assets {
-		if a.Name == g.Asset {
+		if a.Name == asset {
 			dlURL = a.URL
 			break
 		}
 	}
 	if dlURL == "" {
-		return fmt.Errorf("fetch/github: asset %q not in release %s", g.Asset, version)
+		return fmt.Errorf("fetch/github: asset %q not in release %s", asset, tag)
 	}
 
 	tmp, err := os.CreateTemp("", "focusd-dl-*")
@@ -133,7 +149,7 @@ func (g *GitHub) EnsureBinary(ctx context.Context, st *core.Store, version strin
 		return fmt.Errorf("fetch/github: verify: %w", err)
 	}
 	if !ok {
-		return fmt.Errorf("fetch/github: %s failed signature verification — refusing", version)
+		return fmt.Errorf("fetch/github: %s failed signature verification — refusing", tag)
 	}
-	return placeVerified(tmpPath, st.BinPath(version))
+	return placeVerified(tmpPath, dstPath)
 }
