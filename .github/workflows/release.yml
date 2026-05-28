@@ -1,9 +1,15 @@
-name: Release
+name: Release (legacy app_mon)
 
+# Only fires on appmon-v* tags. Previously `v*` which collided with the
+# platform's release tag pattern — every platform release (v0.8.0…
+# v0.12.1) triggered this workflow and failed because app_mon was
+# removed from go.work during the platform refactor. Scoped down here
+# so platform releases don't surface false-red CI. Legacy appmon
+# releases (if ever cut) use the `appmon-v*` tag prefix.
 on:
   push:
     tags:
-      - 'v*'
+      - 'appmon-v*'
 
 permissions:
   contents: write
