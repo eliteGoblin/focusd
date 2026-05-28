@@ -28,6 +28,17 @@ jobs:
         run: |
           out="$(gofmt -s -l daemon)"
           if [ -n "$out" ]; then echo "not gofmt:"; echo "$out"; exit 1; fi
+      - name: Masked pubkey is up-to-date
+        # Guard against the "PEM rotated but generator wasn't re-run"
+        # footgun: regenerate pubkey_masked.go and fail if it drifts from
+        # what's checked in.
+        working-directory: daemon
+        run: |
+          go generate ./internal/sig
+          if ! git diff --exit-code -- internal/sig/pubkey_masked.go; then
+            echo "pubkey_masked.go is stale — run 'go generate ./daemon/internal/sig'"
+            exit 1
+          fi
 
   test:
     name: Test (${{ matrix.os }})
