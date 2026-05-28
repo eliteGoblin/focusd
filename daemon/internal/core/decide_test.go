@@ -2,13 +2,16 @@ package core
 
 import "testing"
 
-func TestDecideNoConfig(t *testing.T) {
-	if got := Decide(State{}); got.Kind != ResolveLatest {
-		t.Fatalf("no config ⇒ ResolveLatest, got %+v", got)
+// No desired version configured → Blocked. The daemon does NOT auto-
+// resolve from any network source; the desired version is set
+// explicitly via `daemon install -v vX.Y.Z` or `daemon update vX.Y.Z`.
+// The reconcile loop must never reach the network in this path.
+func TestDecideNoConfigIsBlocked(t *testing.T) {
+	if got := Decide(State{}); got.Kind != Blocked {
+		t.Fatalf("no config ⇒ Blocked, got %+v", got)
 	}
-	// Config flag set but Desired empty is still unresolved.
-	if got := Decide(State{HaveConfig: true}); got.Kind != ResolveLatest {
-		t.Fatalf("empty desired ⇒ ResolveLatest, got %+v", got)
+	if got := Decide(State{HaveConfig: true}); got.Kind != Blocked {
+		t.Fatalf("empty desired ⇒ Blocked, got %+v", got)
 	}
 }
 
@@ -81,7 +84,7 @@ func TestDecideIsTotalAndDeterministic(t *testing.T) {
 		t.Fatalf("non-deterministic: %+v vs %+v", a, b)
 	}
 	switch a.Kind {
-	case ResolveLatest, EnsureRunning, Rollback, Steady, Blocked:
+	case EnsureRunning, Rollback, Steady, Blocked:
 	default:
 		t.Fatalf("unknown kind %q", a.Kind)
 	}

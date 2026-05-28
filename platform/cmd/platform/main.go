@@ -15,10 +15,14 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
+	"path/filepath"
+	"strings"
 	"syscall"
 	"time"
 
+	"github.com/eliteGoblin/focusd/platform/internal/bundle"
 	"github.com/eliteGoblin/focusd/platform/internal/core/app"
+	"github.com/eliteGoblin/focusd/platform/internal/defaultconfig"
 	"github.com/eliteGoblin/focusd/platform/internal/osadapter"
 )
 
@@ -33,6 +37,16 @@ func main() {
 
 	cmd := os.Args[1]
 	args := os.Args[2:]
+
+	// Convenience: if the first arg is itself a flag (the daemon invokes
+	// the platform as `platform --workdir <wd>` with no subcommand),
+	// default to `run`. Keeps the daemon→platform contract unchanged
+	// while letting `platform validate …` / `platform run …` still work
+	// when invoked directly.
+	if strings.HasPrefix(cmd, "-") && cmd != "-h" && cmd != "--help" && cmd != "-v" && cmd != "--version" {
+		args = os.Args[1:]
+		cmd = "run"
+	}
 
 	switch cmd {
 	case "version", "-v", "--version":
@@ -62,17 +76,75 @@ usage:
 
 func parseCommon(name string, args []string) app.Options {
 	fs := flag.NewFlagSet(name, flag.ExitOnError)
-	cfg := fs.String("config", "", "config.yaml path (default: OS layout)")
-	db := fs.String("state-db", "", "state.db path (default: OS layout)")
-	pdir := fs.String("plugin-dir", "", "plugin scan dir (default: OS layout)")
+	cfg := fs.String("config", "", "config.yaml path (default: <workdir>/config.yaml or OS layout)")
+	db := fs.String("state-db", "", "state.db path (default: <workdir>/state.db or OS layout)")
+	pdir := fs.String("plugin-dir", "", "plugin scan dir (default: <platform-binary-dir>/plugins or OS layout)")
 	mode := fs.String("mode", "", "force run mode: user|system")
+	wd := fs.String("workdir", "", "daemon-managed workdir; derives config/state-db (default: empty = use OS layout)")
 	_ = fs.Parse(args)
-	return app.Options{
+	opts := app.Options{
 		ConfigPath:  *cfg,
 		StateDBPath: *db,
 		PluginDir:   *pdir,
 		ForceMode:   osadapter.RunMode(*mode),
 	}
+	// --workdir is a convenience for the daemon-managed lifecycle: paths
+	// not explicitly set get derived from it, and the bundled plugins
+	// are extracted on disk. Config is loaded via the override-merge
+	// loader (embedded defaults + optional on-disk override) so new
+	// platform releases bring their own defaults without needing to
+	// overwrite the user's override.
+	if *wd != "" {
+		if opts.ConfigPath == "" {
+			opts.ConfigPath = filepath.Join(*wd, "config.yaml")
+		}
+		if opts.StateDBPath == "" {
+			opts.StateDBPath = filepath.Join(*wd, "state.db")
+		}
+		if opts.PluginDir == "" {
+			opts.PluginDir = defaultPluginDir(*wd)
+		}
+		// Workdir + bundle extraction must succeed: a partial start would
+		// leave the scheduler with the embedded default jobs but no
+		// plugin binaries on disk, silently disabling the protections.
+		// Fail loudly instead of pretending to start. (Copilot review.)
+		if err := os.MkdirAll(*wd, 0o755); err != nil {
+			fmt.Fprintln(os.Stderr, "workdir:", err)
+			os.Exit(1)
+		}
+		if _, err := bundle.ExtractTo(opts.PluginDir); err != nil {
+			fmt.Fprintln(os.Stderr, "bundle extract:", err)
+			os.Exit(1)
+		}
+		// Load embedded default merged with the optional override file.
+		// Pass through opts.Config so app.Bootstrap skips its own
+		// path-based load. A malformed override surfaces fail-fast here.
+		// Warnings (e.g. plugin-id typos in the override) print to
+		// stderr — visible without crashing.
+		cfg, warnings, err := defaultconfig.LoadWithOverrides(opts.ConfigPath)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "config:", err)
+			os.Exit(1)
+		}
+		for _, w := range warnings {
+			fmt.Fprintln(os.Stderr, "config warning:", w)
+		}
+		opts.Config = cfg
+	}
+	return opts
+}
+
+// defaultPluginDir picks where extracted plugins live. We prefer a
+// sibling of the platform binary (<binary-dir>/plugins) so different
+// platform versions can't fight over the same plugin tree as the
+// daemon hot-swaps them. Falls back to <workdir>/plugins if the binary
+// path is unknowable.
+func defaultPluginDir(workdir string) string {
+	exe, err := os.Executable()
+	if err == nil && exe != "" {
+		return filepath.Join(filepath.Dir(exe), "plugins")
+	}
+	return filepath.Join(workdir, "plugins")
 }
 
 func runValidate(args []string) int {

@@ -18,9 +18,6 @@ type State struct {
 type Kind string
 
 const (
-	// ResolveLatest: no version config yet → fetch the latest release
-	// tag, write the config, then re-decide.
-	ResolveLatest Kind = "resolve_latest"
 	// EnsureRunning: make Target the running platform (download if the
 	// binary is missing, then start). Covers "nothing running" and
 	// "running wrong version" (Recreate: stop old, start Target).
@@ -29,7 +26,12 @@ const (
 	Rollback Kind = "rollback"
 	// Steady: running == desired, nothing to do.
 	Steady Kind = "steady"
-	// Blocked: desired is bad and there is no Good to fall back to.
+	// Blocked: the reconciler cannot make progress. Either: the desired
+	// version is bad and there is no Good to fall back to; OR no
+	// desired version is configured at all (the daemon does NOT
+	// auto-update — `daemon install -v vX.Y.Z` and `daemon update`
+	// set the desired version explicitly; the reconcile loop never
+	// touches the network).
 	Blocked Kind = "blocked"
 )
 
@@ -44,9 +46,14 @@ type Action struct {
 // deterministic. The daemon's whole responsibility — "ensure the
 // correct platform version is running, roll back a bad one" — is here.
 func Decide(s State) Action {
-	// 1. No config → must learn the desired (latest) version first.
+	// 1. No desired version configured → Blocked. The daemon does not
+	// auto-resolve "Latest" from any network source; a desired version
+	// is set explicitly by `daemon install -v vX.Y.Z` (at install time)
+	// or `daemon update [vX.Y.Z]` (later). The reconcile loop has no
+	// network dependency in this path.
 	if !s.HaveConfig || s.Desired == "" {
-		return Action{Kind: ResolveLatest, Note: "no version config; resolve latest"}
+		return Action{Kind: Blocked,
+			Note: "no desired version configured; run `daemon update vX.Y.Z` to set one"}
 	}
 
 	target := s.Desired

@@ -1,0 +1,13 @@
+{
+  "id": "dns-block",
+  "name": "DNS Block (/etc/hosts reconcile)",
+  "version": "1.0.0",
+  "type": "job",
+  "runtime": "native_binary",
+  "protocol_version": "1",
+  "entrypoint": "./dns-block",
+  "supported_os": ["darwin"],
+  "supported_arch": ["arm64", "amd64"],
+  "required_privilege": "system",
+  "run_as": "system"
+}

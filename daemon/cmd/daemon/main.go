@@ -17,6 +17,7 @@ import (
 	"log/slog"
 	"os"
 	"os/signal"
+	"regexp"
 	"runtime"
 	"syscall"
 	"time"
@@ -31,6 +32,17 @@ import (
 )
 
 var version = "dev"
+
+// versionTagRE matches strict semver release tags: `v1.2.3`, plus an
+// optional pre-release segment (`-rc.1`, `-beta-foo`) and an optional
+// build segment (`+abc123`). The leading `v` is mandatory. This is the
+// ONLY shape accepted by `daemon install -v` and `daemon update <ver>`;
+// anything else is rejected upfront so a malicious or fat-finger value
+// like `v/../etc/passwd` or `vlatest` can't reach Store.WriteDesired
+// and then become part of an on-disk binary path. (Copilot review.)
+var versionTagRE = regexp.MustCompile(`^v\d+\.\d+\.\d+(-[A-Za-z0-9][A-Za-z0-9.\-]*)?(\+[A-Za-z0-9][A-Za-z0-9.\-]*)?$`)
+
+func isValidVersionTag(s string) bool { return versionTagRE.MatchString(s) }
 
 func main() { os.Exit(run(os.Args[1:])) }
 
@@ -185,37 +197,68 @@ func loop(args []string, once bool) int {
 	}
 }
 
-// doUpdate forces a re-resolve of latest and rolls forward until steady
-// (or a bounded number of ticks).
+// doUpdate writes the desired platform version into the store. Two
+// forms:
+//
+//	daemon update vX.Y.Z   — write desired=vX.Y.Z, no network call.
+//	daemon update          — resolve "Latest" from GitHub ONCE; write.
+//	                         Exits non-zero on resolve failure. No retry.
+//
+// The reconcile loop sees the new desired on its next tick and downloads
+// + swaps via the normal EnsureRunning path (which is fetch-then-stop
+// — see executor.go). This command itself is a thin write + (optional)
+// one-shot resolve; it does NOT loop on ticks or wipe state.
 func doUpdate(args []string) int {
-	o := parse("update", args)
-	e, log := build(o)
-	// Drop cached desired so the next tick re-resolves latest.
-	_ = os.Remove((&core.Store{Dir: o.workdir}).Dir + "/version.json")
-	ctx := context.Background()
-	// Settle: run ticks until the system is STABLE — two consecutive
-	// terminal actions (Steady/Blocked). A single transient Steady is
-	// NOT enough: a bad version looks steady for a tick or two before
-	// crash-detection (crashThreshold ticks) marks it bad and rolls
-	// back. Capped so a flapping version can't loop forever.
-	stableNeeded, stable := 2, 0
-	for i := 0; i < 20; i++ {
-		a, err := e.Tick(ctx)
-		if err != nil {
-			log.Error("update tick error", "err", err)
+	// Use a dedicated FlagSet so we can correctly pick up the trailing
+	// positional version after all flags (handles `--workdir=/x v1.0.0`
+	// AND `--workdir /x v1.0.0` AND `v1.0.0`). The hand-rolled "first
+	// arg without a `-` prefix" scan was wrong for `--flag value` form,
+	// where `value` is non-flag but not the version. Go-review HIGH #2.
+	fs := flag.NewFlagSet("update", flag.ContinueOnError)
+	wd := fs.String("workdir", defaultWorkdir(), "daemon work directory")
+	gh := fs.String("github", "eliteGoblin/focusd", "owner/repo (for `update` with no version arg)")
+	as := fs.String("asset", "", "release asset filename")
+	_ = fs.Parse(args)
+	explicit := fs.Arg(0) // optional positional version, e.g. v1.2.3
+
+	o := opts{workdir: *wd, github: *gh, asset: *as}
+	_, log := build(o)
+
+	st := &core.Store{Dir: o.workdir}
+
+	if explicit != "" {
+		// Strict tag validator — accepting any "v…" string would let
+		// `v../etc/passwd` reach Store.WriteDesired and then become part
+		// of the on-disk binary path. (Copilot review.)
+		if !isValidVersionTag(explicit) {
+			log.Error("update: version must be a strict semver tag like v0.9.0 or v1.2.3-rc.1",
+				"got", explicit)
+			return 2
+		}
+		if err := st.WriteDesired(explicit); err != nil {
+			log.Error("write desired failed", "err", err)
 			return 1
 		}
-		log.Info("update tick", "i", i, "action", string(a.Kind), "target", a.Target)
-		if a.Kind == core.Steady || a.Kind == core.Blocked {
-			stable++
-			if stable >= stableNeeded {
-				return 0
-			}
-		} else {
-			stable = 0
-		}
-		time.Sleep(400 * time.Millisecond)
+		log.Info("desired written", "version", explicit, "note", "no network call")
+		return 0
 	}
+
+	// No version given → one-shot GH "Latest". On any failure, exit
+	// non-zero immediately; no retry, no tick loop. The reconcile loop
+	// never re-tries this resolve on its own.
+	ctx := context.Background()
+	f := &fetch.GitHub{Repo: o.github, Asset: o.asset}
+	v, err := f.ResolveLatest(ctx)
+	if err != nil {
+		log.Error("resolve latest from GitHub failed", "err", err,
+			"hint", "pass an explicit version: daemon update vX.Y.Z")
+		return 1
+	}
+	if err := st.WriteDesired(v); err != nil {
+		log.Error("write desired failed", "err", err)
+		return 1
+	}
+	log.Info("desired written", "version", v, "note", "resolved from GitHub")
 	return 0
 }
 
@@ -235,8 +278,23 @@ func doInstall(args []string) int {
 	gh := fs.String("github", "eliteGoblin/focusd", "owner/repo")
 	as := fs.String("asset", "", "release asset filename")
 	iv := fs.Duration("interval", 10*time.Second, "reconcile interval")
+	desired := fs.String("v", "",
+		"REQUIRED desired platform version (e.g. v0.9.0) — the daemon does NOT auto-resolve from GitHub")
 	wantTest := registerTestMode(fs) // --test-mode only under -tags e2e
 	_ = fs.Parse(args)
+	if *desired == "" {
+		fmt.Fprintln(os.Stderr,
+			"install: -v vX.Y.Z is required (the daemon does NOT auto-update; pin a version explicitly)")
+		return 2
+	}
+	// Strict tag validator (same as `daemon update`): rejects path
+	// separators and traversal components so `-v ../../etc/passwd` can't
+	// escape the workdir/store layout downstream. (Copilot review.)
+	if !isValidVersionTag(*desired) {
+		fmt.Fprintln(os.Stderr,
+			"install: -v must be a strict semver tag like v0.9.0 or v1.2.3-rc.1, got:", *desired)
+		return 2
+	}
 	self, err := os.Executable()
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "executable:", err)
@@ -270,11 +328,22 @@ func doInstall(args []string) int {
 		spec.Base = relocate.RandomBase()
 		fmt.Printf("relocated → %s (mode %s, base %s)\n", reloc, m, spec.Base)
 	}
+	// Pin the desired platform version BEFORE calling Install so the
+	// launchd mesh comes up with version.json already in place. If we
+	// wrote it AFTER osadapter.Install, the first reconcile tick can
+	// race in, observe no desired, and log a spurious "Blocked" — fine
+	// in steady state but cosmetically alarming on first install. Go-
+	// review HIGH #3.
+	st := &core.Store{Dir: spec.Workdir}
+	if err := st.WriteDesired(*desired); err != nil {
+		fmt.Fprintln(os.Stderr, "write desired:", err)
+		return 1
+	}
 	if err := osadapter.Install(spec); err != nil {
 		fmt.Fprintln(os.Stderr, "install:", err)
 		return 1
 	}
-	fmt.Println("installed")
+	fmt.Printf("installed (desired platform = %s)\n", *desired)
 	return 0
 }
 

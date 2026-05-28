@@ -22,7 +22,14 @@ import (
 type Options struct {
 	// Adapter overrides the OS adapter (tests inject fakes). nil => real.
 	Adapter osadapter.Adapter
+	// Config, if non-nil, is the pre-loaded Config the caller wants
+	// Bootstrap to use directly. This is the path the platform CLI
+	// uses to inject the result of defaultconfig.LoadWithOverrides
+	// (embedded default + optional on-disk override merged). When set,
+	// ConfigPath is ignored for the config load step.
+	Config *config.Config
 	// ConfigPath overrides the config file path. "" => adapter default.
+	// Ignored when Config is non-nil.
 	ConfigPath string
 	// StateDBPath overrides the state DB path. "" => adapter default.
 	StateDBPath string
@@ -67,24 +74,43 @@ func Bootstrap(opts Options) (*App, error) {
 		}
 	}
 
-	cfgPath := opts.ConfigPath
-	if cfgPath == "" {
-		// Need a provisional mode just to find the default config path;
-		// detection is safe and side-effect free.
-		probe := mode
-		if probe == "" {
-			probe = adapter.DetectRunMode()
+	// Config resolution: prefer the pre-loaded one the CLI handed us
+	// (the result of defaultconfig.LoadWithOverrides — embedded
+	// defaults merged with optional override file). Fall back to a
+	// path-based load if no pre-loaded Config was provided.
+	var (
+		cfg     *config.Config
+		cfgPath string // for the bootstrapped log line only
+	)
+	if opts.Config != nil {
+		cfg = opts.Config
+		// Best-effort label for the log: the override path if one was
+		// passed (the loader may or may not have actually merged it),
+		// otherwise mark the source as the embedded default.
+		cfgPath = opts.ConfigPath
+		if cfgPath == "" {
+			cfgPath = "<embedded default>"
 		}
-		p, err := adapter.DefaultConfigPath(probe)
+	} else {
+		cfgPath = opts.ConfigPath
+		if cfgPath == "" {
+			// Need a provisional mode just to find the default config
+			// path; detection is safe and side-effect free.
+			probe := mode
+			if probe == "" {
+				probe = adapter.DetectRunMode()
+			}
+			p, err := adapter.DefaultConfigPath(probe)
+			if err != nil {
+				return nil, fmt.Errorf("resolve config path: %w", err)
+			}
+			cfgPath = p
+		}
+		c, err := config.Load(cfgPath)
 		if err != nil {
-			return nil, fmt.Errorf("resolve config path: %w", err)
+			return nil, err
 		}
-		cfgPath = p
-	}
-
-	cfg, err := config.Load(cfgPath)
-	if err != nil {
-		return nil, err
+		cfg = c
 	}
 
 	if mode == "" {
