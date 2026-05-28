@@ -40,7 +40,10 @@ func TestBuiltDaemonHasNoPEMLiterals(t *testing.T) {
 	cmd.Dir = daemonRoot
 	cmd.Env = append(os.Environ(), "CGO_ENABLED=0")
 	if buildOut, err := cmd.CombinedOutput(); err != nil {
-		t.Skipf("go build daemon: %v\n%s", err, buildOut)
+		// LookPath already covered the "no toolchain" case; reaching
+		// here means a real build error elsewhere in the daemon. Fail
+		// loudly instead of silently skipping. (Copilot review.)
+		t.Fatalf("go build daemon: %v\n%s", err, buildOut)
 	}
 
 	bin, err := os.ReadFile(out)

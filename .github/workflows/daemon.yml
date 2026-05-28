@@ -34,9 +34,14 @@ jobs:
         # what's checked in.
         working-directory: daemon
         run: |
+          set -e
           go generate ./internal/sig
-          if ! git diff --exit-code -- internal/sig/pubkey_masked.go; then
-            echo "pubkey_masked.go is stale — run 'go generate ./daemon/internal/sig'"
+          # Whole-tree diff catches BOTH a stale pubkey_masked.go AND any
+          # auxiliary file the generator might gain in the future.
+          # (Copilot review.) `set -e` already ensures `go generate`
+          # failure aborts the step.
+          if ! git diff --exit-code; then
+            echo "go generate produced uncommitted changes — run 'go generate ./daemon/internal/sig' locally and commit the result"
             exit 1
           fi
 
