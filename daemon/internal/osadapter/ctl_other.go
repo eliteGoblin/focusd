@@ -37,6 +37,7 @@ type CurInstall struct {
 	Base       string
 	Workdir    string
 	BinaryPath string
+	Interval   time.Duration
 	PlistPaths []string
 	Labels     []string
 }
