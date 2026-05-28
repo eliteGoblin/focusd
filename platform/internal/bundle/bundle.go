@@ -61,18 +61,26 @@ func ExtractTo(pluginRoot string) (extracted []string, err error) {
 		if err != nil {
 			return err
 		}
-		// Skip if already up-to-date.
-		if existing, err := os.ReadFile(target); err == nil {
-			if sha(existing) == sha(data) {
-				return nil
-			}
-		}
 		mode := os.FileMode(0o644)
 		// Heuristic: anything WITHOUT a `.json`/`.txt`/`.yaml` extension
 		// inside a plugin's own dir is the plugin binary → executable.
 		base := filepath.Base(rel)
 		if !strings.ContainsAny(base, ".") || strings.HasSuffix(base, ".sh") {
 			mode = 0o755
+		}
+		// Same-content fast path: don't rewrite, but still repair the
+		// expected mode bits — a plugin binary that lost its +x (e.g.
+		// because someone ran chmod by hand) would silently fail to
+		// exec without this. (Copilot review.)
+		if existing, err := os.ReadFile(target); err == nil {
+			if sha(existing) == sha(data) {
+				if info, statErr := os.Stat(target); statErr == nil && info.Mode().Perm() != mode {
+					if chErr := os.Chmod(target, mode); chErr != nil {
+						return chErr
+					}
+				}
+				return nil
+			}
 		}
 		if err := writeAtomic(target, data, mode); err != nil {
 			return err

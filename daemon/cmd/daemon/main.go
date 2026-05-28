@@ -17,8 +17,8 @@ import (
 	"log/slog"
 	"os"
 	"os/signal"
+	"regexp"
 	"runtime"
-	"strings"
 	"syscall"
 	"time"
 
@@ -32,6 +32,17 @@ import (
 )
 
 var version = "dev"
+
+// versionTagRE matches strict semver release tags: `v1.2.3`, plus an
+// optional pre-release segment (`-rc.1`, `-beta-foo`) and an optional
+// build segment (`+abc123`). The leading `v` is mandatory. This is the
+// ONLY shape accepted by `daemon install -v` and `daemon update <ver>`;
+// anything else is rejected upfront so a malicious or fat-finger value
+// like `v/../etc/passwd` or `vlatest` can't reach Store.WriteDesired
+// and then become part of an on-disk binary path. (Copilot review.)
+var versionTagRE = regexp.MustCompile(`^v\d+\.\d+\.\d+(-[A-Za-z0-9][A-Za-z0-9.\-]*)?(\+[A-Za-z0-9][A-Za-z0-9.\-]*)?$`)
+
+func isValidVersionTag(s string) bool { return versionTagRE.MatchString(s) }
 
 func main() { os.Exit(run(os.Args[1:])) }
 
@@ -216,9 +227,11 @@ func doUpdate(args []string) int {
 	st := &core.Store{Dir: o.workdir}
 
 	if explicit != "" {
-		// LOW #7: same format guard as install.
-		if !strings.HasPrefix(explicit, "v") {
-			log.Error("update: version must be a tag starting with 'v' (e.g. v0.9.0)",
+		// Strict tag validator — accepting any "v…" string would let
+		// `v../etc/passwd` reach Store.WriteDesired and then become part
+		// of the on-disk binary path. (Copilot review.)
+		if !isValidVersionTag(explicit) {
+			log.Error("update: version must be a strict semver tag like v0.9.0 or v1.2.3-rc.1",
 				"got", explicit)
 			return 2
 		}
@@ -274,12 +287,12 @@ func doInstall(args []string) int {
 			"install: -v vX.Y.Z is required (the daemon does NOT auto-update; pin a version explicitly)")
 		return 2
 	}
-	// LOW #7: a soft format guard so accidental `-v latest` / `-v master`
-	// surface as a clear "must start with v" error here, not as a
-	// confusing fetch failure five seconds later in the reconcile loop.
-	if !strings.HasPrefix(*desired, "v") {
+	// Strict tag validator (same as `daemon update`): rejects path
+	// separators and traversal components so `-v ../../etc/passwd` can't
+	// escape the workdir/store layout downstream. (Copilot review.)
+	if !isValidVersionTag(*desired) {
 		fmt.Fprintln(os.Stderr,
-			"install: -v must be a tag starting with 'v' (e.g. v0.9.0), got:", *desired)
+			"install: -v must be a strict semver tag like v0.9.0 or v1.2.3-rc.1, got:", *desired)
 		return 2
 	}
 	self, err := os.Executable()

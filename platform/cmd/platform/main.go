@@ -104,8 +104,18 @@ func parseCommon(name string, args []string) app.Options {
 		if opts.PluginDir == "" {
 			opts.PluginDir = defaultPluginDir(*wd)
 		}
-		_ = os.MkdirAll(*wd, 0o755)
-		_, _ = bundle.ExtractTo(opts.PluginDir)
+		// Workdir + bundle extraction must succeed: a partial start would
+		// leave the scheduler with the embedded default jobs but no
+		// plugin binaries on disk, silently disabling the protections.
+		// Fail loudly instead of pretending to start. (Copilot review.)
+		if err := os.MkdirAll(*wd, 0o755); err != nil {
+			fmt.Fprintln(os.Stderr, "workdir:", err)
+			os.Exit(1)
+		}
+		if _, err := bundle.ExtractTo(opts.PluginDir); err != nil {
+			fmt.Fprintln(os.Stderr, "bundle extract:", err)
+			os.Exit(1)
+		}
 		// Load embedded default merged with the optional override file.
 		// Pass through opts.Config so app.Bootstrap skips its own
 		// path-based load. A malformed override surfaces fail-fast here.
