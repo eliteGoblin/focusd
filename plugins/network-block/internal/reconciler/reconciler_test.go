@@ -176,20 +176,35 @@ func TestReconcile_AllDoHFails_RefusesWipe(t *testing.T) {
 	}
 }
 
-func TestReconcile_PartialDoHFailure_StillApplies(t *testing.T) {
+// Copilot review: partial DoH failure → fail closed.
+// If domain "b.com" resolves cleanly but "a.com" fails transiently,
+// the OLD behavior used b.com's incomplete answer set to compute
+// removals — which could delete a.com's still-blocked IPs from the
+// pf table, temporarily UNBLOCKING the hosts this job exists to
+// block. Fix: any per-domain failure → reconciler returns an error;
+// apply() never runs; next 30m tick retries. Brief table staleness
+// is tolerable; silent unblock is not.
+func TestReconcile_PartialDoHFailure_FailsClosed(t *testing.T) {
 	res := &fakeResolver{
 		answers: map[string][]string{"a.com": {"1.1.1.1"}},
 		errors:  map[string]error{"b.com": errors.New("transient")},
 	}
-	pf := &fakePf{current: []string{}}
+	pf := &fakePf{current: []string{"9.9.9.9"}} // pre-existing entry that would be wrongly deleted
 	r := &Reconciler{Resolver: res, Pf: pf, Domains: []string{"a.com", "b.com"}}
 
-	out, err := r.Reconcile(context.Background())
-	if err != nil {
-		t.Fatalf("partial failure should still succeed overall: %v", err)
+	_, err := r.Reconcile(context.Background())
+	if err == nil {
+		t.Fatal("partial DoH failure MUST surface as a reconcile error (fail closed)")
 	}
-	if len(out.Added) != 1 || out.Added[0] != "1.1.1.1" {
-		t.Errorf("added = %v, want [1.1.1.1]", out.Added)
+	if !strings.Contains(err.Error(), "resolve b.com") {
+		t.Errorf("error should mention the failed domain: %v", err)
+	}
+	// CRITICAL: no pf mutations on a partial-failure tick.
+	if len(pf.addCalls) != 0 {
+		t.Errorf("MUST NOT add anything; got %v", pf.addCalls)
+	}
+	if len(pf.delCalls) != 0 {
+		t.Errorf("MUST NOT delete anything; got %v", pf.delCalls)
 	}
 }
 

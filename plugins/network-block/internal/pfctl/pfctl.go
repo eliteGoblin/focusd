@@ -19,6 +19,7 @@
 package pfctl
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -26,14 +27,32 @@ import (
 	"strings"
 )
 
-// ExecFunc runs a command and returns its combined stdout+stderr and
-// exit error. Matches the real os/exec semantics so tests can mimic
-// CombinedOutput accurately.
+// ExecFunc runs a command and returns its STDOUT bytes (only) and exit
+// error. Stderr is captured + wrapped into the error message on
+// failure, but is NEVER mixed into the success return — pfctl writes
+// diagnostics like "No ALTQ support in kernel" to stderr, and feeding
+// those into parseShow would treat them as bogus table entries (and
+// the reconciler would later try to `-T delete No` / `-T delete ALTQ`).
+// (Copilot review.)
 type ExecFunc func(ctx context.Context, name string, args ...string) ([]byte, error)
 
-// realExec is the production ExecFunc — invokes the real binary.
+// realExec is the production ExecFunc — invokes the real binary, keeping
+// stdout/stderr separated.
 func realExec(ctx context.Context, name string, args ...string) ([]byte, error) {
-	return exec.CommandContext(ctx, name, args...).CombinedOutput()
+	cmd := exec.CommandContext(ctx, name, args...)
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		// Surface stderr in the error so operators can diagnose; do
+		// NOT merge it into the returned bytes.
+		msg := strings.TrimSpace(stderr.String())
+		if msg != "" {
+			return stdout.Bytes(), fmt.Errorf("%w: %s", err, msg)
+		}
+		return stdout.Bytes(), err
+	}
+	return stdout.Bytes(), nil
 }
 
 // Runner is the entry point. Use NewRunner for production or build the

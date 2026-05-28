@@ -118,21 +118,37 @@ func (r *Reconciler) Reconcile(ctx context.Context) (Outcome, error) {
 
 // resolveAll queries DoH for every domain and unions the results.
 // Returns (desired-set, count-of-domains-that-resolved-cleanly, err).
-// err is non-nil only for catastrophic failures; a domain returning
-// zero answers is treated as "resolved cleanly, zero IPs".
+//
+// Copilot review: a partial-failure mode (some domains OK, some fail)
+// produces an INCOMPLETE desired set that would then drive deletions
+// of legit IPs — temporarily unblocking the very hosts this job
+// exists to block. Fail closed: if ANY domain DoH lookup fails, the
+// reconciler returns the error so apply() refuses to remove anything.
+// The next 30-min tick retries; brief stale entries are tolerable,
+// silent unblock is not.
+//
+// A domain returning zero A records (NXDOMAIN, empty answer) is still
+// "clean" — treated as the legitimate "no IPs" state.
 func (r *Reconciler) resolveAll(ctx context.Context) (map[string]struct{}, int, error) {
 	desired := map[string]struct{}{}
 	ok := 0
+	var firstErr error
 	for _, d := range r.Domains {
 		ips, err := r.Resolver.ResolveA(ctx, d)
 		if err != nil {
 			fmt.Fprintf(r.log(), "resolve %s: %v\n", d, err)
+			if firstErr == nil {
+				firstErr = fmt.Errorf("resolve %s: %w", d, err)
+			}
 			continue
 		}
 		ok++
 		for _, ip := range ips {
 			desired[ip] = struct{}{}
 		}
+	}
+	if firstErr != nil {
+		return desired, ok, firstErr
 	}
 	return desired, ok, nil
 }
