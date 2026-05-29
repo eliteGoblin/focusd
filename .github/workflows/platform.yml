@@ -42,6 +42,7 @@ jobs:
         os: [ubuntu-latest, macos-latest]
         module:
           - platform
+          - plugins/dns-block
           - plugins/kill-steam
           - plugins/browser-monitor
           - plugins/skill-protector

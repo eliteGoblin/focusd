@@ -1,0 +1,64 @@
+# personal blocklist — extracted from /etc/hosts on 2026-05-22T23:40:21Z
+# Source: /etc/hosts.bak.20260523-093432
+# Companion to: steam.txt (Steam/Dota — separated)
+# Format: one host per line, # comments, # category headers.
+# Plain enough that a future plugin OR an off-box server endpoint can serve this unchanged.
+
+# --- mail/portal (CN) ---
+163.com
+www.163.com
+mail.163.com
+news.163.com
+
+# --- news (AU) ---
+9news.com.au
+www.9news.com.au
+abc.net.au
+www.abc.net.au
+espn.com.au
+www.espn.com.au
+news.com.au
+www.news.com.au
+smh.com.au
+www.smh.com.au
+theaustralian.com.au
+www.theaustralian.com.au
+
+# --- news (other) ---
+iranintl.com
+www.iranintl.com
+southcn.com
+www.southcn.com
+tmtpost.com
+www.tmtpost.com
+
+# --- video / streaming ---
+bilibili.com
+www.bilibili.com
+m.bilibili.com
+live.bilibili.com
+space.bilibili.com
+t.bilibili.com
+youtube.com
+www.youtube.com
+m.youtube.com
+music.youtube.com
+studio.youtube.com
+tv.youtube.com
+kids.youtube.com
+
+# --- social / Q&A ---
+zhihu.com
+www.zhihu.com
+
+# --- browser games ---
+chronodivide.com
+www.chronodivide.com
+dos.zone
+www.dos.zone
+heheda.top
+www.heheda.top
+play-cs.com
+www.play-cs.com
+webrcade.com
+www.webrcade.com
