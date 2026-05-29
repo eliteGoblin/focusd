@@ -1,0 +1,76 @@
+# Steam / Valve blocklist — comprehensive ban set.
+# Maintained by the dns-block plugin (rewrites /etc/hosts every 10s)
+# AND mirrored into the network-block plugin (pfctl table for direct-IP
+# traffic). Both must stay in sync; the dns-block file is the canonical
+# source — copy from here into platform defaultconfig.
+
+# Steam main
+steampowered.com
+www.steampowered.com
+store.steampowered.com
+api.steampowered.com
+partner.steampowered.com
+help.steampowered.com
+support.steampowered.com
+login.steampowered.com
+account.steampowered.com
+checkout.steampowered.com
+community.steampowered.com
+media.steampowered.com
+
+# Steam Community
+steamcommunity.com
+www.steamcommunity.com
+store.steamcommunity.com
+api.steamcommunity.com
+forums.steamcommunity.com
+groups.steamcommunity.com
+
+# Steam CDN / static / game content (multi-CDN: Akamai + Cloudflare)
+steamstatic.com
+cdn.akamai.steamstatic.com
+cdn.cloudflare.steamstatic.com
+community.akamai.steamstatic.com
+community.cloudflare.steamstatic.com
+store.akamai.steamstatic.com
+store.cloudflare.steamstatic.com
+shared.akamai.steamstatic.com
+shared.cloudflare.steamstatic.com
+avatars.akamai.steamstatic.com
+avatars.cloudflare.steamstatic.com
+video.akamai.steamstatic.com
+video.cloudflare.steamstatic.com
+clientconfig.akamai.steamstatic.com
+steamcontent.com
+steamuserimages-a.akamaihd.net
+steambroadcast.akamaized.net
+broadcast.akamai.steamstatic.com
+broadcast.cloudflare.steamstatic.com
+
+# Dota 2
+dota2.com
+www.dota2.com
+store.dota2.com
+esports.dota2.com
+dota.com
+www.dota.com
+
+# Counter-Strike
+counter-strike.net
+www.counter-strike.net
+store.counter-strike.net
+play.counter-strike.net
+
+# Other Valve games (block to remove temptation to install other Valve titles)
+teamfortress.com
+www.teamfortress.com
+left4dead.com
+portal2.com
+half-life.com
+artifactgame.com
+underlords.com
+
+# Valve corporate
+valvesoftware.com
+www.valvesoftware.com
+support.valvesoftware.com
