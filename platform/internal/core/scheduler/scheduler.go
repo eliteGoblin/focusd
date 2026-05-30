@@ -145,7 +145,12 @@ func (s *Scheduler) trigger(j config.Job, p plugin.Discovered) {
 		if s.logFirstSkip(j.ID, p.Manifest.RunAs) {
 			reason := fmt.Sprintf("plugin run_as=%q unavailable under %s-mode install (reinstall with admin for full coverage)",
 				p.Manifest.RunAs, string(s.mode))
-			_ = s.db.Runs.RecordUnavailable(j.ID, j.Plugin, reason)
+			// Surface a failed write — the "unavailable" row is what a
+			// future `daemon status` reads to show the plugin as inactive;
+			// silently losing it would make status lie. (Go-reviewer MEDIUM.)
+			if rerr := s.db.Runs.RecordUnavailable(j.ID, j.Plugin, reason); rerr != nil {
+				s.log.Warn("record unavailable failed", "job", j.ID, "err", rerr)
+			}
 		}
 		s.log.Debug("job unavailable (run_as not servable in this mode)",
 			"job", j.ID, "run_as", p.Manifest.RunAs, "mode", string(s.mode))

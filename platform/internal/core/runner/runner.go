@@ -89,6 +89,14 @@ func (r *Runner) Run(ctx context.Context, job Job, p plugin.Discovered, triggere
 	if !p.OK || p.BinaryPath == "" {
 		return Outcome{}, fmt.Errorf("plugin %s is not runnable", p.Dir)
 	}
+	// Production discovery always attaches a non-nil Manifest to an OK
+	// plugin, but Run is a public API any caller (incl. tests) can reach
+	// with a hand-built Discovered. runOnce dereferences p.Manifest.RunAs
+	// first thing — guard it so a nil manifest is a clean error, not a
+	// panic. (go + security review, LOW.)
+	if p.Manifest == nil {
+		return Outcome{}, fmt.Errorf("plugin %s has no manifest", p.Dir)
+	}
 
 	attempts := job.Retry + 1
 	var last Outcome
