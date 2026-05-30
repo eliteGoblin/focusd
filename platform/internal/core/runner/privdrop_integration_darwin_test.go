@@ -53,6 +53,21 @@ func TestPrivDropExecAsConsoleUser(t *testing.T) {
 	}
 	outFile := filepath.Join(outDir, "observed.txt")
 
+	// Regression guard for the real-hardware permission gap: the stub
+	// plugin binary lives under a root-owned 0700 directory tree, exactly
+	// like the disguised workdir on a real install. Without prepareDropPaths
+	// the dropped user cannot traverse to or exec the binary
+	// ("permission denied"). testutil.ScriptPlugin writes into t.TempDir()
+	// (0700); we additionally lock the plugin's parent chain to 0700 root
+	// so the test would fail if prepareDropPaths were removed.
+	lockChain := func(start string) {
+		d := start
+		for i := 0; i < 4 && d != "/" && d != "."; i++ {
+			_ = os.Chmod(d, 0o700)
+			d = filepath.Dir(d)
+		}
+	}
+
 	script := strings.Join([]string{
 		`euid=$(id -u)`,
 		`# Probe TMPDIR writability (root's TMPDIR would be unwritable here).`,
@@ -63,6 +78,12 @@ func TestPrivDropExecAsConsoleUser(t *testing.T) {
 
 	p := testutil.ScriptPlugin(t, "skill-protector", script)
 	p.Manifest.RunAs = plugin.RunAsCurrentUser
+
+	// Lock the plugin binary's directory chain to root-owned 0700 — the
+	// real disguised-workdir condition. prepareDropPaths must re-open the
+	// traverse path for the dropped user; without it this test fails with
+	// "permission denied" on exec.
+	lockChain(filepath.Dir(p.BinaryPath))
 
 	r := NewWithMode(db, osadapter.ModeSystem)
 	out, err := r.Run(context.Background(), Job{ID: "j1"}, p, "scheduler")

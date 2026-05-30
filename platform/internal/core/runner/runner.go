@@ -140,7 +140,15 @@ func (r *Runner) runOnce(ctx context.Context, job Job, p plugin.Discovered, trig
 		return Outcome{Status: state.RunStatusUnavailable, Message: reason}, nil
 	}
 
-	cfgPath, cleanup, err := writeJobConfig(job, p.Manifest.ID)
+	// When dropping to the console user, the plugin binary + the path to
+	// it must be reachable by that user (the workdir is root-owned 0700).
+	if plan.action == dropToUser {
+		if err := prepareDropPaths(p.BinaryPath); err != nil {
+			return Outcome{}, err
+		}
+	}
+
+	cfgPath, cleanup, err := writeJobConfig(job, p.Manifest.ID, plan)
 	if err != nil {
 		return Outcome{}, err
 	}
@@ -244,13 +252,22 @@ func classify(out *Outcome, ctx context.Context, runErr error) {
 	out.Err = runErr.Error()
 }
 
-func writeJobConfig(job Job, pluginID string) (string, func(), error) {
+func writeJobConfig(job Job, pluginID string, plan dropPlan) (string, func(), error) {
 	in := plugin.JobInput{JobID: job.ID, PluginID: pluginID, Config: job.Config}
 	data, err := json.Marshal(in)
 	if err != nil {
 		return "", func() {}, fmt.Errorf("marshal job config: %w", err)
 	}
-	f, err := os.CreateTemp("", "focusd-job-"+job.ID+"-*.json")
+	// When dropping to the console user, the default temp dir is root's
+	// TMPDIR (/var/folders/.../-Tmp-, mode 0700 root) which the dropped
+	// uid cannot traverse to read the config. Write to /tmp (world-
+	// traversable, sticky) and chown the file to the target uid so only
+	// that user can read it. The config is non-sensitive job input.
+	tmpDir := ""
+	if plan.action == dropToUser {
+		tmpDir = "/tmp"
+	}
+	f, err := os.CreateTemp(tmpDir, "focusd-job-"+job.ID+"-*.json")
 	if err != nil {
 		return "", func() {}, fmt.Errorf("create temp job config: %w", err)
 	}
@@ -264,6 +281,12 @@ func writeJobConfig(job Job, pluginID string) (string, func(), error) {
 	if err := f.Close(); err != nil {
 		cleanup()
 		return "", func() {}, err
+	}
+	if plan.action == dropToUser {
+		if err := os.Chown(path, plan.uid, plan.gid); err != nil {
+			cleanup()
+			return "", func() {}, fmt.Errorf("chown job config to dropped uid: %w", err)
+		}
 	}
 	return path, cleanup, nil
 }
