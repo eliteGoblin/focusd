@@ -374,7 +374,15 @@ func doInstall(args []string) int {
 		return 1
 	}
 	if err := osadapter.Install(spec); err != nil {
+		// Fail fast, no silent downgrade (FEATURE 08 / ADR-0010). If the
+		// operator clearly intended the full (system) install — they ran
+		// with sudo, so euid is root — and it failed, we exit non-zero and
+		// tell them how to choose the degraded user install EXPLICITLY. We
+		// do NOT auto-retry as user: switching is the operator's decision.
 		fmt.Fprintln(os.Stderr, "install:", err)
+		for _, line := range installFailureHint(m, *desired) {
+			fmt.Fprintln(os.Stderr, line)
+		}
 		return 1
 	}
 	fmt.Printf("installed %s mesh (desired platform = %s)\n", m, *desired)
@@ -382,6 +390,22 @@ func doInstall(args []string) int {
 		fmt.Println(line)
 	}
 	return 0
+}
+
+// installFailureHint returns the operator guidance printed when
+// osadapter.Install fails. Only a failed SYSTEM install gets the
+// "re-run without sudo for the degraded user install" hint — we never
+// auto-downgrade; switching is an explicit operator choice. User/Test
+// installs get no extra hint (nil). Pure + tested.
+func installFailureHint(m mode.Mode, desired string) []string {
+	if m != mode.System {
+		return nil
+	}
+	return []string{
+		"install: full (system) install failed; NOT falling back to the limited user install.",
+		"install: to install the degraded user-only mode explicitly, re-run WITHOUT sudo:",
+		"install:   daemon install -v " + desired + "   (user mode: only the skill protector runs)",
+	}
 }
 
 // installCoverageNotice returns the honest coverage notice printed after
