@@ -15,6 +15,14 @@ const (
 	RunStatusError    = "error"    // exit 2+ / spawn error
 	RunStatusTimedOut = "timedout" // killed on timeout
 	RunStatusSkipped  = "skipped"  // no-overlap skip
+	// RunStatusUnavailable marks a job that COULD NOT run in this install
+	// mode, distinct from a failure. Two cases:
+	//   - a system plugin under a user-mode platform (no escalation), and
+	//   - a current_user plugin under a system platform when no console
+	//     user is logged in (would corrupt the user's files as root).
+	// It feeds a future `daemon status` ("requires system-mode install"
+	// / "waiting for console user") without polluting failure metrics.
+	RunStatusUnavailable = "unavailable"
 )
 
 // Event severities.

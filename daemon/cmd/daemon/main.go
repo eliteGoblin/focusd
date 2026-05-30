@@ -321,8 +321,21 @@ func doInstall(args []string) int {
 		fmt.Fprintln(os.Stderr, "executable:", err)
 		return 1
 	}
-	// The daemon decides the install mode at bootstrap: test (e2e builds
-	// only), else system when run as root (sudo), else user.
+	// Single mesh per install (FEATURE 08 / ADR-0010). The operator's
+	// invocation chooses ONE mode — there is never a second simultaneous
+	// mesh:
+	//
+	//   sudo daemon install  → System mesh: runs EVERY plugin. system
+	//                          plugins run as root; current_user plugins
+	//                          (skill-protector) run via the platform's
+	//                          runtime privilege-drop to the console user.
+	//   daemon install       → User mesh: degraded fallback. Runs ONLY
+	//                          current_user plugins; system plugins are
+	//                          reported unavailable (reinstall with sudo
+	//                          for full coverage).
+	//
+	// We never install both, and we never silently downgrade system→user
+	// (see the fail-fast handling on osadapter.Install below).
 	m := mode.Resolve()
 	if wantTest() {
 		m = mode.Test
@@ -361,11 +374,52 @@ func doInstall(args []string) int {
 		return 1
 	}
 	if err := osadapter.Install(spec); err != nil {
+		// Fail fast, no silent downgrade (FEATURE 08 / ADR-0010). If the
+		// operator clearly intended the full (system) install — they ran
+		// with sudo, so euid is root — and it failed, we exit non-zero and
+		// tell them how to choose the degraded user install EXPLICITLY. We
+		// do NOT auto-retry as user: switching is the operator's decision.
 		fmt.Fprintln(os.Stderr, "install:", err)
+		for _, line := range installFailureHint(m, *desired) {
+			fmt.Fprintln(os.Stderr, line)
+		}
 		return 1
 	}
-	fmt.Printf("installed (desired platform = %s)\n", *desired)
+	fmt.Printf("installed %s mesh (desired platform = %s)\n", m, *desired)
+	for _, line := range installCoverageNotice(m) {
+		fmt.Println(line)
+	}
 	return 0
+}
+
+// installFailureHint returns the operator guidance printed when
+// osadapter.Install fails. Only a failed SYSTEM install gets the
+// "re-run without sudo for the degraded user install" hint — we never
+// auto-downgrade; switching is an explicit operator choice. User/Test
+// installs get no extra hint (nil). Pure + tested.
+func installFailureHint(m mode.Mode, desired string) []string {
+	if m != mode.System {
+		return nil
+	}
+	return []string{
+		"install: full (system) install failed; NOT falling back to the limited user install.",
+		"install: to install the degraded user-only mode explicitly, re-run WITHOUT sudo:",
+		"install:   daemon install -v " + desired + "   (user mode: only the skill protector runs)",
+	}
+}
+
+// installCoverageNotice returns the honest coverage notice printed after
+// a successful install. A USER install is the deliberate degraded
+// fallback, so we say the system-level protections are unavailable and
+// how to get them. System/Test installs get no notice (nil). Pure + tested.
+func installCoverageNotice(m mode.Mode) []string {
+	if m != mode.User {
+		return nil
+	}
+	return []string{
+		"note: user-mode install — only the Claude skill protector runs.",
+		"note: site/game/packet protections are UNAVAILABLE; reinstall with sudo for full coverage.",
+	}
 }
 
 // doEnsure is the ensurer role (StartInterval): recreate any missing

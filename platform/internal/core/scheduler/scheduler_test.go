@@ -161,27 +161,27 @@ func TestTriggerAllowOverlapIgnoresLock(t *testing.T) {
 	}
 }
 
-func TestRunAsMatches(t *testing.T) {
+func TestCanDispatch(t *testing.T) {
 	cases := []struct {
 		name  string
 		runAs string
 		mode  osadapter.RunMode
 		want  bool
 	}{
-		{"empty always runs (user)", "", osadapter.ModeUser, true},
-		{"empty always runs (system)", "", osadapter.ModeSystem, true},
-		{"system on system", plugin.RunAsSystem, osadapter.ModeSystem, true},
-		{"system on user", plugin.RunAsSystem, osadapter.ModeUser, false},
-		{"current_user on user", plugin.RunAsCurrentUser, osadapter.ModeUser, true},
-		{"current_user on system", plugin.RunAsCurrentUser, osadapter.ModeSystem, false},
-		{"active_user on user", plugin.RunAsActiveUser, osadapter.ModeUser, true},
-		{"active_user on system", plugin.RunAsActiveUser, osadapter.ModeSystem, false},
-		{"unknown runs nowhere", "wat", osadapter.ModeUser, false},
+		{"empty always dispatchable (user)", "", osadapter.ModeUser, true},
+		{"empty always dispatchable (system)", "", osadapter.ModeSystem, true},
+		{"system on system runs native", plugin.RunAsSystem, osadapter.ModeSystem, true},
+		{"system on user unavailable (no escalation)", plugin.RunAsSystem, osadapter.ModeUser, false},
+		{"current_user on user runs native", plugin.RunAsCurrentUser, osadapter.ModeUser, true},
+		{"current_user on system runs via priv-drop", plugin.RunAsCurrentUser, osadapter.ModeSystem, true},
+		{"active_user on user runs native", plugin.RunAsActiveUser, osadapter.ModeUser, true},
+		{"active_user on system runs via priv-drop", plugin.RunAsActiveUser, osadapter.ModeSystem, true},
+		{"unknown dispatches nowhere", "wat", osadapter.ModeUser, false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := RunAsMatches(tc.runAs, tc.mode); got != tc.want {
-				t.Errorf("RunAsMatches(%q,%q) = %v, want %v",
+			if got := CanDispatch(tc.runAs, tc.mode); got != tc.want {
+				t.Errorf("CanDispatch(%q,%q) = %v, want %v",
 					tc.runAs, tc.mode, got, tc.want)
 			}
 		})
@@ -200,9 +200,9 @@ func TestTriggerRunAsGate(t *testing.T) {
 		wantRun bool
 	}{
 		{"system platform + system job runs", osadapter.ModeSystem, plugin.RunAsSystem, true},
-		{"system platform + user job skipped", osadapter.ModeSystem, plugin.RunAsCurrentUser, false},
+		{"system platform + user job runs (via priv-drop)", osadapter.ModeSystem, plugin.RunAsCurrentUser, true},
 		{"user platform + user job runs", osadapter.ModeUser, plugin.RunAsCurrentUser, true},
-		{"user platform + system job skipped", osadapter.ModeUser, plugin.RunAsSystem, false},
+		{"user platform + system job unavailable", osadapter.ModeUser, plugin.RunAsSystem, false},
 		{"user platform + empty run_as runs", osadapter.ModeUser, "", true},
 		{"system platform + empty run_as runs", osadapter.ModeSystem, "", true},
 	}
