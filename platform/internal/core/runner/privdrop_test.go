@@ -162,3 +162,54 @@ func TestRunOnceNoConsoleUserRecordsUnavailable(t *testing.T) {
 		t.Errorf("persisted status = %q", last.Status)
 	}
 }
+
+// TestPrepareDropPathsMakesBinaryUserReachable verifies the real-hardware
+// fix: under a root-owned-style 0700 directory tree (the disguised
+// workdir), prepareDropPaths must add traverse (o+x) to the ancestor
+// dirs and read+exec (o+rx) to the binary, WITHOUT adding read (o+r) to
+// the directories (disguise: contents stay un-listable). Runs without
+// root - it only checks the resulting permission bits.
+func TestPrepareDropPathsMakesBinaryUserReachable(t *testing.T) {
+	root := t.TempDir()
+	// Build workdir-like chain: <root>/bin/v1/plugins/sp/, all 0700.
+	deep := filepath.Join(root, "bin", "v1", "plugins", "sp")
+	if err := os.MkdirAll(deep, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	bin := filepath.Join(deep, "sp")
+	if err := os.WriteFile(bin, []byte("#!/bin/sh\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	// Lock the whole chain to 0700 (root-owned-style; t.TempDir parents
+	// already are, but be explicit on our created dirs).
+	for _, d := range []string{root, filepath.Join(root, "bin"),
+		filepath.Join(root, "bin", "v1"),
+		filepath.Join(root, "bin", "v1", "plugins"), deep} {
+		if err := os.Chmod(d, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	if err := prepareDropPaths(bin); err != nil {
+		t.Fatalf("prepareDropPaths: %v", err)
+	}
+
+	// Binary must now be read+exec for other.
+	bfi, _ := os.Stat(bin)
+	if bfi.Mode().Perm()&0o005 != 0o005 {
+		t.Errorf("binary perm = %o, want o+rx set", bfi.Mode().Perm())
+	}
+	// Each ancestor dir must be traversable (o+x) but NOT listable (no o+r).
+	for _, d := range []string{deep,
+		filepath.Join(root, "bin", "v1", "plugins"),
+		filepath.Join(root, "bin", "v1"),
+		filepath.Join(root, "bin"), root} {
+		fi, _ := os.Stat(d)
+		if fi.Mode().Perm()&0o001 == 0 {
+			t.Errorf("dir %s not traversable: perm = %o", d, fi.Mode().Perm())
+		}
+		if fi.Mode().Perm()&0o004 != 0 {
+			t.Errorf("dir %s became world-readable (disguise leak): perm = %o", d, fi.Mode().Perm())
+		}
+	}
+}
