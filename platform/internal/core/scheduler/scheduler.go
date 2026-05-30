@@ -34,9 +34,10 @@ type Scheduler struct {
 }
 
 // New builds a scheduler. The runner and DB must be ready. mode is the
-// platform's run mode; it gates dispatch against each plugin's run_as
-// so a system-mode platform never executes user-domain plugins (which
-// would, e.g., chown ~/.claude/ to root).
+// platform's run mode; it gates dispatch via CanDispatch. A system-mode
+// platform serves current_user plugins through the runner's runtime
+// privilege-drop (it does NOT run them as root); a user-mode platform
+// cannot serve system plugins and marks them unavailable.
 func New(r *runner.Runner, db *state.DB, log *slog.Logger, mode osadapter.RunMode) *Scheduler {
 	return &Scheduler{
 		cron:       cron.New(),
@@ -49,26 +50,37 @@ func New(r *runner.Runner, db *state.DB, log *slog.Logger, mode osadapter.RunMod
 	}
 }
 
-// RunAsMatches reports whether a plugin manifest's run_as is compatible
-// with the platform's current run mode.
+// CanDispatch reports whether the platform's run mode can dispatch a
+// plugin with the given run_as. The semantics are "can this mode serve
+// this plugin", NOT "do they match" — a system platform serves BOTH its
+// own system plugins (native, as root) AND current_user plugins (via the
+// runner's fork→setuid privilege-drop). FEATURE 08:
 //
-//   - "system"       runs only under ModeSystem
-//   - "current_user" / "active_user" run only under ModeUser
-//   - ""             is legacy / unknown: always run (no gate)
+//   - system platform: CAN dispatch system (native) AND current_user
+//     (priv-drop to the console user). The runner handles the drop and,
+//     if no console user is logged in, defers the tick as "unavailable".
+//   - user platform: CAN dispatch current_user (native — it IS the user)
+//     but CANNOT dispatch system (no escalation). System plugins are
+//     reported UNAVAILABLE, not failed: reinstall with admin for them.
+//   - "" (legacy/unknown run_as): always dispatchable (no gate).
 //
-// Mismatched jobs are skipped at dispatch time without recording a
-// failed run — they are a no-op for this platform instance.
-func RunAsMatches(runAs string, mode osadapter.RunMode) bool {
+// A false return is NOT an error — it means "this plugin needs a
+// different install mode"; the caller records an unavailable run.
+func CanDispatch(runAs string, mode osadapter.RunMode) bool {
 	switch runAs {
 	case "":
 		return true // legacy behavior: no gate
 	case plugin.RunAsSystem:
+		// Only a system (root) platform can run a system plugin. A user
+		// platform cannot escalate → unavailable.
 		return mode == osadapter.ModeSystem
 	case plugin.RunAsCurrentUser, plugin.RunAsActiveUser:
-		return mode == osadapter.ModeUser
+		// Both modes can serve a current_user plugin: user natively, system
+		// via runtime privilege-drop in the runner.
+		return mode == osadapter.ModeUser || mode == osadapter.ModeSystem
 	default:
 		// Unknown values shouldn't reach here (manifest validation
-		// rejects them), but be conservative: skip rather than run.
+		// rejects them), but be conservative: do not dispatch.
 		return false
 	}
 }
@@ -117,19 +129,25 @@ func (s *Scheduler) trigger(j config.Job, p plugin.Discovered) {
 	s.triggered[j.ID]++
 	s.mu.Unlock()
 
-	// run_as gate: a plugin whose run_as does not match the platform's
-	// run mode is a no-op for this instance — not a failed run. This
-	// keeps user-domain plugins (skill-protector et al.) from being
-	// executed by a system-mode platform, which would corrupt user
-	// file ownership.
+	// can-dispatch gate: if this platform's mode cannot serve the plugin's
+	// run_as, the job is UNAVAILABLE in this install — not a failed run.
+	// The only such case is a `system` plugin under a user-mode platform
+	// (no escalation). A system platform serves current_user plugins via
+	// the runner's privilege-drop, so they pass this gate.
 	//
-	// At @every 5m a gated plugin fires 288×/day. We DON'T record a DB
-	// event (would fill platform_events) and log at Debug, with one
-	// Info "first-seen" log per (job, lifetime) so an operator looking
-	// at startup can still verify gating was applied. (Go-reviewer HIGH.)
-	if p.Manifest != nil && !RunAsMatches(p.Manifest.RunAs, s.mode) {
-		s.logFirstSkip(j.ID, p.Manifest.RunAs)
-		s.log.Debug("job skipped (run_as mismatch)",
+	// We record ONE "unavailable" run row (queryable by a future `daemon
+	// status` to show "requires system-mode install") then keep quiet: at
+	// @every 5m a gated plugin fires 288×/day, so we do NOT record a DB
+	// event or a fresh row per tick — only the first occurrence per (job,
+	// lifetime) gets an Info log + the unavailable row; subsequent ticks
+	// log at Debug and skip silently. (Go-reviewer HIGH dedup pattern.)
+	if p.Manifest != nil && !CanDispatch(p.Manifest.RunAs, s.mode) {
+		if s.logFirstSkip(j.ID, p.Manifest.RunAs) {
+			reason := fmt.Sprintf("plugin run_as=%q unavailable under %s-mode install (reinstall with admin for full coverage)",
+				p.Manifest.RunAs, string(s.mode))
+			_ = s.db.Runs.RecordUnavailable(j.ID, j.Plugin, reason)
+		}
+		s.log.Debug("job unavailable (run_as not servable in this mode)",
 			"job", j.ID, "run_as", p.Manifest.RunAs, "mode", string(s.mode))
 		return
 	}
@@ -188,19 +206,21 @@ func (s *Scheduler) persistJob(j config.Job, p plugin.Discovered) error {
 	return s.db.Plugins.Upsert(row)
 }
 
-// logFirstSkip emits a single Info-level "skipped: run_as mismatch"
-// the first time a given job is gated this process lifetime, so a
-// startup-log inspector can confirm gating; subsequent skips for the
-// same job log at Debug only.
-func (s *Scheduler) logFirstSkip(jobID, runAs string) {
+// logFirstSkip emits a single Info-level "unavailable in this mode" the
+// first time a given job is gated this process lifetime, so a startup-log
+// inspector can confirm gating; subsequent skips for the same job log at
+// Debug only. Returns true on that first occurrence so the caller records
+// exactly one "unavailable" run row per (job, lifetime) — not 288×/day.
+func (s *Scheduler) logFirstSkip(jobID, runAs string) bool {
 	s.mu.Lock()
 	first := !s.skipLogged[jobID]
 	s.skipLogged[jobID] = true
 	s.mu.Unlock()
 	if first {
-		s.log.Info("job will be skipped (run_as mismatch); silencing further occurrences",
+		s.log.Info("job unavailable in this install mode; silencing further occurrences",
 			"job", jobID, "run_as", runAs, "mode", string(s.mode))
 	}
+	return first
 }
 
 func (s *Scheduler) event(sev, typ, msg, jobID string) {
