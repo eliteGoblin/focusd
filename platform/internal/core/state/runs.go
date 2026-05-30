@@ -43,6 +43,19 @@ VALUES (?,?,?,?,?,?,?)`,
 	return err
 }
 
+// RecordUnavailable inserts a terminal unavailable-run row: the job could
+// not run in this install mode (system plugin under user-mode platform,
+// or current_user plugin under a system platform with no console user).
+// Distinct from skipped/failed so `daemon status` can show "unavailable"
+// rather than an error. reason is a short human string.
+func (r *JobRunRepo) RecordUnavailable(jobID, pluginID, reason string) error {
+	_, err := r.db.Exec(`
+INSERT INTO job_runs (job_id,plugin_id,started_at,ended_at,status,message,triggered_by)
+VALUES (?,?,?,?,?,?,?)`,
+		jobID, pluginID, now(), now(), RunStatusUnavailable, reason, "scheduler")
+	return err
+}
+
 // History returns the most recent runs for a job, newest first.
 func (r *JobRunRepo) History(jobID string, limit int) ([]JobRun, error) {
 	rows, err := r.db.Query(`SELECT id,job_id,plugin_id,plugin_version,started_at,

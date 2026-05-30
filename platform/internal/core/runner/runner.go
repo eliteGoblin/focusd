@@ -22,6 +22,7 @@ import (
 
 	"github.com/eliteGoblin/focusd/platform/internal/core/plugin"
 	"github.com/eliteGoblin/focusd/platform/internal/core/state"
+	"github.com/eliteGoblin/focusd/platform/internal/osadapter"
 )
 
 // Outcome is the terminal result of a (possibly retried) job execution.
@@ -41,10 +42,37 @@ type Outcome struct {
 // Runner executes plugins and persists run history.
 type Runner struct {
 	DB *state.DB
+	// Mode is the platform's run mode. It gates runtime privilege-drop:
+	// only a system (root) platform steps down to the console user for a
+	// run_as=current_user plugin. Defaults to ModeUser (no drop) so tests
+	// and non-root platforms behave as before.
+	Mode osadapter.RunMode
+	// consoleUser discovers the logged-in console user (uid/gid/name/home)
+	// for the privilege-drop. nil => realConsoleUser. Tests inject a fake
+	// to exercise the no-console-user skip and env-reseed without root.
+	consoleUser consoleUserFn
 }
 
-// New builds a Runner.
-func New(db *state.DB) *Runner { return &Runner{DB: db} }
+// New builds a Runner in user mode (no privilege-drop). System-mode
+// platforms use NewWithMode so the runner can step down for current_user
+// plugins.
+func New(db *state.DB) *Runner { return &Runner{DB: db, Mode: osadapter.ModeUser} }
+
+// NewWithMode builds a Runner for the given platform run mode. A system
+// (root) runner will fork→setuid to the console user for current_user
+// plugins (see privdrop.go).
+func NewWithMode(db *state.DB, mode osadapter.RunMode) *Runner {
+	return &Runner{DB: db, Mode: mode}
+}
+
+// resolveConsoleUser returns the discovery seam, defaulting to the real
+// `stat -f %u /dev/console` implementation when none was injected.
+func (r *Runner) resolveConsoleUser() consoleUserFn {
+	if r.consoleUser != nil {
+		return r.consoleUser
+	}
+	return realConsoleUser
+}
 
 // Job is the minimal job spec the runner needs (decoupled from config).
 type Job struct {
@@ -71,9 +99,13 @@ func (r *Runner) Run(ctx context.Context, job Job, p plugin.Discovered, triggere
 		}
 		out.Attempts = attempt
 		last = out
-		// Terminal: success or a controlled failure (exit 1 is a real
-		// job answer, not a transient error). Only error/timeout retry.
-		if out.Status == state.RunStatusOK || out.Status == state.RunStatusFailed {
+		// Terminal: success, a controlled failure (exit 1 is a real job
+		// answer), or unavailable (no console user — retrying inside this
+		// tick won't help; the next scheduled tick retries). Only
+		// error/timeout retry.
+		if out.Status == state.RunStatusOK ||
+			out.Status == state.RunStatusFailed ||
+			out.Status == state.RunStatusUnavailable {
 			break
 		}
 		if ctx.Err() != nil {
@@ -84,6 +116,22 @@ func (r *Runner) Run(ctx context.Context, job Job, p plugin.Discovered, triggere
 }
 
 func (r *Runner) runOnce(ctx context.Context, job Job, p plugin.Discovered, triggeredBy string) (Outcome, error) {
+	// Resolve the privilege-drop plan BEFORE doing any work. If a root
+	// platform must run a current_user plugin but no console user is
+	// logged in, skip the tick cleanly (retry next schedule) rather than
+	// writing the user's files as root → /var/root corruption.
+	plan, err := resolvePlan(r.Mode, p.Manifest.RunAs, r.resolveConsoleUser())
+	if err != nil {
+		return Outcome{}, err
+	}
+	if plan.action == dropSkipNoConsoleUser {
+		const reason = "no console user logged in; deferring current_user plugin"
+		if rerr := r.DB.Runs.RecordUnavailable(job.ID, p.Manifest.ID, reason); rerr != nil {
+			return Outcome{}, rerr
+		}
+		return Outcome{Status: state.RunStatusUnavailable, Message: reason}, nil
+	}
+
 	cfgPath, cleanup, err := writeJobConfig(job, p.Manifest.ID)
 	if err != nil {
 		return Outcome{}, err
@@ -104,7 +152,7 @@ func (r *Runner) runOnce(ctx context.Context, job Job, p plugin.Discovered, trig
 
 	start := time.Now()
 	cmd := exec.CommandContext(runCtx, p.BinaryPath, "run", "--config", cfgPath)
-	configureProc(cmd)
+	configureProc(cmd, plan)
 	// Backstop: if the killed plugin (or a grandchild) still holds the
 	// output pipes, force Run to return shortly after the kill instead
 	// of hanging until the child exits on its own.
