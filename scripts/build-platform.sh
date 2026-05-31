@@ -10,6 +10,24 @@ mkdir -p "${OUT}"
 VERSION="${VERSION:-$(git -C "${ROOT}" describe --tags --always --dirty 2>/dev/null || echo dev)}"
 LDFLAGS="-s -w -X main.version=${VERSION}"
 
+# Rebundle every plugin BEFORE building the platform. The platform embeds
+# each plugin's binary from platform/internal/bundle/data/<id>/ via
+# //go:embed; if a plugin's source changed but its bundled binary wasn't
+# refreshed, the platform ships a STALE plugin (this is exactly what caused
+# the v0.12.0 -> v0.12.1 hotfix). Running each plugin's `make bundle` here
+# keeps the embedded copies in lockstep with source on every build.
+echo "rebundling plugins…"
+for pdir in "${ROOT}"/plugins/*/; do
+  name="$(basename "${pdir}")"
+  [ "${name}" = "_fakes" ] && continue
+  if [ -f "${pdir}Makefile" ] && grep -qE '^bundle:' "${pdir}Makefile"; then
+    echo "  bundle ${name}"
+    make -C "${pdir}" bundle >/dev/null
+  else
+    echo "  skip ${name} (no bundle target)"
+  fi
+done
+
 matrix=(
   "darwin arm64"
   "darwin amd64"
