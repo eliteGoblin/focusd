@@ -29,8 +29,9 @@ not a renderer responsibility.**
 1. Disguised values (workdir, launchd labels, daemon binary filename, pf
    anchor) are carried in a dedicated `redact.Token` type whose raw value is
    **unexported**. The type has **no** method that yields the raw string:
-   its `String()` returns `<redacted>` and its JSON marshalling emits an empty
-   string. Code that holds a `Token` *cannot* print the secret — there is no
+   its `String()` returns `<redacted>` and its JSON marshalling emits
+   `<redacted>` for a present token (an absent/zero token marshals to an empty
+   string). Code that holds a `Token` *cannot* print the secret — there is no
    accessor that returns it.
 
 2. Probes return **primitives** (counts, ages, versions, verdicts) plus
@@ -85,4 +86,3 @@ not a renderer responsibility.**
 ## References
 - Feature spec: `../features/09-status-command.md`
 - Threat model: `../REQUIREMENTS_REGISTER.md` §3, §5 (redaction rule)
-</content>

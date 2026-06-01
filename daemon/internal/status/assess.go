@@ -131,6 +131,48 @@ func Assess(s Snapshot) Result {
 	return Result{Healthy, "all daemon-owned facts healthy"}
 }
 
+// verdictRank orders verdicts for worst-wins folding: Down > Degraded >
+// Unknown > Healthy. Used to combine the daemon's own verdict with the
+// delegated platform verdict so the daemon OVERALL never reads HEALTHY while
+// the platform section is DEGRADED (BUG 2).
+func verdictRank(v Verdict) int {
+	switch v {
+	case Down:
+		return 3
+	case Degraded:
+		return 2
+	case Unknown:
+		return 1
+	default: // Healthy
+		return 0
+	}
+}
+
+// Combine folds the daemon's own assessment with the delegated platform
+// verdict into the single OVERALL the command reports (BUG 2). Worst wins:
+// Down > Degraded > Unknown > Healthy.
+//
+// platformOK=false means the platform was UNAVAILABLE (never produced a
+// verdict). Per the architect's rule, that is a NOTE only: it must NOT by
+// itself push the daemon to a worse verdict / non-zero exit. So when the
+// platform is unavailable we keep the daemon's own result verbatim (and the
+// renderer separately shows the platform section as unavailable). We never
+// return DOWN/exit-3 for a mere platform probe failure.
+func Combine(daemon Result, platformVerdict Verdict, platformOK bool) Result {
+	if !platformOK {
+		return daemon
+	}
+	if verdictRank(platformVerdict) > verdictRank(daemon.Verdict) {
+		// The platform is the worse half — surface that as OVERALL, with a
+		// redaction-safe note pointing at the platform protections section.
+		return Result{
+			Verdict: platformVerdict,
+			Note:    "platform protections " + string(platformVerdict) + " (see detail)",
+		}
+	}
+	return daemon
+}
+
 // ExitCode maps a verdict to the command's process exit code. Worst-wins
 // health: Down(2) > Degraded(1) > Healthy(0). Unknown folds into 0 (mirrors
 // `platform status`: Healthy||Unknown → 0) — an all-"unknown" read is not a

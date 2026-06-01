@@ -74,7 +74,7 @@ func usage() {
 usage:
   platform version
   platform validate [--config PATH] [--state-db PATH] [--plugin-dir DIR] [--mode user|system]
-  platform status   [--workdir DIR] [--json] [--no-color]
+  platform status   [--workdir DIR] [--config PATH] [--state-db PATH] [--mode user|system] [--json] [--no-color]
   platform run      [--config PATH] [--state-db PATH] [--plugin-dir DIR] [--mode user|system]
 `)
 }
@@ -238,7 +238,9 @@ func runStatus(args []string) int {
 	// tells us the job list. This read is harmless and never writes.
 	cfg, _, err := defaultconfig.LoadWithOverrides(configPath)
 	if err != nil {
-		fmt.Fprintln(os.Stderr, "status: config:", err)
+		// REDACTION: LoadWithOverrides error strings embed the override path
+		// (the disguised workdir). Emit a generic message — never the err.
+		fmt.Fprintln(os.Stderr, "status: cannot read configuration")
 		return 1
 	}
 	jobs := make([]status.JobInput, 0, len(cfg.Jobs))
@@ -259,7 +261,14 @@ func runStatus(args []string) int {
 				if herr != nil || len(runs) == 0 {
 					return "", time.Time{}, false, herr
 				}
-				t, _ := time.Parse(time.RFC3339Nano, runs[0].StartedAt)
+				// A malformed/corrupt StartedAt parses to the year-0 zero time,
+				// which would mis-bucket age as ">1h" and lie about staleness
+				// (false DEGRADED). Treat an unparseable timestamp as "no run
+				// found" → the job reads UNKNOWN ("no runs yet") instead.
+				t, perr := time.Parse(time.RFC3339Nano, runs[0].StartedAt)
+				if perr != nil {
+					return "", time.Time{}, false, nil
+				}
 				return runs[0].Status, t, true, nil
 			}
 		}

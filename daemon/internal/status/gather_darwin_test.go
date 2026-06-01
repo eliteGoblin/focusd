@@ -5,19 +5,70 @@ package status
 import (
 	"os"
 	"path/filepath"
+	"strconv"
 	"testing"
 
 	"github.com/eliteGoblin/focusd/daemon/internal/core"
 	"github.com/eliteGoblin/focusd/daemon/internal/status/redact"
 )
 
-// TestRunPlatformStatus_ExecFailure: a non-existent binary yields "" (not a
-// panic, not a leak), which drives PlatformDetail unavailable upstream.
+// TestRunPlatformStatus_ExecFailure: a non-existent binary yields ran=false
+// (not a panic, not a leak), which drives PlatformDetail unavailable upstream.
 func TestRunPlatformStatus_ExecFailure(t *testing.T) {
-	out := runPlatformStatus(filepath.Join(t.TempDir(), "no-such-binary"), t.TempDir(), false)
+	out, _, ran := runPlatformStatus(filepath.Join(t.TempDir(), "no-such-binary"), t.TempDir(), false)
+	if ran {
+		t.Fatalf("exec failure should yield ran=false")
+	}
 	if out != "" {
 		t.Fatalf("exec failure should yield empty output, got %q", out)
 	}
+}
+
+// TestRunPlatformStatus_Exit1IsRan: `platform status` exits 1 on DEGRADED but
+// STILL produces valid output. The daemon must treat exit 1 as a successful
+// run (ran=true, exitCode=1) so it can surface the degradation — not discard
+// it as "unavailable" (BUG 1).
+func TestRunPlatformStatus_Exit1IsRan(t *testing.T) {
+	bin := writeFakePlatform(t, 1, "degraded-report\n")
+	out, code, ran := runPlatformStatus(bin, t.TempDir(), false)
+	if !ran {
+		t.Fatalf("exit 1 (degraded) must read as ran=true")
+	}
+	if code != 1 {
+		t.Fatalf("exitCode = %d; want 1", code)
+	}
+	if out != "degraded-report\n" {
+		t.Fatalf("exit-1 output discarded: got %q", out)
+	}
+}
+
+// TestRunPlatformStatus_Exit2IsUnavailable: exit code >= 2 is an internal/
+// usage failure of the platform itself (not a health verdict) → unavailable.
+func TestRunPlatformStatus_Exit2IsUnavailable(t *testing.T) {
+	bin := writeFakePlatform(t, 2, "junk\n")
+	out, code, ran := runPlatformStatus(bin, t.TempDir(), false)
+	if ran {
+		t.Fatalf("exit 2 must read as ran=false (unavailable)")
+	}
+	if code != 2 {
+		t.Fatalf("exitCode = %d; want 2", code)
+	}
+	if out != "" {
+		t.Fatalf("exit-2 output should be dropped, got %q", out)
+	}
+}
+
+// writeFakePlatform writes a tiny executable shell script that prints the
+// given stdout and exits with the given code, used to exercise the exit-code
+// handling of runPlatformStatus without a real platform binary.
+func writeFakePlatform(t *testing.T, exitCode int, stdout string) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "fake-platform")
+	script := "#!/bin/sh\nprintf '%s' '" + stdout + "'\nexit " + strconv.Itoa(exitCode) + "\n"
+	if err := os.WriteFile(path, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	return path
 }
 
 // TestGatherPlatform_NoGoodVersion: with a readable workdir but no good

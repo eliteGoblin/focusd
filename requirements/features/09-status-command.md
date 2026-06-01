@@ -122,5 +122,3 @@ never the strings a teardown needs.
   would reopen the exact leak this feature closes.
 - Not a control surface. `status` never stops, starts, kills, or mutates
   anything; it only reads.
-</content>
-</invoke>

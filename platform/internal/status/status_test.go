@@ -33,7 +33,7 @@ func TestCollect_VerdictMapping(t *testing.T) {
 		{"failed", true, runAt("failed", time.Minute, true), Degraded},
 		{"error", true, runAt("error", time.Minute, true), Degraded},
 		{"timedout", true, runAt("timedout", time.Minute, true), Degraded},
-		{"unavailable", true, runAt("unavailable", time.Minute, true), Disabled},
+		{"unavailable", true, runAt("unavailable", time.Minute, true), Unavailable},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -80,6 +80,50 @@ func TestOverall_AllDisabledIsUnknown(t *testing.T) {
 	rep := Collect("user", []JobInput{{ID: "a", Enabled: false}}, runAt("", 0, false), now)
 	if rep.Overall != Unknown {
 		t.Fatalf("overall = %q, want UNKNOWN", rep.Overall)
+	}
+}
+
+// TestOverall_UnavailableDegradesNotIgnored pins the BUG 3 fix: an
+// "unavailable" job (reduced coverage, e.g. a system plugin under a user
+// install) must DEGRADE the report — it must NOT be ignored like a
+// config-disabled job. A user install with healthy + unavailable jobs reads
+// DEGRADED, never HEALTHY/UNKNOWN.
+func TestOverall_UnavailableDegradesNotIgnored(t *testing.T) {
+	jobs := []JobInput{
+		{ID: "a", Enabled: true}, // ok → Healthy
+		{ID: "b", Enabled: true}, // unavailable → reduced coverage
+	}
+	lastRun := func(id string) (string, time.Time, bool, error) {
+		switch id {
+		case "a":
+			return "ok", now.Add(-time.Minute), true, nil
+		case "b":
+			return "unavailable", now.Add(-time.Minute), true, nil
+		}
+		return "", time.Time{}, false, nil
+	}
+	rep := Collect("user", jobs, lastRun, now)
+	if rep.Overall != Degraded {
+		t.Fatalf("overall = %q, want DEGRADED (unavailable job must degrade, not be ignored)", rep.Overall)
+	}
+}
+
+// TestOverall_DisabledVsUnavailable contrasts the two: an all-disabled set is
+// UNKNOWN (deliberately off, ignored), whereas a single unavailable job in an
+// otherwise-disabled set degrades the whole report.
+func TestOverall_DisabledVsUnavailable(t *testing.T) {
+	disabledOnly := Collect("user",
+		[]JobInput{{ID: "a", Enabled: false}, {ID: "b", Enabled: false}},
+		runAt("", 0, false), now)
+	if disabledOnly.Overall != Unknown {
+		t.Fatalf("all-disabled overall = %q, want UNKNOWN", disabledOnly.Overall)
+	}
+
+	withUnavailable := Collect("user",
+		[]JobInput{{ID: "a", Enabled: false}, {ID: "b", Enabled: true}},
+		runAt("unavailable", time.Minute, true), now)
+	if withUnavailable.Overall != Degraded {
+		t.Fatalf("has-unavailable overall = %q, want DEGRADED", withUnavailable.Overall)
 	}
 }
 

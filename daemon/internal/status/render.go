@@ -41,8 +41,49 @@ func verdictColor(v Verdict) string {
 // through verbatim; the daemon's OWN fields (the Snapshot) never leak.
 type PlatformDetail struct {
 	Available  bool
+	ExitCode   int             // platform's exit code when it ran (0 healthy/unknown, 1 degraded)
 	TextOutput string          // raw text from `platform status` (passthrough)
 	JSON       json.RawMessage // raw json from `platform status --json`
+}
+
+// Verdict derives the platform's health verdict in the DAEMON's vocabulary so
+// it can be folded into the combined OVERALL (BUG 2). It prefers the JSON
+// report's "overall" field when present (the platform's authoritative self-
+// verdict), otherwise falls back to the exit code: 0 → Healthy, 1 → Degraded.
+//
+// ok=false means "do not fold this in": the platform is UNAVAILABLE (it never
+// produced a verdict). Per the architect's rule, an unavailable platform is a
+// NOTE only — it must never by itself force a non-zero/down daemon exit.
+func (pd PlatformDetail) Verdict() (Verdict, bool) {
+	if !pd.Available {
+		return Unknown, false
+	}
+	// Prefer the platform's own JSON "overall" when we have it.
+	if len(pd.JSON) > 0 {
+		var r struct {
+			Overall string `json:"overall"`
+		}
+		if json.Unmarshal(pd.JSON, &r) == nil {
+			switch Verdict(r.Overall) {
+			case Healthy:
+				return Healthy, true
+			case Degraded:
+				return Degraded, true
+			case Down:
+				return Down, true
+			case Unknown:
+				return Unknown, true
+			}
+			// "DISABLED"/"UNAVAILABLE" or anything unmapped → fall through to
+			// the exit code, which is the coarse health signal.
+		}
+	}
+	// Exit-code fallback: 0 = healthy/unknown (treat as Healthy for folding),
+	// 1 = degraded. Codes >= 2 never reach here (they read as unavailable).
+	if pd.ExitCode == 1 {
+		return Degraded, true
+	}
+	return Healthy, true
 }
 
 // RenderText writes the combined human-readable snapshot: the daemon's own

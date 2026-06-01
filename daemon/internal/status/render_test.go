@@ -178,6 +178,64 @@ func TestRenderJSON_PlatformUnavailable(t *testing.T) {
 	}
 }
 
+// TestPlatformDetail_Verdict pins the platform-verdict derivation that BUG 2
+// folds into the combined OVERALL: JSON "overall" is authoritative when
+// present, exit code is the fallback, and an unavailable detail returns ok=false
+// (do not fold).
+func TestPlatformDetail_Verdict(t *testing.T) {
+	cases := []struct {
+		name   string
+		pd     PlatformDetail
+		want   Verdict
+		wantOK bool
+	}{
+		{
+			name:   "unavailable => ok=false (not folded)",
+			pd:     PlatformDetail{Available: false},
+			want:   Unknown,
+			wantOK: false,
+		},
+		{
+			name:   "json overall DEGRADED wins over exit code",
+			pd:     PlatformDetail{Available: true, ExitCode: 0, JSON: json.RawMessage(`{"overall":"DEGRADED"}`)},
+			want:   Degraded,
+			wantOK: true,
+		},
+		{
+			name:   "json overall HEALTHY",
+			pd:     PlatformDetail{Available: true, ExitCode: 1, JSON: json.RawMessage(`{"overall":"HEALTHY"}`)},
+			want:   Healthy,
+			wantOK: true,
+		},
+		{
+			name:   "no json: exit 1 => Degraded",
+			pd:     PlatformDetail{Available: true, ExitCode: 1},
+			want:   Degraded,
+			wantOK: true,
+		},
+		{
+			name:   "no json: exit 0 => Healthy",
+			pd:     PlatformDetail{Available: true, ExitCode: 0},
+			want:   Healthy,
+			wantOK: true,
+		},
+		{
+			name:   "json overall UNKNOWN",
+			pd:     PlatformDetail{Available: true, ExitCode: 0, JSON: json.RawMessage(`{"overall":"UNKNOWN"}`)},
+			want:   Unknown,
+			wantOK: true,
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got, ok := c.pd.Verdict()
+			if got != c.want || ok != c.wantOK {
+				t.Fatalf("Verdict() = (%s,%v); want (%s,%v)", got, ok, c.want, c.wantOK)
+			}
+		})
+	}
+}
+
 // TestRender_UnknownLinesHonest: a system install read without sudo renders
 // honest "unknown (re-run with sudo)" lines and exits via Unknown→0, not a
 // hard failure or a DOWN.

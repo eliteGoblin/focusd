@@ -18,7 +18,7 @@ func verdictColor(v Verdict) string {
 	switch v {
 	case Healthy:
 		return cGreen
-	case Degraded, Unknown:
+	case Degraded, Unavailable, Unknown:
 		return cYellow
 	default: // Disabled
 		return cGray
@@ -56,6 +56,8 @@ func jobText(j JobStatus) string {
 	switch j.Verdict {
 	case Disabled:
 		return "disabled"
+	case Unavailable:
+		return "unavailable (needs admin install)"
 	case Unknown:
 		return "no runs yet"
 	default:

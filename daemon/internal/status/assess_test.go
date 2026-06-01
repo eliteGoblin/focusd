@@ -96,6 +96,90 @@ func TestAssess_UnknownShadowsPartialCounts(t *testing.T) {
 	}
 }
 
+// TestCombine_FoldsPlatformVerdict pins BUG 2: the daemon OVERALL must fold in
+// the delegated platform verdict (worst-wins, Down > Degraded > Unknown >
+// Healthy). An UNAVAILABLE platform is a note only — it never worsens the
+// daemon's own verdict.
+func TestCombine_FoldsPlatformVerdict(t *testing.T) {
+	healthy := Result{Verdict: Healthy, Note: "all daemon-owned facts healthy"}
+
+	cases := []struct {
+		name            string
+		daemon          Result
+		platformVerdict Verdict
+		platformOK      bool
+		wantVerdict     Verdict
+		wantExit        int
+	}{
+		{
+			name:            "daemon healthy + platform degraded => DEGRADED/exit1",
+			daemon:          healthy,
+			platformVerdict: Degraded,
+			platformOK:      true,
+			wantVerdict:     Degraded,
+			wantExit:        1,
+		},
+		{
+			name:            "daemon healthy + platform unavailable => stays daemon verdict (exit0)",
+			daemon:          healthy,
+			platformVerdict: Unknown, // ignored: platformOK=false
+			platformOK:      false,
+			wantVerdict:     Healthy,
+			wantExit:        0,
+		},
+		{
+			name:            "daemon down + platform healthy => daemon DOWN wins (exit2)",
+			daemon:          Result{Verdict: Down, Note: "x"},
+			platformVerdict: Healthy,
+			platformOK:      true,
+			wantVerdict:     Down,
+			wantExit:        2,
+		},
+		{
+			name:            "daemon healthy + platform down => DOWN/exit2",
+			daemon:          healthy,
+			platformVerdict: Down,
+			platformOK:      true,
+			wantVerdict:     Down,
+			wantExit:        2,
+		},
+		{
+			name:            "daemon unknown + platform healthy => daemon UNKNOWN wins over healthy",
+			daemon:          Result{Verdict: Unknown, Note: "x"},
+			platformVerdict: Healthy,
+			platformOK:      true,
+			wantVerdict:     Unknown,
+			wantExit:        0,
+		},
+		{
+			name:            "daemon healthy + platform unavailable never forces non-zero",
+			daemon:          healthy,
+			platformVerdict: Down, // ignored: platformOK=false
+			platformOK:      false,
+			wantVerdict:     Healthy,
+			wantExit:        0,
+		},
+	}
+
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got := Combine(c.daemon, c.platformVerdict, c.platformOK)
+			if got.Verdict != c.wantVerdict {
+				t.Fatalf("Combine verdict = %s; want %s", got.Verdict, c.wantVerdict)
+			}
+			if ec := ExitCode(got.Verdict); ec != c.wantExit {
+				t.Fatalf("ExitCode(%s) = %d; want %d", got.Verdict, ec, c.wantExit)
+			}
+			// When the platform is unavailable, the daemon's own note must be
+			// preserved (it stays the daemon's verdict, with the platform
+			// section shown unavailable separately by the renderer).
+			if !c.platformOK && got.Note != c.daemon.Note {
+				t.Fatalf("unavailable platform changed daemon note: got %q want %q", got.Note, c.daemon.Note)
+			}
+		})
+	}
+}
+
 func TestExitCode(t *testing.T) {
 	cases := map[Verdict]int{
 		Healthy:  0,

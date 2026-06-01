@@ -6,6 +6,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -189,37 +190,64 @@ func gatherPlatform(workdir redact.Token, jsonMode bool) PlatformDetail {
 	// Run the good-version platform binary in `status` mode with the
 	// discovered workdir. The binary path and the workdir both stay inside
 	// the Use closure — they never escape into the returned detail.
-	text, jsonRaw := redactUse2(workdir, func(raw string) (string, json.RawMessage) {
+	pd := redact.Use(workdir, func(raw string) PlatformDetail {
 		st := &core.Store{Dir: raw}
 		good := st.Good()
 		if good == "" {
 			// No good version → no platform process to query.
-			return "", nil
+			return PlatformDetail{Available: false}
 		}
 		binPath := st.BinPath(good)
-		out := runPlatformStatus(binPath, raw, jsonMode)
-		if jsonMode {
-			// Validate before storing so RenderJSON embeds only well-formed
-			// bytes; invalid/empty → nil (renders as null/unavailable).
-			if out != "" && json.Valid([]byte(out)) {
-				return "", json.RawMessage(out)
-			}
-			return "", nil
-		}
-		return out, nil
-	})
+		out, exitCode, ran := runPlatformStatus(binPath, raw, jsonMode)
 
-	if text == "" && jsonRaw == nil {
-		return PlatformDetail{Available: false}
-	}
-	return PlatformDetail{Available: true, TextOutput: text, JSON: jsonRaw}
+		// The command itself failed to produce a health verdict (exec error,
+		// timeout, or exit >= 2) → unavailable. The daemon still reports its
+		// own facts; this is a note, never a forced failure.
+		if !ran {
+			return PlatformDetail{Available: false}
+		}
+
+		if jsonMode {
+			// A health verdict but EMPTY/INVALID json is not embeddable →
+			// unavailable (we cannot trust an empty/garbage report).
+			if out == "" || !json.Valid([]byte(out)) {
+				return PlatformDetail{Available: false}
+			}
+			return PlatformDetail{
+				Available: true,
+				ExitCode:  exitCode,
+				JSON:      json.RawMessage(out),
+			}
+		}
+		// Text mode: empty output despite a verdict → unavailable.
+		if out == "" {
+			return PlatformDetail{Available: false}
+		}
+		return PlatformDetail{
+			Available:  true,
+			ExitCode:   exitCode,
+			TextOutput: out,
+		}
+	})
+	return pd
 }
 
 // runPlatformStatus execs `<binPath> status --workdir <wd> [--json]` with an
-// 8s timeout, captures stdout into a buffer, and returns it ONLY on a clean
-// exit. STDERR is discarded (it may carry disguised paths). On timeout the
-// child is killed via context cancellation. Returns "" on any failure.
-func runPlatformStatus(binPath, workdir string, asJSON bool) string {
+// 8s timeout and captures stdout into a buffer. STDERR is discarded (it may
+// carry disguised paths). On timeout the child is killed via context
+// cancellation.
+//
+// `platform status` is a HEALTH probe: it exits 0 (healthy/unknown) OR 1
+// (degraded) and STILL produces valid, useful output in both cases. So a
+// degraded platform (exit 1) ran SUCCESSFULLY — we must not treat it as
+// unavailable and hide its real degradation. ran=true means the command
+// genuinely produced a verdict (exit 0 or 1); exitCode carries which one so
+// the caller can fold the platform verdict into the daemon's overall.
+//
+// ran=false (=> unavailable) only on: exec error, context timeout, or any exit
+// code >= 2 (an internal-error/usage failure of the platform itself, not a
+// health verdict). Empty/invalid output is judged by the caller per mode.
+func runPlatformStatus(binPath, workdir string, asJSON bool) (out string, exitCode int, ran bool) {
 	ctx, cancel := context.WithTimeout(context.Background(), platformStatusTimeout)
 	defer cancel()
 
@@ -232,10 +260,26 @@ func runPlatformStatus(binPath, workdir string, asJSON bool) string {
 	cmd.Stdout = &stdout
 	cmd.Stderr = nil // swallow: platform stderr can contain disguised paths
 
-	if err := cmd.Run(); err != nil {
-		return ""
+	err := cmd.Run()
+	// Context timeout: the child was killed → genuinely unavailable.
+	if ctx.Err() != nil {
+		return "", 0, false
 	}
-	return stdout.String()
+	if err == nil {
+		return stdout.String(), 0, true // clean exit 0
+	}
+	// Non-zero exit: only exit 1 (DEGRADED) is still a valid health verdict.
+	var ee *exec.ExitError
+	if errors.As(err, &ee) {
+		code := ee.ExitCode()
+		if code == 1 {
+			return stdout.String(), 1, true
+		}
+		// code >= 2 (or -1 on signal) => platform internal/usage failure.
+		return "", code, false
+	}
+	// Exec error (binary missing, not startable) => unavailable.
+	return "", 0, false
 }
 
 // redactUse2 is a two-return variant of redact.Use. redact.Use is generic

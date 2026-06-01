@@ -39,7 +39,12 @@ func doStatus(args []string) int {
 	}
 
 	snap, pd := status.Gather(*wd, *jsonOut)
-	res := status.Assess(snap)
+
+	// OVERALL folds the daemon's own facts with the delegated platform verdict
+	// (worst-wins). An UNAVAILABLE platform stays a note and never by itself
+	// worsens the daemon verdict (architect's rule).
+	platformVerdict, platformOK := pd.Verdict()
+	res := status.Combine(status.Assess(snap), platformVerdict, platformOK)
 
 	color := !*noColor && os.Getenv("NO_COLOR") == ""
 	if *jsonOut {

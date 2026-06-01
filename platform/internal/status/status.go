@@ -20,10 +20,11 @@ import "time"
 type Verdict string
 
 const (
-	Healthy  Verdict = "HEALTHY"
-	Degraded Verdict = "DEGRADED"
-	Disabled Verdict = "DISABLED" // job present but turned off in config
-	Unknown  Verdict = "UNKNOWN"  // no run recorded yet (fresh install)
+	Healthy     Verdict = "HEALTHY"
+	Degraded    Verdict = "DEGRADED"
+	Disabled    Verdict = "DISABLED"    // job present but turned off in config
+	Unavailable Verdict = "UNAVAILABLE" // job couldn't run here (reduced coverage)
+	Unknown     Verdict = "UNKNOWN"     // no run recorded yet (fresh install)
 )
 
 // AgeBucket is a coarse recency classification. Precise timestamps add no
@@ -112,7 +113,11 @@ func jobVerdict(status string, age AgeBucket) Verdict {
 		}
 		return Healthy
 	case "unavailable":
-		return Disabled
+		// The job ran but reported it could not act here (e.g. a system
+		// plugin under a user-mode install, or no console user). That is
+		// REDUCED COVERAGE, not a config-disabled job — it must degrade
+		// overall, never be silently ignored like Disabled.
+		return Unavailable
 	case "failed", "error", "timedout":
 		return Degraded
 	default:
@@ -121,11 +126,14 @@ func jobVerdict(status string, age AgeBucket) Verdict {
 }
 
 // overall folds the per-job verdicts into one. Disabled jobs are ignored
-// (a deliberately-off protection is not a failure). Worst wins:
-// Degraded > Unknown > Healthy. All-disabled/empty → Unknown.
+// (a deliberately-off protection is not a failure). An Unavailable job is
+// NOT ignored — it means reduced coverage and degrades the whole report
+// (a user-mode install whose system jobs can't run must read DEGRADED, not
+// HEALTHY/UNKNOWN). Worst wins: Unavailable ≈ Degraded > Unknown > Healthy.
+// All-disabled/empty → Unknown.
 func overall(jobs []JobStatus) Verdict {
 	worst := Verdict("")
-	rank := map[Verdict]int{Healthy: 1, Unknown: 2, Degraded: 3}
+	rank := map[Verdict]int{Healthy: 1, Unknown: 2, Unavailable: 3, Degraded: 3}
 	for _, j := range jobs {
 		if j.Verdict == Disabled {
 			continue
@@ -136,6 +144,11 @@ func overall(jobs []JobStatus) Verdict {
 	}
 	if worst == "" {
 		return Unknown
+	}
+	// Collapse Unavailable to Degraded at the report level: callers and exit
+	// codes only need the coarse "something is reduced/broken" signal.
+	if worst == Unavailable {
+		return Degraded
 	}
 	return worst
 }
