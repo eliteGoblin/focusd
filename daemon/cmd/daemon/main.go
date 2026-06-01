@@ -231,37 +231,6 @@ func loop(args []string, once bool) int {
 // + swaps via the normal EnsureRunning path (which is fetch-then-stop
 // — see executor.go). This command itself is a thin write + (optional)
 // one-shot resolve; it does NOT loop on ticks or wipe state.
-// resolveUpdateWorkdir picks the workdir `daemon update` writes to. An
-// explicit (non-default) --workdir is always honored. Otherwise, if a
-// genuine install already lives at the default workdir, use it; if not,
-// fall back to discovering the real (possibly disguised/relocated) install.
-// Pure + injectable so the precedence is unit-tested without touching
-// launchd. The disguised path is only ever used internally, never printed.
-func resolveUpdateWorkdir(explicitWd, defaultWd string, hasInstall func(dir string) bool, discover func() (string, bool)) string {
-	if explicitWd != defaultWd {
-		return explicitWd // caller pointed us somewhere explicit
-	}
-	if hasInstall(explicitWd) {
-		return explicitWd // an install already lives at the default
-	}
-	if wd, ok := discover(); ok && wd != "" {
-		return wd
-	}
-	return explicitWd
-}
-
-// discoverInstallWorkdir finds the genuine focusd install for the current
-// mode via Ed25519 recognition (nil verifier => sig.VerifyFile) and returns
-// its workdir. Returns ("", false) when no install is found or discovery is
-// unsupported (non-darwin). Never logs or prints the path.
-func discoverInstallWorkdir() (string, bool) {
-	cur, err := osadapter.FindCurrentInstall(mode.Resolve(), nil)
-	if err != nil || cur.Workdir == "" {
-		return "", false
-	}
-	return cur.Workdir, true
-}
-
 func doUpdate(args []string) int {
 	// Use a dedicated FlagSet so we can correctly pick up the trailing
 	// positional version after all flags (handles `--workdir=/x v1.0.0`
@@ -279,12 +248,19 @@ func doUpdate(args []string) int {
 	// the default workdir is empty on such systems. When the caller did not
 	// point us at an explicit workdir AND none lives at the default, discover
 	// the genuine install (same Ed25519 recognition `self-update` uses) and
-	// target it. The disguised path stays INTERNAL — it is never printed.
-	workdir := resolveUpdateWorkdir(
+	// target it. The disguised path stays INTERNAL to this process — it is
+	// never written to the log/output here. A discovery I/O error (e.g.
+	// permission) fails fast rather than silently writing to the wrong place.
+	workdir, derr := resolveUpdateWorkdir(
 		*wd, defaultWorkdir(),
 		func(dir string) bool { return (&core.Store{Dir: dir}).HaveConfig() },
 		discoverInstallWorkdir,
 	)
+	if derr != nil {
+		fmt.Fprintln(os.Stderr,
+			"update: could not locate the install; re-run with sudo or pass --workdir")
+		return 1
+	}
 
 	o := opts{workdir: workdir, github: *gh, asset: *as}
 	_, log := build(o)
@@ -301,7 +277,8 @@ func doUpdate(args []string) int {
 			return 2
 		}
 		if err := st.WriteDesired(explicit); err != nil {
-			log.Error("write desired failed", "err", err)
+			// Don't log raw err: the store path can be the disguised workdir.
+			log.Error("write desired failed (store not writable; re-run with sudo?)")
 			return 1
 		}
 		log.Info("desired written", "version", explicit, "note", "no network call")
@@ -325,6 +302,44 @@ func doUpdate(args []string) int {
 	}
 	log.Info("desired written", "version", v, "note", "resolved from GitHub")
 	return 0
+}
+
+// resolveUpdateWorkdir picks the workdir `daemon update` writes to. An
+// explicit (non-default) --workdir is always honored. Otherwise, if a
+// genuine install already lives at the default workdir, use it; if not,
+// discover the real (possibly disguised/relocated) install. Pure +
+// injectable so the precedence is unit-tested without touching launchd.
+// A discovery I/O error is propagated (caller fails fast) so we never
+// silently write to the wrong workdir; "no install found" (nil error,
+// empty path) falls back to the default.
+func resolveUpdateWorkdir(explicitWd, defaultWd string, hasInstall func(dir string) bool, discover func() (string, error)) (string, error) {
+	if explicitWd != defaultWd {
+		return explicitWd, nil // caller pointed us somewhere explicit
+	}
+	if hasInstall(explicitWd) {
+		return explicitWd, nil // an install already lives at the default
+	}
+	wd, err := discover()
+	if err != nil {
+		return "", err // I/O failure during discovery — fail fast
+	}
+	if wd != "" {
+		return wd, nil
+	}
+	return explicitWd, nil // no install discovered — keep the default
+}
+
+// discoverInstallWorkdir finds the genuine focusd install for the current
+// mode via Ed25519 recognition (nil verifier => sig.VerifyFile) and returns
+// its workdir. ("", nil) means no install was found (a clean fallback);
+// a non-nil error is a real filesystem failure. Never logs or prints the
+// path.
+func discoverInstallWorkdir() (string, error) {
+	cur, err := osadapter.FindCurrentInstall(mode.Resolve(), nil)
+	if err != nil {
+		return "", err
+	}
+	return cur.Workdir, nil
 }
 
 // osSupportsLaunchd reports whether launchd install/uninstall is
