@@ -17,11 +17,16 @@ import (
 //	<workdir>/bin/<v>/platform                     platform binaries
 type Store struct{ Dir string }
 
+// VersionFile is the basename of the desired-version config under the workdir.
+// Exported so callers that must locate it (e.g. status install-age) reference
+// this single source of truth rather than hardcoding the literal.
+const VersionFile = "version.json"
+
 type versionConfig struct {
 	Desired string `json:"desired"`
 }
 
-func (s *Store) versionPath() string { return filepath.Join(s.Dir, "version.json") }
+func (s *Store) versionPath() string { return filepath.Join(s.Dir, VersionFile) }
 func (s *Store) goodPath() string    { return filepath.Join(s.Dir, "good") }
 func (s *Store) badDir() string      { return filepath.Join(s.Dir, "bad") }
 
