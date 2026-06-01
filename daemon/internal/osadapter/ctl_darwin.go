@@ -184,6 +184,29 @@ func FindCurrentInstall(m mode.Mode, verify Verifier) (CurInstall, error) {
 	return cur, nil
 }
 
+// MeshStatus reports how many of the discovered mesh roles are currently
+// loaded in launchd. It discovers the install by Ed25519 signature and
+// queries each label internally, returning ONLY counts — the disguised
+// labels never cross this boundary, so a caller like `daemon status`
+// physically cannot leak them. `found` is false when no genuine install
+// was discovered (total 0); a filesystem failure is returned as err.
+func MeshStatus(m mode.Mode) (loaded, total int, found bool, err error) {
+	cur, ferr := FindCurrentInstall(m, sig.VerifyFile)
+	if ferr != nil {
+		return 0, 0, false, ferr
+	}
+	if len(cur.Labels) == 0 {
+		return 0, 0, false, nil
+	}
+	c := launchctlCtl{m: m}
+	for _, lbl := range cur.Labels {
+		if c.loaded(lbl) {
+			loaded++
+		}
+	}
+	return loaded, len(cur.Labels), true, nil
+}
+
 // labelBase strips a trailing ".a"/".b"/".ensure" suffix off a launchd
 // label, returning the disguised install base.
 func labelBase(label string) string {
