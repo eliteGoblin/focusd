@@ -44,6 +44,15 @@ not a renderer responsibility.**
    `com.<...>.<hex>` label shapes, `*.plist`, the pf anchor literal). If any
    future change leaks a token, this test fails. The test *is* the contract.
 
+> **Reinforced by structural layering (2026-06-01, ADR-0012):** the disguised
+> mesh labels are now counted *inside* the OS adapter, and only the **count**
+> of running roles crosses the boundary — the labels themselves never leave
+> the adapter. Likewise the platform's status emits only non-disguised
+> primitives (job ids, statuses, coarse age buckets, counts). This narrows the
+> surface where a `Token` could even appear; the `Token` type remains the
+> backstop for any disguised value that still must be handled in code. The
+> redaction contract here is **unchanged in spirit**.
+
 ## Alternatives considered
 
 - **Scrub in the renderer (regex / blocklist over the final string).**

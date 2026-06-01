@@ -1,14 +1,25 @@
 # Feature 09 — `daemon status` health snapshot
 
 - **Status:** in build (2026-06-01) · ships with the next daemon release
-- **Decision:** [ADR-0011](../decisions/0011-status-redaction.md)
+- **Decision:** [ADR-0011](../decisions/0011-status-redaction.md) (redaction) ·
+  [ADR-0012](../decisions/0012-status-delegates-to-platform.md) (KISS layering)
 
 ## What
 
 A single read-only command — `daemon status` — that prints a readable health
-snapshot of the whole focusd install: is the protection engine running, what
-version is live, when did each protection last act and how did it go, how big
-is the blocklist, are the Claude-skill files present, and one overall verdict.
+snapshot of the focusd install and ends with one overall verdict.
+
+The command is split along a deliberate seam (see ADR-0012):
+
+- **`daemon status` reports only daemon-owned facts:** is the protection
+  engine running (how many of the launchd mesh roles are up), is the platform
+  process alive, and the platform version (desired vs last-known-good). The
+  daemon does **not** know a plugin exists and does **not** read the platform's
+  state — it stays plugin-agnostic by design.
+- **`platform status` owns the protection detail:** per-protection last result
+  + how recently, blocklist size, packet-filter table size, skill files
+  present. `daemon status` **delegates** to it and passes its output through,
+  so the operator still sees one combined snapshot.
 
 It answers the calm operator's honest question — *"is my commitment device
 actually working right now?"* — without ever handing the weak-moment self the
@@ -28,9 +39,11 @@ weak-moment self is looking at, even when something is broken.
 
 ## How it behaves (product rules)
 
-- **One readable snapshot.** Engine running? · platform version (desired vs
-  live) · each protection's last result + how recently · blocklist size · pf
-  table size · skill files present · an overall verdict.
+- **One readable snapshot, two owners.** The daemon contributes: engine
+  running (mesh roles up) · platform process alive · platform version (desired
+  vs last-known-good). The platform contributes (passed through): each
+  protection's last result + how recently · blocklist size · pf table size ·
+  skill files present. One overall verdict closes it.
 - **Three verdicts.** `HEALTHY` (everything that should be working is) ·
   `DEGRADED` (partial — a fresh install still warming up, a stale protection,
   version drift, or admin-level protections unavailable under a user install) ·
@@ -64,27 +77,41 @@ never the strings a teardown needs.
 
 ## Acceptance criteria (testable behaviour)
 
-1. `daemon status` prints engine-running, platform version, each protection's
-   last result + recency, blocklist size, pf table size, skill-files-present,
-   and an overall `HEALTHY` / `DEGRADED` / `DOWN` verdict.
-2. The output (text and json) contains **none** of the disguised identifiers,
-   even when a probe fails or the install is broken. This is enforced by a
-   snapshot test fed deliberately poisonous values.
-3. Under a user-only install the admin-level protections read **UNAVAILABLE
+1. On a healthy install, `daemon status` reports the engine running and an
+   overall `HEALTHY` verdict, and exits `0`.
+2. `daemon status` reports daemon-owned facts (mesh roles up, platform process
+   alive, platform version) and passes through the platform's protection
+   detail; the operator sees one combined snapshot.
+3. The status output **never contains a filesystem path, a launchd label, a
+   daemon binary filename, or a pf anchor** — in text or json, on every path
+   including error/broken-install paths. Enforced by a snapshot test fed
+   deliberately poisonous values.
+4. A user can read status of a **system install without sudo**: admin-only
+   facts (mesh role count, admin-level protections) degrade to **"unknown
+   (re-run with sudo)"** rather than the command failing.
+5. Under a user-only install, admin-level protections read **UNAVAILABLE
    (needs admin install)** — not down, not failed — and the overall verdict is
    `DEGRADED`.
-4. Exit codes: `0` healthy · `1` degraded · `2` down · `3` internal error.
-5. Querying a system install without sudo prints **"unknown (re-run with
-   sudo)"** for the admin-only lines instead of hard-failing.
-6. A fresh install (<10m, no runs recorded) reads `HEALTHY — warming up`.
+6. Exit codes: `0` healthy · `1` degraded · `2` down · `3` internal error.
+7. A fresh install (<10m, no runs recorded) reads `HEALTHY — warming up`.
+8. The daemon never reads the platform's state directly: it gets protection
+   detail only by delegating to the platform's own status. (Verifiable as a
+   product behaviour: with the platform process down, the daemon still reports
+   its own facts and marks platform detail unavailable, rather than erroring.)
 
 ## Honest limitations
 
 - Status is a **read** of observed state; it is not itself a protection. A
   green status doesn't prove a determined bypass is impossible — only that the
   layers that should be up, are up. It is calibration, not enforcement.
-- Without admin rights, the admin-level lines are genuinely unknown to the
-  command; it says so rather than guessing. Run with sudo for the full read.
+- Per-protection recency is a **proxy via last-run status** reported by the
+  platform, not a live re-probe of each protection at status time. It tells
+  you when a protection last acted and how that went — slightly less immediate
+  than re-running every check on the spot. This is the deliberate cost of
+  keeping the daemon plugin-agnostic (ADR-0012).
+- On a system install **without sudo**, the mesh and admin-level facts are
+  genuinely unknown to the command and read **"unknown"** rather than guessing
+  or hard-failing. Run with sudo for the full read.
 - Recency/age buckets are coarse (`<1m` / `<5m` / `<1h` / `>1h`) on purpose —
   precise timestamps add no operator value and risk fingerprinting.
 
