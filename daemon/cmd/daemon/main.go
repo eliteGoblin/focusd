@@ -251,11 +251,7 @@ func doUpdate(args []string) int {
 	// target it. The disguised path stays INTERNAL to this process — it is
 	// never written to the log/output here. A discovery I/O error (e.g.
 	// permission) fails fast rather than silently writing to the wrong place.
-	workdir, derr := resolveUpdateWorkdir(
-		*wd, defaultWorkdir(),
-		func(dir string) bool { return (&core.Store{Dir: dir}).HaveConfig() },
-		discoverInstallWorkdir,
-	)
+	workdir, derr := resolveUpdateWorkdir(*wd, defaultWorkdir(), discoverInstallWorkdir)
 	if derr != nil {
 		fmt.Fprintln(os.Stderr,
 			"update: could not locate the install; re-run with sudo or pass --workdir")
@@ -312,21 +308,23 @@ func doUpdate(args []string) int {
 // A discovery I/O error is propagated (caller fails fast) so we never
 // silently write to the wrong workdir; "no install found" (nil error,
 // empty path) falls back to the default.
-func resolveUpdateWorkdir(explicitWd, defaultWd string, hasInstall func(dir string) bool, discover func() (string, error)) (string, error) {
+func resolveUpdateWorkdir(explicitWd, defaultWd string, discover func() (string, error)) (string, error) {
 	if explicitWd != defaultWd {
 		return explicitWd, nil // caller pointed us somewhere explicit
 	}
-	if hasInstall(explicitWd) {
-		return explicitWd, nil // an install already lives at the default
-	}
+	// Discovery WINS over the default. A real install relocates to a
+	// disguised path, so the running mesh's workdir is the authoritative
+	// target; a stale install left at the default location must NOT shadow
+	// it (that bug wrote `desired` to the wrong place and the platform never
+	// upgraded). A genuine I/O error during discovery is fatal — fail fast.
 	wd, err := discover()
 	if err != nil {
-		return "", err // I/O failure during discovery — fail fast
+		return "", err
 	}
 	if wd != "" {
-		return wd, nil
+		return wd, nil // the real, running, discovered install wins
 	}
-	return explicitWd, nil // no install discovered — keep the default
+	return defaultWd, nil // nothing discovered — use the default
 }
 
 // discoverInstallWorkdir finds the genuine focusd install for the current
