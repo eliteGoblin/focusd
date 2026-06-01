@@ -22,8 +22,10 @@ import (
 
 	"github.com/eliteGoblin/focusd/platform/internal/bundle"
 	"github.com/eliteGoblin/focusd/platform/internal/core/app"
+	"github.com/eliteGoblin/focusd/platform/internal/core/state"
 	"github.com/eliteGoblin/focusd/platform/internal/defaultconfig"
 	"github.com/eliteGoblin/focusd/platform/internal/osadapter"
+	"github.com/eliteGoblin/focusd/platform/internal/status"
 )
 
 // version is injected at build time via -ldflags "-X main.version=...".
@@ -53,6 +55,8 @@ func main() {
 		fmt.Println("focusd-platform", version)
 	case "validate":
 		os.Exit(runValidate(args))
+	case "status":
+		os.Exit(runStatus(args))
 	case "run":
 		os.Exit(runRun(args))
 	case "-h", "--help", "help":
@@ -70,6 +74,7 @@ func usage() {
 usage:
   platform version
   platform validate [--config PATH] [--state-db PATH] [--plugin-dir DIR] [--mode user|system]
+  platform status   [--workdir DIR] [--config PATH] [--state-db PATH] [--mode user|system] [--json] [--no-color]
   platform run      [--config PATH] [--state-db PATH] [--plugin-dir DIR] [--mode user|system]
 `)
 }
@@ -177,6 +182,110 @@ func runValidate(args []string) int {
 		}
 	}
 	return 0
+}
+
+// runStatus reports the platform's own health: one line per configured
+// job (last-run status + coarse age + verdict) and an overall verdict.
+// It is plugin-aware by design — this is the layer the daemon delegates
+// plugin detail to (ADR-0012). The output carries NO disguised identifier
+// (no paths, labels, or pf anchors), only job ids/statuses/age buckets.
+//
+// It is deliberately READ-ONLY and side-effect-free: unlike validate/run
+// it does NOT bootstrap the app (no plugin extraction, no dir creation, no
+// migrations, no path logging). Config is read via the override loader and
+// run history via a read-only DB open. If the DB can't be read (missing,
+// or a root-owned system DB queried without sudo) it degrades to "no runs
+// yet" rather than failing — so a user can always check status.
+//
+// --json emits machine output; --no-color (or NO_COLOR) suppresses ANSI.
+func runStatus(args []string) int {
+	fs := flag.NewFlagSet("status", flag.ContinueOnError)
+	cfgFlag := fs.String("config", "", "config.yaml path")
+	dbFlag := fs.String("state-db", "", "state.db path")
+	wd := fs.String("workdir", "", "daemon-managed workdir; derives config/state-db paths")
+	modeFlag := fs.String("mode", "", "force run mode: user|system")
+	jsonOut := fs.Bool("json", false, "emit machine-readable JSON")
+	noColor := fs.Bool("no-color", false, "suppress ANSI colour")
+	if err := fs.Parse(args); err != nil {
+		return 2
+	}
+
+	adapter := osadapter.NewAdapter()
+	mode := osadapter.RunMode(*modeFlag)
+	if mode == "" {
+		mode = adapter.DetectRunMode()
+	}
+
+	configPath, dbPath := *cfgFlag, *dbFlag
+	if *wd != "" {
+		if configPath == "" {
+			configPath = filepath.Join(*wd, "config.yaml")
+		}
+		if dbPath == "" {
+			dbPath = filepath.Join(*wd, "state.db")
+		}
+	}
+	if configPath == "" {
+		configPath, _ = adapter.DefaultConfigPath(mode)
+	}
+	if dbPath == "" {
+		if sd, err := adapter.DefaultStateDir(mode); err == nil {
+			dbPath = filepath.Join(sd, "state.db")
+		}
+	}
+
+	// Config (embedded defaults merged with the optional on-disk override)
+	// tells us the job list. This read is harmless and never writes.
+	cfg, _, err := defaultconfig.LoadWithOverrides(configPath)
+	if err != nil {
+		// REDACTION: LoadWithOverrides error strings embed the override path
+		// (the disguised workdir). Emit a generic message — never the err.
+		fmt.Fprintln(os.Stderr, "status: cannot read configuration")
+		return 1
+	}
+	jobs := make([]status.JobInput, 0, len(cfg.Jobs))
+	for _, j := range cfg.Jobs {
+		jobs = append(jobs, status.JobInput{ID: j.ID, Enabled: j.Enabled})
+	}
+
+	// Run history, read-only. On any open failure, degrade to "no runs"
+	// (found=false) so status still renders — the jobs just read UNKNOWN.
+	lastRun := func(string) (string, time.Time, bool, error) {
+		return "", time.Time{}, false, nil
+	}
+	if dbPath != "" {
+		if db, derr := state.OpenReadOnly(dbPath); derr == nil {
+			defer db.Close()
+			lastRun = func(jobID string) (string, time.Time, bool, error) {
+				runs, herr := db.Runs.History(jobID, 1)
+				if herr != nil || len(runs) == 0 {
+					return "", time.Time{}, false, herr
+				}
+				// A malformed/corrupt StartedAt parses to the year-0 zero time,
+				// which would mis-bucket age as ">1h" and lie about staleness
+				// (false DEGRADED). Treat an unparseable timestamp as "no run
+				// found" → the job reads UNKNOWN ("no runs yet") instead.
+				t, perr := time.Parse(time.RFC3339Nano, runs[0].StartedAt)
+				if perr != nil {
+					return "", time.Time{}, false, nil
+				}
+				return runs[0].Status, t, true, nil
+			}
+		}
+	}
+
+	rep := status.Collect(string(mode), jobs, lastRun, time.Now().UTC())
+
+	color := !*noColor && os.Getenv("NO_COLOR") == ""
+	if *jsonOut {
+		status.RenderJSON(rep, os.Stdout)
+	} else {
+		status.RenderText(rep, os.Stdout, color)
+	}
+	if rep.Overall == status.Healthy || rep.Overall == status.Unknown {
+		return 0
+	}
+	return 1
 }
 
 func runRun(args []string) int {

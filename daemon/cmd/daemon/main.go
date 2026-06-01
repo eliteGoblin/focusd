@@ -88,6 +88,8 @@ func run(args []string) int {
 		return doUninstall(args[1:])
 	case "self-update":
 		return doSelfUpdate(args[1:])
+	case "status":
+		return doStatus(args[1:])
 	default:
 		fmt.Fprintln(os.Stderr, "unknown command:", args[0])
 		usage()
@@ -96,7 +98,7 @@ func run(args []string) int {
 }
 
 func usage() {
-	fmt.Fprintln(os.Stderr, "usage: daemon run|once|update|version|install|uninstall|self-update [flags]")
+	fmt.Fprintln(os.Stderr, "usage: daemon run|once|update|version|install|uninstall|self-update|status [flags]")
 }
 
 type opts struct {

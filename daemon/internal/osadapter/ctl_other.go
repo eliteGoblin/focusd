@@ -26,6 +26,9 @@ type Verifier func(path string) (bool, error)
 func FindCurrentInstall(mode.Mode, Verifier) (CurInstall, error) {
 	return CurInstall{}, ErrUnsupported
 }
+func MeshStatus(mode.Mode) (loaded, total int, found bool, err error) {
+	return 0, 0, false, ErrUnsupported
+}
 func SelfUpdateProd(CurInstall, Spec, []byte, time.Duration, time.Duration, bool) error {
 	return ErrUnsupported
 }

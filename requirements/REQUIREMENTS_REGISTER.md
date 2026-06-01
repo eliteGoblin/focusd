@@ -75,6 +75,7 @@ The two-faced nature of the user is the key insight. Most security designs assum
 | **kill-steam plugin** | If Steam.app process found, kill it and remove `/Applications/Steam.app` | Direct process kill + on-disk removal | ✅ shipped (pre-session) | User can reinstall; the loop catches that within 10s |
 | **network-block plugin** | Reconciles `pfctl` table with DoH-resolved Steam IPs every 30m | Defense-in-depth: direct-IP traffic (bypassing DNS) caught at kernel packet filter | ✅ shipped (FEATURE 4); disabled by default, enabled via override config | Manual prereqs (pf anchor + /etc/pf.conf entry); IPs rotate; reconciler keeps it current |
 | **Daemon bug fixes** | Bug 1 (config staleness), Bug 2 (atomic install + rollback), Bug 3 (no auto-resolve from reconcile loop) | Foundational reliability fixes | ✅ shipped (v0.10.0 + daemon-v0.1.0) | None outstanding |
+| **`daemon status` health snapshot** | Read-only health read that NEVER leaks disguised tokens — closes the "indirect question whose answer is a bypass recipe" path. `daemon status` reports only daemon-owned facts (mesh roles up / platform process / version) and **delegates** plugin/protection detail to a new `platform status`, so the daemon stays plugin-agnostic (KISS) | 🔧 in build (FEATURE 9, #42; redaction structural per ADR-0011; KISS layering per ADR-0012) | Status is a read, not a protection; per-protection recency is a last-run-status proxy (not a live re-probe) per ADR-0012; mesh/admin lines read "unknown" without sudo; age buckets coarse by design |
 
 ---
 
@@ -108,10 +109,13 @@ Every commit message + every PR description includes an explicit "honest" or "ho
 
 1. **Private key still on Frank's Mac** (`~/.creds/focusd_ed25519_private.pem`). Should be removed; signing should move to GitHub Actions Secrets only (already plumbed in `daemon-release.yml`). Until then, anyone with shell access can sign fake releases.
 2. **Source repo on Frank's Mac** means Claude can always read `relocate.go`, the XOR mask logic, the skill content, the embedded passages. Every "secrecy" defense crumbles against this. The strongest hardening is moving the repo off this machine.
-3. **Skill-protector re-injection doesn't fire on schedule today.** The plugin's `run_as: current_user` doesn't match the system-mode platform that's running, so it's gated off. See #37. Today, deletion of `~/.claude/skills/focusd-protection/SKILL.md` is NOT auto-healed.
+3. ~~Skill-protector re-injection doesn't fire on schedule.~~ **RESOLVED (FEATURE 8).** The single engine runs the behavioural protection by briefly stepping down to the user's identity; deletion of the skill file is now auto-healed on schedule (verified green on hardware 2026-05-31).
 4. **AMFI premise** (path-rotation defeats CDHash cache) verified empirically once. Apple could change this in a future macOS version; would require redesign.
 5. **The 3-step uninstall ritual's passages are embedded source.** A user who reads the source can paste them. The defense is the multi-hour wait, not the typing per se.
 6. **The "user-typed-it-back" exemption in the redaction rule** was removed after security review pointed out it's circular (if disguise works, user doesn't know the string; correcting a near-miss reveals it).
+7. **Customized settings don't pick up new shipped defaults.** When focusd ships a new default for a feature you've customized via an on-disk override, your override keeps your old value — focusd won't silently overwrite your choice, but it also won't merge in the new default. You must update the override to adopt new defaults. (Caught in practice: a release shipped the full Steam domain list, but an install whose override still held the old short list kept blocking only the short list until the override was refreshed.)
+8. **Single engine = shared fate.** If the one protection engine crashes, all protections pause for the few seconds it takes to auto-restart (the previous two-engine design failed independently). Accepted trade for simplicity — see ADR-0010.
+9. **Console-user assumption.** The step-down-to-user mechanism assumes one primary person at the keyboard; during login-window / fast-user-switch it correctly waits rather than mis-writing, and a shared/multi-user Mac is out of scope.
 
 ---
 
