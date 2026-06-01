@@ -10,6 +10,9 @@ func TestResolveUpdateWorkdir(t *testing.T) {
 	discoverOK := func() (string, error) { return "/disguised/wd", nil }
 	discoverNone := func() (string, error) { return "", nil }
 	discoverErr := func() (string, error) { return "", errors.New("permission denied") }
+	// discoverPanic enforces that discovery is NOT called when an explicit
+	// --workdir override is given (it would panic the test if reached).
+	discoverPanic := func() (string, error) { panic("discover must not be called for an explicit override") }
 
 	cases := []struct {
 		name     string
@@ -18,11 +21,10 @@ func TestResolveUpdateWorkdir(t *testing.T) {
 		want     string
 		wantErr  bool
 	}{
-		{"explicit override honored, skips discovery", "/x", discoverOK, "/x", false},
-		{"discovered real install shadows the stale default", def, discoverOK, "/disguised/wd", false},
-		{"default + discovery finds nothing falls back to default", def, discoverNone, def, false},
-		{"discovery I/O error fails fast", def, discoverErr, "", true},
-		{"explicit override skips discovery even when discovery would error", "/x", discoverErr, "/x", false},
+		{"explicit override honored, discovery NOT called", "/x", discoverPanic, "/x", false},
+		{"no override: discovered install wins over default", "", discoverOK, "/disguised/wd", false},
+		{"no override: discovery finds nothing falls back to default", "", discoverNone, def, false},
+		{"no override: discovery I/O error fails fast", "", discoverErr, "", true},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {

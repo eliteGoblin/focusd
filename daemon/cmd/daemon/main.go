@@ -238,19 +238,23 @@ func doUpdate(args []string) int {
 	// arg without a `-` prefix" scan was wrong for `--flag value` form,
 	// where `value` is non-flag but not the version. Go-review HIGH #2.
 	fs := flag.NewFlagSet("update", flag.ContinueOnError)
-	wd := fs.String("workdir", defaultWorkdir(), "daemon work directory")
+	// --workdir defaults to "" (NOT the default path) so an explicit
+	// override is detectable, matching `self-update`/`status`. Empty means
+	// "discover the running install"; a non-empty value is an explicit
+	// target the operator chose.
+	wd := fs.String("workdir", "", "explicit daemon work directory (default: discover the running install)")
 	gh := fs.String("github", "eliteGoblin/focusd", "owner/repo (for `update` with no version arg)")
 	as := fs.String("asset", "", "release asset filename")
 	_ = fs.Parse(args)
 	explicit := fs.Arg(0) // optional positional version, e.g. v1.2.3
 
-	// A real install relocates its workdir to a disguised, random path, so
-	// the default workdir is empty on such systems. When the caller did not
-	// point us at an explicit workdir AND none lives at the default, discover
-	// the genuine install (same Ed25519 recognition `self-update` uses) and
-	// target it. The disguised path stays INTERNAL to this process — it is
-	// never written to the log/output here. A discovery I/O error (e.g.
-	// permission) fails fast rather than silently writing to the wrong place.
+	// Resolve the target workdir. A real install relocates to a disguised,
+	// random path, so by default we DISCOVER the running mesh's workdir
+	// (same Ed25519 recognition `self-update` uses) — discovery WINS over
+	// any stale install at the default location. An explicit --workdir is
+	// always honored. The disguised path stays INTERNAL to this process; it
+	// is never logged/printed. A discovery I/O error fails fast rather than
+	// silently writing to the wrong place.
 	workdir, derr := resolveUpdateWorkdir(*wd, defaultWorkdir(), discoverInstallWorkdir)
 	if derr != nil {
 		fmt.Fprintln(os.Stderr,
@@ -302,24 +306,21 @@ func doUpdate(args []string) int {
 
 // resolveUpdateWorkdir picks the workdir `daemon update` writes to. An
 // explicit (non-default) --workdir is always honored. Otherwise, if a
-// genuine install already lives at the default workdir, use it; if not,
-// discover the real (possibly disguised/relocated) install. Pure +
-// injectable so the precedence is unit-tested without touching launchd.
-// A discovery I/O error is propagated (caller fails fast) so we never
-// silently write to the wrong workdir; "no install found" (nil error,
-// empty path) falls back to the default.
+// install. Precedence: an explicit (non-empty) --workdir is always
+// honored; otherwise DISCOVERY of the real (possibly disguised/relocated)
+// install WINS over the default location — a stale install left at the
+// default must NOT shadow the running mesh (that bug wrote `desired` to the
+// wrong place and the platform never upgraded). Only when discovery finds
+// nothing do we fall back to defaultWd. A discovery I/O error is propagated
+// so the caller fails fast instead of silently writing to the wrong place.
+// Pure + injectable so the precedence is unit-tested without touching launchd.
 func resolveUpdateWorkdir(explicitWd, defaultWd string, discover func() (string, error)) (string, error) {
-	if explicitWd != defaultWd {
-		return explicitWd, nil // caller pointed us somewhere explicit
+	if explicitWd != "" {
+		return explicitWd, nil // operator chose an explicit target
 	}
-	// Discovery WINS over the default. A real install relocates to a
-	// disguised path, so the running mesh's workdir is the authoritative
-	// target; a stale install left at the default location must NOT shadow
-	// it (that bug wrote `desired` to the wrong place and the platform never
-	// upgraded). A genuine I/O error during discovery is fatal — fail fast.
 	wd, err := discover()
 	if err != nil {
-		return "", err
+		return "", err // I/O failure during discovery — fail fast
 	}
 	if wd != "" {
 		return wd, nil // the real, running, discovered install wins
