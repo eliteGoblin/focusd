@@ -231,6 +231,37 @@ func loop(args []string, once bool) int {
 // + swaps via the normal EnsureRunning path (which is fetch-then-stop
 // — see executor.go). This command itself is a thin write + (optional)
 // one-shot resolve; it does NOT loop on ticks or wipe state.
+// resolveUpdateWorkdir picks the workdir `daemon update` writes to. An
+// explicit (non-default) --workdir is always honored. Otherwise, if a
+// genuine install already lives at the default workdir, use it; if not,
+// fall back to discovering the real (possibly disguised/relocated) install.
+// Pure + injectable so the precedence is unit-tested without touching
+// launchd. The disguised path is only ever used internally, never printed.
+func resolveUpdateWorkdir(explicitWd, defaultWd string, hasInstall func(dir string) bool, discover func() (string, bool)) string {
+	if explicitWd != defaultWd {
+		return explicitWd // caller pointed us somewhere explicit
+	}
+	if hasInstall(explicitWd) {
+		return explicitWd // an install already lives at the default
+	}
+	if wd, ok := discover(); ok && wd != "" {
+		return wd
+	}
+	return explicitWd
+}
+
+// discoverInstallWorkdir finds the genuine focusd install for the current
+// mode via Ed25519 recognition (nil verifier => sig.VerifyFile) and returns
+// its workdir. Returns ("", false) when no install is found or discovery is
+// unsupported (non-darwin). Never logs or prints the path.
+func discoverInstallWorkdir() (string, bool) {
+	cur, err := osadapter.FindCurrentInstall(mode.Resolve(), nil)
+	if err != nil || cur.Workdir == "" {
+		return "", false
+	}
+	return cur.Workdir, true
+}
+
 func doUpdate(args []string) int {
 	// Use a dedicated FlagSet so we can correctly pick up the trailing
 	// positional version after all flags (handles `--workdir=/x v1.0.0`
@@ -244,7 +275,18 @@ func doUpdate(args []string) int {
 	_ = fs.Parse(args)
 	explicit := fs.Arg(0) // optional positional version, e.g. v1.2.3
 
-	o := opts{workdir: *wd, github: *gh, asset: *as}
+	// A real install relocates its workdir to a disguised, random path, so
+	// the default workdir is empty on such systems. When the caller did not
+	// point us at an explicit workdir AND none lives at the default, discover
+	// the genuine install (same Ed25519 recognition `self-update` uses) and
+	// target it. The disguised path stays INTERNAL — it is never printed.
+	workdir := resolveUpdateWorkdir(
+		*wd, defaultWorkdir(),
+		func(dir string) bool { return (&core.Store{Dir: dir}).HaveConfig() },
+		discoverInstallWorkdir,
+	)
+
+	o := opts{workdir: workdir, github: *gh, asset: *as}
 	_, log := build(o)
 
 	st := &core.Store{Dir: o.workdir}
