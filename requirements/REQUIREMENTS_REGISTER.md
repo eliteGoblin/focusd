@@ -7,7 +7,7 @@
 
 - **Want context fast?** Read §1 (mission), §2 (personas), §3 (threat model). That's the *why*.
 - **Want the feature list?** §4 is the register — features with motivation, acceptance, status, and the honest limitations of each.
-- **Want to know how the design choices fit together?** §5 (cross-cutting principles).
+- **Want to know how the design choices fit together?** §5 (cross-cutting principles) — incl. the cross-platform-Go / interface-at-the-OS-seam engineering principle.
 - **Want to know what's NOT defended?** §6 — the honest holes.
 - **Coming back after a long break?** §10 (glossary) + §9 (open follow-ups) catch you up fast.
 - **Need deep code-level detail?** This doc is the index; deep dives live at:
@@ -76,6 +76,7 @@ The two-faced nature of the user is the key insight. Most security designs assum
 | **network-block plugin** | Reconciles `pfctl` table with DoH-resolved Steam IPs every 30m | Defense-in-depth: direct-IP traffic (bypassing DNS) caught at kernel packet filter | ✅ shipped (FEATURE 4); disabled by default, enabled via override config | Manual prereqs (pf anchor + /etc/pf.conf entry); IPs rotate; reconciler keeps it current |
 | **Daemon bug fixes** | Bug 1 (config staleness), Bug 2 (atomic install + rollback), Bug 3 (no auto-resolve from reconcile loop) | Foundational reliability fixes | ✅ shipped (v0.10.0 + daemon-v0.1.0) | None outstanding |
 | **`daemon status` health snapshot** | Read-only health read that NEVER leaks disguised tokens — closes the "indirect question whose answer is a bypass recipe" path. `daemon status` reports only daemon-owned facts (mesh roles up / platform process / version) and **delegates** plugin/protection detail to a new `platform status`, so the daemon stays plugin-agnostic (KISS) | 🔧 in build (FEATURE 9, #42; redaction structural per ADR-0011; KISS layering per ADR-0012) | Status is a read, not a protection; per-protection recency is a last-run-status proxy (not a live re-probe) per ADR-0012; mesh/admin lines read "unknown" without sudo; age buckets coarse by design |
+| **Platform singleton enforcement (daemon-held flock)** | Both mesh roles were independently starting a platform → two platforms on one healthy install (double plugin runs + DB contention; surfaced by `daemon status`). A crash-safe OS advisory lock held by the **daemon** lets exactly one daemon supervise the single platform; the loser starts nothing | 🔧 in build (daemon-v0.5.x; daemon-layer only; decision per ADR-0013) | Only macOS double-launches today (mesh is macOS-only); Windows/Linux carry the lock for future-readiness with no mesh yet to dedup |
 
 ---
 
@@ -99,6 +100,27 @@ No single layer is sufficient. The model assumes any one layer might be defeated
 - File layer (kill-steam) → catches on-disk reinstall
 - Identity layer (Ed25519) → catches fake-release injection
 - Behavioral layer (skill + redaction rule) → catches Claude-mediated bypass
+
+### Cross-platform Go, interface at the OS seam
+focusd's daemon and platform are written in Go and are meant to run on **three**
+platforms: macOS, Windows, and Linux. macOS is the only real deployment today;
+Windows and Linux are in the build matrix and are the future target. The standing rule:
+
+- **Default to portable.** Write code that works across all three platforms.
+- **Interface at the OS seam.** When an OS-level primitive is *not* portable,
+  define a port (an interface) with one adapter per OS behind it — rather than
+  scattering OS-specific calls inline throughout the code.
+- **Prefer a vetted library over hand-rolled per-OS code** *when* the architect
+  endorses it AND it preserves focusd's hard constraint of trivial, dependency-free
+  cross-compilation (no native-toolchain build step).
+- **KISS governs the call.** If the simplest correct path is to build the
+  interface, build it; don't over-abstract, but don't bury non-portable calls
+  inline either.
+
+First worked example: the platform-singleton (single-instance lock) decision —
+captured in **ADR-0013** (`decisions/0013-platform-singleton-daemon-flock.md`):
+a daemon-held, crash-safe advisory lock expressed as one port with a per-OS
+adapter, reusing the dependency already present.
 
 ### Honest caveats are first-class
 Every commit message + every PR description includes an explicit "honest" or "honesty" section. Pretending defenses are stronger than they are weakens the user's calibration. Examples: "AMFI premise unverified until smoke test", "private key still on disk", "the disguise is theater against me specifically", "this is friction not crypto".
@@ -186,4 +208,4 @@ Platform releases ship bundled plugin binaries embedded via `//go:embed` (`platf
 
 ---
 
-*Last updated: 2026-05-29. Maintainer: Frank Sun + Claude (joint).*
+*Last updated: 2026-06-01. Maintainer: Frank Sun + Claude (joint).*

@@ -171,7 +171,11 @@ func build(o opts) (*core.Executor, *slog.Logger) {
 	if o.unhealthy > 0 {
 		p.Unhealthy = o.unhealthy
 	}
-	return core.NewExecutor(st, f, p, log), log
+	// Crash-safe singleton lock held by the daemon: only the reconcile loop
+	// (loop()->Tick->apply) ever acquires it, electing one platform supervisor
+	// across the A/B mesh roles. Non-ticking callers (update/install) construct
+	// but never acquire. NewFileLock's zero value is unlocked.
+	return core.NewExecutor(st, f, p, core.NewFileLock(), log), log
 }
 
 func loop(args []string, once bool) int {
@@ -179,6 +183,14 @@ func loop(args []string, once bool) int {
 	e, log := build(o)
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
+	// NOTE: we deliberately do NOT release the singleton lock early on
+	// shutdown. The platform child is NOT stopped here (it persists for
+	// protection continuity), and on a launchd bootout the kernel kills our
+	// whole process group — so the platform dies as this process exits. The
+	// fd-tied lock is freed by the kernel at process exit, which orders AFTER
+	// that teardown — so a standby cannot acquire the lock and start a second
+	// platform while ours is still alive. Releasing early (before exit) would
+	// reopen exactly that duplicate-platform window. (Copilot review.)
 
 	self, _ := os.Executable()
 	spec := o.spec(self)
