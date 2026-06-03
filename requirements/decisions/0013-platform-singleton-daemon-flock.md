@@ -71,6 +71,20 @@ macOS-only. Windows and Linux ship the lock for correctness and future
 readiness, but they have no mesh yet, so there is nothing for it to deduplicate
 on those platforms right now.
 
+A residual edge remains because the platform child is intentionally NOT stopped
+when its supervising daemon exits (the platform persists for protection
+continuity). The lock is fd-tied, so it is freed by the kernel at the daemon's
+process exit. In the normal cases this is clean: in steady state exactly one
+daemon supervises one platform; and a launchd bootout (the rotation path used by
+self-update) kills the daemon's whole process group, so the platform dies with
+it before the lock frees. The gap is an ungraceful daemon CRASH (panic) that is
+NOT a group-kill: the platform it started is reparented and keeps running while
+launchd respawns the daemon, which then wins the freed lock and starts a second
+platform -- a transient duplicate until the orphan is reaped. This is rare
+(the daemon is small, stable code) and strictly better than the prior
+always-two state. A future hardening could have the lock winner reap any
+pre-existing platform before starting, fully closing the orphan window.
+
 ## References
 - Single-mesh lineage: `0010-single-mesh-fail-fast.md`
 - Status command that surfaced the double-launch: `0012-status-delegates-to-platform.md`

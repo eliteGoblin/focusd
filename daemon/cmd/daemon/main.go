@@ -183,10 +183,14 @@ func loop(args []string, once bool) int {
 	e, log := build(o)
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
-	// Release the singleton lock on graceful shutdown so a standby mesh role
-	// can take over immediately rather than waiting for the kernel to notice
-	// our fd closed. Harmless no-op if this role never won the lock.
-	defer e.Lock.Release()
+	// NOTE: we deliberately do NOT release the singleton lock early on
+	// shutdown. The platform child is NOT stopped here (it persists for
+	// protection continuity), and on a launchd bootout the kernel kills our
+	// whole process group — so the platform dies as this process exits. The
+	// fd-tied lock is freed by the kernel at process exit, which orders AFTER
+	// that teardown — so a standby cannot acquire the lock and start a second
+	// platform while ours is still alive. Releasing early (before exit) would
+	// reopen exactly that duplicate-platform window. (Copilot review.)
 
 	self, _ := os.Executable()
 	spec := o.spec(self)
