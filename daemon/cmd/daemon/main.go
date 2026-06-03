@@ -171,7 +171,11 @@ func build(o opts) (*core.Executor, *slog.Logger) {
 	if o.unhealthy > 0 {
 		p.Unhealthy = o.unhealthy
 	}
-	return core.NewExecutor(st, f, p, log), log
+	// Crash-safe singleton lock held by the daemon: only the reconcile loop
+	// (loop()->Tick->apply) ever acquires it, electing one platform supervisor
+	// across the A/B mesh roles. Non-ticking callers (update/install) construct
+	// but never acquire. NewFileLock's zero value is unlocked.
+	return core.NewExecutor(st, f, p, core.NewFileLock(), log), log
 }
 
 func loop(args []string, once bool) int {
@@ -179,6 +183,10 @@ func loop(args []string, once bool) int {
 	e, log := build(o)
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
+	// Release the singleton lock on graceful shutdown so a standby mesh role
+	// can take over immediately rather than waiting for the kernel to notice
+	// our fd closed. Harmless no-op if this role never won the lock.
+	defer e.Lock.Release()
 
 	self, _ := os.Executable()
 	spec := o.spec(self)

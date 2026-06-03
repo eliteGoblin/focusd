@@ -82,12 +82,28 @@ func (p *fakePlat) Stop() error {
 func (p *fakePlat) CrashedQuickly(v string) bool { return v == p.crashV }
 func (p *fakePlat) HealthyFor(v string) bool     { return v == p.healthyV }
 
+// fakeLock is a ProcessLock stub. acquireOK/acquireErr are the canned
+// TryAcquire result; calls counts how many times TryAcquire was invoked so a
+// test can assert the lock is acquired exactly once and then held.
+type fakeLock struct {
+	acquireOK  bool
+	acquireErr error
+	calls      int
+}
+
+func (l *fakeLock) TryAcquire(string) (bool, error) {
+	l.calls++
+	return l.acquireOK, l.acquireErr
+}
+func (l *fakeLock) Release() error { return nil }
+
 func newExec(t *testing.T) (*Executor, *Store, *fakeFetch, *fakePlat) {
 	t.Helper()
 	st := &Store{Dir: t.TempDir()}
 	f := &fakeFetch{}
 	p := &fakePlat{}
-	return NewExecutor(st, f, p, nil), st, f, p
+	// Default lock wins (ok=true) so existing tests behave exactly as before.
+	return NewExecutor(st, f, p, &fakeLock{acquireOK: true}, nil), st, f, p
 }
 
 // With no version config, the reconcile loop must be Blocked — NOT
@@ -212,7 +228,7 @@ func TestExecutorSwitchStopsOldStartsNew(t *testing.T) {
 
 func TestExecutorObserveErrorPropagates(t *testing.T) {
 	st := &Store{Dir: t.TempDir()}
-	e := NewExecutor(st, &fakeFetch{}, &errPlat{}, nil)
+	e := NewExecutor(st, &fakeFetch{}, &errPlat{}, &fakeLock{acquireOK: true}, nil)
 	if _, err := e.Tick(context.Background()); err == nil {
 		t.Fatal("observe error must propagate")
 	}
@@ -238,7 +254,7 @@ func TestExecutorReconcileNeverHitsNetworkWithNoDesired(t *testing.T) {
 	st := &Store{Dir: t.TempDir()}
 	f := &fakeFetch{panicOnAny: true}
 	p := &fakePlat{}
-	e := NewExecutor(st, f, p, nil)
+	e := NewExecutor(st, f, p, &fakeLock{acquireOK: true}, nil)
 
 	// No WriteDesired call: version.json is absent → HaveConfig == false.
 	a, err := e.Tick(context.Background())
@@ -277,7 +293,7 @@ func TestExecutorFetchFailureDoesNotTouchRunningPlatform(t *testing.T) {
 	wantErr := errors.New("simulated signature mismatch on v2")
 	f := &fakeFetch{ensureErr: map[string]error{"v2": wantErr}}
 	p := &fakePlat{running: "v1"}
-	e := NewExecutor(st, f, p, nil)
+	e := NewExecutor(st, f, p, &fakeLock{acquireOK: true}, nil)
 
 	_, err := e.Tick(context.Background())
 	if err == nil || !errors.Is(err, wantErr) {
@@ -325,7 +341,7 @@ func TestExecutorStartFailureRollsBackToPrevRunning(t *testing.T) {
 		running:  "v1",
 		startErr: map[string]error{"v2": startV2Err},
 	}
-	e := NewExecutor(st, f, p, nil)
+	e := NewExecutor(st, f, p, &fakeLock{acquireOK: true}, nil)
 
 	_, err := e.Tick(context.Background())
 	if err == nil || !errors.Is(err, startV2Err) {
@@ -372,7 +388,7 @@ func TestExecutorStartFailureRollbackAlsoFailsLeavesNothingRunning(t *testing.T)
 			"v1": startV1Err,
 		},
 	}
-	e := NewExecutor(st, f, p, nil)
+	e := NewExecutor(st, f, p, &fakeLock{acquireOK: true}, nil)
 
 	_, err := e.Tick(context.Background())
 	// The contract: the ORIGINAL Start error is what bubbles up — the
@@ -393,5 +409,118 @@ func TestExecutorStartFailureRollbackAlsoFailsLeavesNothingRunning(t *testing.T)
 	// re-populated it.
 	if p.running != "" {
 		t.Fatalf("both starts failed ⇒ running=\"\", got %q", p.running)
+	}
+}
+
+// --- Singleton lock: only the daemon that wins the lock starts a platform ---
+//
+// (a) Lock won (TryAcquire ok=true) ⇒ apply proceeds to Plat.Start, exactly
+// as the existing happy path. Also proves the lock is consulted before Start.
+func TestExecutorLockWonStartsPlatform(t *testing.T) {
+	st := &Store{Dir: t.TempDir()}
+	if err := st.WriteDesired("v1"); err != nil {
+		t.Fatal(err)
+	}
+	f := &fakeFetch{}
+	p := &fakePlat{}
+	lk := &fakeLock{acquireOK: true}
+	e := NewExecutor(st, f, p, lk, nil)
+
+	a, err := e.Tick(context.Background())
+	if err != nil || a.Kind != EnsureRunning {
+		t.Fatalf("lock won ⇒ EnsureRunning, got %+v err=%v", a, err)
+	}
+	if p.running != "v1" {
+		t.Fatalf("lock won ⇒ platform must start, running=%q", p.running)
+	}
+	if lk.calls != 1 {
+		t.Fatalf("lock must be acquired once, calls=%d", lk.calls)
+	}
+}
+
+// (b) Regression — the false-rollback guard. The loser daemon (TryAcquire
+// ok=false) must yield: apply returns nil, Plat.Start is NEVER called, nothing
+// is stopped, and across crashThreshold consecutive ticks the crash counter /
+// MarkBad is NEVER hit. Because the loser launches no child, there is no
+// phantom exit for the uptime-based crash detector to misread as a crash.
+func TestExecutorLockLostYieldsAndNeverRollsBack(t *testing.T) {
+	st := &Store{Dir: t.TempDir()}
+	if err := st.WriteDesired("v2"); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.WriteGood("v1"); err != nil {
+		t.Fatal(err)
+	}
+	f := &fakeFetch{}
+	p := &fakePlat{} // loser observes nothing running and starts nothing
+	lk := &fakeLock{acquireOK: false}
+	e := NewExecutor(st, f, p, lk, nil)
+
+	for i := 0; i < crashThreshold; i++ {
+		a, err := e.Tick(context.Background())
+		if err != nil {
+			t.Fatalf("tick %d: yield must not error, got %v", i, err)
+		}
+		if a.Kind != EnsureRunning {
+			t.Fatalf("tick %d: Decide still wants EnsureRunning, got %+v", i, a)
+		}
+	}
+	if len(p.started) != 0 || p.stopped != 0 {
+		t.Fatalf("loser must not touch platform: started=%v stopped=%d", p.started, p.stopped)
+	}
+	if st.BadSet()["v2"] {
+		t.Fatal("loser must NEVER mark v2 bad — no child means no phantom crash")
+	}
+	if got := e.crashHit["v2"]; got != 0 {
+		t.Fatalf("loser must never accrue crash hits, got crashHit[v2]=%d", got)
+	}
+	// The loser must re-try the lock EVERY tick (it never sets holdsLock), so
+	// it takes over the instant the holder dies. If holdsLock were wrongly set
+	// on a yield, calls would stop at 1 and the loser would be silently
+	// promoted on a future acquire.
+	if lk.calls != crashThreshold {
+		t.Fatalf("loser must re-try lock every tick: calls=%d want %d", lk.calls, crashThreshold)
+	}
+}
+
+// (c) The lock is acquired ONCE then held — subsequent ticks do not re-acquire.
+func TestExecutorLockHeldAfterFirstAcquire(t *testing.T) {
+	st := &Store{Dir: t.TempDir()}
+	if err := st.WriteDesired("v1"); err != nil {
+		t.Fatal(err)
+	}
+	f := &fakeFetch{}
+	p := &fakePlat{}
+	lk := &fakeLock{acquireOK: true}
+	e := NewExecutor(st, f, p, lk, nil)
+
+	for i := 0; i < 3; i++ {
+		if _, err := e.Tick(context.Background()); err != nil {
+			t.Fatalf("tick %d: %v", i, err)
+		}
+	}
+	if lk.calls != 1 {
+		t.Fatalf("lock must be acquired once and held, calls=%d", lk.calls)
+	}
+}
+
+// (d) A real I/O failure from TryAcquire surfaces as an error from apply.
+func TestExecutorLockAcquireErrorPropagates(t *testing.T) {
+	st := &Store{Dir: t.TempDir()}
+	if err := st.WriteDesired("v1"); err != nil {
+		t.Fatal(err)
+	}
+	f := &fakeFetch{}
+	p := &fakePlat{}
+	wantErr := errors.New("flock I/O failure")
+	lk := &fakeLock{acquireErr: wantErr}
+	e := NewExecutor(st, f, p, lk, nil)
+
+	_, err := e.Tick(context.Background())
+	if err == nil || !errors.Is(err, wantErr) {
+		t.Fatalf("lock error must propagate, got %v", err)
+	}
+	if len(p.started) != 0 {
+		t.Fatalf("lock error ⇒ platform must not start, started=%v", p.started)
 	}
 }

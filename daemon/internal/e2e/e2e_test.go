@@ -104,7 +104,7 @@ func TestDaemonE2E_DownloadRunRollback(t *testing.T) {
 	ps := platformsvc.New(wd)
 	ps.Healthy = 400 * time.Millisecond
 	ps.Unhealthy = 300 * time.Millisecond
-	ex := core.NewExecutor(st, &fetch.Local{Dir: rel}, ps, nil)
+	ex := core.NewExecutor(st, &fetch.Local{Dir: rel}, ps, core.NewFileLock(), nil)
 
 	tick := func() core.Action {
 		a, err := ex.Tick(context.Background())

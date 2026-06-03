@@ -39,17 +39,22 @@ type Executor struct {
 	Store    *Store
 	Fetch    Fetcher
 	Plat     Platform
+	Lock     ProcessLock
 	Log      *slog.Logger
 	crashHit map[string]int // in-memory consecutive fast-exits per version
 	// lastTarget is the version this executor last drove the platform
 	// to (EnsureRunning/Rollback target). Crash detection keys off this
 	// so a version that crashes instantly is still caught.
 	lastTarget string
+	// holdsLock records that this executor already won the singleton lock.
+	// The lock is acquired ONCE (its fd stays open for the executor's
+	// lifetime) so later ticks skip re-acquisition.
+	holdsLock bool
 }
 
 // New builds an Executor.
-func NewExecutor(st *Store, f Fetcher, p Platform, log *slog.Logger) *Executor {
-	return &Executor{Store: st, Fetch: f, Plat: p, Log: log, crashHit: map[string]int{}}
+func NewExecutor(st *Store, f Fetcher, p Platform, lk ProcessLock, log *slog.Logger) *Executor {
+	return &Executor{Store: st, Fetch: f, Plat: p, Lock: lk, Log: log, crashHit: map[string]int{}}
 }
 
 const crashThreshold = 3 // consecutive fast exits ⇒ mark version bad
@@ -108,6 +113,26 @@ func (e *Executor) apply(ctx context.Context, a Action) error {
 	switch a.Kind {
 	case EnsureRunning, Rollback:
 		v := a.Target
+
+		// Step 0 — singleton gate. Single-mesh runs daemon roles A and B as
+		// independent processes; each would otherwise start its OWN platform
+		// child on the shared workdir. A crash-safe, fd-tied OS advisory lock
+		// (held by the DAEMON, not the platform) elects exactly one. The
+		// winner supervises the single platform; the loser yields quietly and
+		// starts NOTHING — so there is no phantom child exit for the uptime-
+		// based crash detector to misread as a crash (no false rollback).
+		// Acquired ONCE before any Stop/Start so a standby never tears down
+		// the holder's child; the fd stays open for the executor's lifetime.
+		if !e.holdsLock {
+			ok, err := e.Lock.TryAcquire(e.Store.LockPath())
+			if err != nil {
+				return fmt.Errorf("singleton lock: %w", err)
+			}
+			if !ok {
+				return nil // peer owns the platform; yield (NOT a crash, NOT Blocked)
+			}
+			e.holdsLock = true
+		}
 
 		// Step 1 — ensure the new binary is on disk AND Ed25519-verified
 		// BEFORE we touch the running platform. If the fetch fails (e.g.

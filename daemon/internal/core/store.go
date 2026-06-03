@@ -35,6 +35,11 @@ func (s *Store) BinPath(v string) string {
 	return filepath.Join(s.Dir, "bin", v, "platform")
 }
 
+// LockPath is the singleton-lock file the winning daemon holds for the
+// lifetime of its platform child. fd-tied advisory lock ⇒ kernel auto-
+// releases on holder death, so a standby's next tick takes over.
+func (s *Store) LockPath() string { return filepath.Join(s.Dir, "platform.lock") }
+
 // HaveBin reports whether the platform binary for v exists.
 func (s *Store) HaveBin(v string) bool {
 	fi, err := os.Stat(s.BinPath(v))
