@@ -198,14 +198,14 @@ func runSelfUpdate(o selfUpdateOpts) int {
 		return 1
 	}
 	newRoster := relocate.GenerateRoster()
-	// Preserve the install-time --interval instead of clobbering it
-	// with the package default. Operators who tuned it (e.g. via
-	// `daemon install --interval 30s`) shouldn't see cadence change
-	// silently across self-update. Copilot #6.
-	interval := cur.Interval
-	if interval == 0 {
-		interval = defaultInterval
-	}
+	// FEATURE 10 / ADR-0014: the worker heal cadence is a ~2s SECURITY
+	// constant (it closes the manual-removal whack-a-mole loophole), NOT an
+	// operator preference. FORCE it on every self-update so (a) migrating an
+	// OLD pre-F10 mesh that ran at 10s upgrades to the fast heal, and (b) a
+	// tuned/stale --interval can't carry a slow cadence forward and reopen
+	// the gap. (Supersedes the earlier "preserve operator interval" note —
+	// that predated the security framing.)
+	interval := workerHealInterval
 	newSpec := osadapter.Spec{
 		Mode:     invokeMode,
 		SelfPath: newPath,
@@ -279,10 +279,3 @@ func sudoHintFor(m mode.Mode) string {
 	}
 	return "no sudo"
 }
-
-// defaultInterval is the reconcile interval baked into self-update's
-// new plists. Matches the rest of the daemon CLI's default; kept as a
-// named constant rather than a CLI flag because operators rarely need
-// to retune it and the install-time value is already baked into the
-// old plists this code is replacing.
-const defaultInterval = 10 * time.Second

@@ -94,6 +94,11 @@ func Plist(s Spec, r Role) string {
 		fmt.Fprintf(&sb, "  <key>StartInterval</key><integer>%d</integer>\n", intervalSeconds(s))
 	} else {
 		sb.WriteString("  <key>KeepAlive</key><true/>\n")
+		// FEATURE 10 / ADR-0014: override launchd's 10s default respawn
+		// throttle so a KILLED worker is relaunched in ~1s, not ~10s — the
+		// process-kill half of the manual-bypass loophole. KeepAlive workers
+		// are stable, so a low throttle does not cause respawn churn.
+		sb.WriteString("  <key>ThrottleInterval</key><integer>1</integer>\n")
 	}
 	sb.WriteString("  <key>ProcessType</key><string>Background</string>\n")
 	fmt.Fprintf(&sb, "  <key>StandardErrorPath</key><string>%s/daemon.log</string>\n", s.Workdir)

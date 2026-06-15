@@ -395,7 +395,6 @@ func doInstall(args []string) int {
 	wd := fs.String("workdir", defaultWorkdir(), "daemon work directory")
 	gh := fs.String("github", "eliteGoblin/focusd", "owner/repo")
 	as := fs.String("asset", "", "release asset filename")
-	iv := fs.Duration("interval", 10*time.Second, "reconcile interval")
 	desired := fs.String("v", "",
 		"REQUIRED desired platform version (e.g. v0.9.0) — the daemon does NOT auto-resolve from GitHub")
 	wantTest := registerTestMode(fs) // --test-mode only under -tags e2e
@@ -439,9 +438,13 @@ func doInstall(args []string) int {
 	}
 	spec := osadapter.Spec{
 		Mode: m, SelfPath: self, Workdir: *wd,
-		Github: *gh, Asset: *as, Interval: *iv,
-		// FEATURE 10 / ADR-0014: the ensurer's launchd StartInterval is
-		// the slower backstop, DECOUPLED from the fast worker --interval.
+		Github: *gh, Asset: *as,
+		// FEATURE 10 / ADR-0014: the worker heal cadence is a FIXED ~2s
+		// security constant (it closes the manual-removal whack-a-mole), baked
+		// into the worker plists — NOT an operator knob (a stale --interval
+		// must not be able to reopen the loophole). The ensurer's launchd
+		// StartInterval stays the slower backstop, DECOUPLED from it.
+		Interval:       workerHealInterval,
 		EnsureInterval: osadapter.EnsureBackstopInterval,
 	}
 	if m != mode.Test {
