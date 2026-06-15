@@ -17,10 +17,10 @@ Modern apps are designed like slot machines - engineered to capture attention an
 └─────────────────────────────────────────────────────────────┘
                             │
 ┌─────────────────────────────────────────────────────────────┐
-│  Layer 2: App Blocking (appmon)                             │
+│  Layer 2: App/Site Blocking (daemon + platform + plugins)   │
 │  - Kills Steam/Dota2 processes automatically                │
-│  - Deletes app files if reinstalled                         │
-│  - Self-protecting dual-daemon architecture                 │
+│  - Host-file + pfctl packet blocking                        │
+│  - Self-protecting single launchd mesh                      │
 └─────────────────────────────────────────────────────────────┘
 ```
 
@@ -38,25 +38,26 @@ Blocks gaming domains at the network level for all devices on your network.
 
 ---
 
-## Layer 2: App Blocking (appmon)
+## Layer 2: App/Site Blocking (daemon + platform + plugins)
 
-Automatically kills processes and deletes files for blocked apps (Steam, Dota2).
+A self-protecting **daemon** keeps a cross-platform **platform** engine running;
+the platform enforces policy through **plugins** (kill Steam/Dota2, host-file and
+pfctl blocking, Claude-skill re-injection, browser-tab guarding).
 
 **Features:**
-- Kills blocked processes every 10 minutes
-- Deletes app bundles and game files
-- Self-protecting dual-daemon (watcher + guardian)
-- Auto-starts on login via LaunchAgent
+- Kills blocked processes on a schedule
+- Host-file + pfctl packet blocking of gaming domains
+- Self-protecting single launchd mesh with path-rotating self-update
+- Drives toward a signed desired state (enforcement is tighten-only)
 - No stop command (intentional friction)
 
 **Quick Start:**
 ```bash
-cd app_mon
-make build
-./build/appmon start
+# Build the platform (bundles plugins first)
+./scripts/build-platform.sh
 ```
 
-**Documentation:** [app_mon README](app_mon/README.md)
+**Documentation:** see [`requirements/`](requirements/) (features, ADRs, register).
 
 ---
 
@@ -74,11 +75,13 @@ make build
 
 ```
 focusd/
-├── app_mon/                    # App blocking daemon
+├── daemon/                     # Layer-1 supervisor (Go) — keeps platform running
+├── platform/                   # Cross-platform protection engine (Go)
+├── plugins/                    # Enforcement plugins (Go)
 ├── artifacts/
 │   └── managed_dns/
 │       └── next_dns.md         # NextDNS setup guide
-├── requirements/               # Feature specifications
+├── requirements/               # Product/BA docs: features, ADRs, register
 └── archive/                    # Deprecated tools
     └── chrome/                 # Chrome extension enforcer (deprecated)
 ```

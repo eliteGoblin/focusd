@@ -6,7 +6,7 @@
 //
 // Decide is a pure function (no I/O) so every scenario is exhaustively
 // unit-tested; all side effects live behind the Actuator seam in
-// engine.go. See app_mon/documents/design/self_protecting_reconcile_platform.md.
+// engine.go. See requirements/decisions/ (ADRs) for the design rationale.
 package reconcile
 
 // Desired is the intent, read from the signed (future: remote) policy.
