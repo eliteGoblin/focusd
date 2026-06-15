@@ -1,3 +1,5 @@
+//go:build darwin
+
 package reconciler
 
 import (
@@ -16,6 +18,37 @@ func TestListProcessesRealIsSafe(t *testing.T) {
 	}
 	if len(procs) == 0 {
 		t.Error("expected at least this test process")
+	}
+	// Every returned proc must carry a usable identity (name, since the
+	// sysctl path leaves Path empty) and a real pid.
+	for _, p := range procs {
+		if p.PID <= 0 || p.Name == "" {
+			t.Errorf("malformed procView %+v (pid>0 and Name required)", p)
+			break
+		}
+	}
+}
+
+// Regression guard for the CGO_ENABLED=0 timeout bug: the gopsutil-based
+// scan fell back to spawning `lsof -p` per process (~26s for ~850 procs),
+// blowing past the 20s platform job timeout so the plugin was SIGKILLed
+// every reconcile. The sysctl path is a single syscall and must finish in
+// well under a second even on a busy machine. We assert a generous 2s
+// ceiling (the real measurement is orders of magnitude faster) so the test
+// is not flaky but still fails hard if anyone reintroduces a per-process
+// fork. This test is meaningful precisely under CGO_ENABLED=0.
+func TestListProcessesIsFast(t *testing.T) {
+	const ceiling = 2 * time.Second
+	start := time.Now()
+	procs, err := listProcesses()
+	elapsed := time.Since(start)
+	if err != nil {
+		t.Fatalf("listProcesses: %v", err)
+	}
+	t.Logf("listProcesses scanned %d procs in %s", len(procs), elapsed)
+	if elapsed > ceiling {
+		t.Fatalf("listProcesses took %s (> %s): per-process fork regression?",
+			elapsed, ceiling)
 	}
 }
 

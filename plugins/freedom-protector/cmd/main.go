@@ -23,11 +23,18 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"time"
 
 	"github.com/eliteGoblin/focusd/plugins/freedom-protector/internal/reconciler"
 )
 
 var version = "dev"
+
+// reconcileBudget self-limits the reconcile so the plugin flushes its JSON
+// result and exits cleanly BEFORE the platform's 20s job timeout hard-kills
+// it (SIGKILL would drop the result and trigger a retry storm). Kept under
+// 20s with headroom for process start, config read, and stdout flush.
+const reconcileBudget = 15 * time.Second
 
 // jobInput mirrors the platform's plugin.JobInput. Duplicated here so the
 // plugin stays an independently released binary (no platform import).
@@ -70,7 +77,9 @@ func run(args []string) int {
 		return 2
 	}
 
-	out, err := reconciler.New(opts).Reconcile(context.Background())
+	ctx, cancel := context.WithTimeout(context.Background(), reconcileBudget)
+	defer cancel()
+	out, err := reconciler.New(opts).Reconcile(ctx)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "reconcile error:", err)
 		emit(result{Status: "error", Message: err.Error()})
