@@ -1,6 +1,6 @@
 # Feature 08 — Single-engine install (admin or user)
 
-- **Status:** in build (2026-05-30) · ships as the next daemon + platform release
+- **Status:** ✅ shipped (daemon + platform releases; mesh self-heal verified on hardware 2026-05-31 per register §6)
 - **Decision:** [ADR-0010](../decisions/0010-single-mesh-fail-fast.md)
 
 ## What

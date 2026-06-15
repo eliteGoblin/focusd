@@ -60,14 +60,42 @@ func labelFromPath(p string) string {
 	return strings.TrimSuffix(p, ".plist")
 }
 
+// fakeRoster is an in-memory rosterIO (FEATURE 10 / ADR-0014). present
+// models a real file on disk; corrupt forces readRoster to error so the
+// self-heal-from-memory path (ensureAll rewrites) is exercised.
+type fakeRoster struct {
+	labels  []string
+	present bool
+	corrupt bool
+	writes  int
+}
+
+func (r *fakeRoster) writeRoster(labels []string) error {
+	r.labels = append([]string(nil), labels...)
+	r.present = true
+	r.corrupt = false
+	r.writes++
+	return nil
+}
+func (r *fakeRoster) readRoster() ([]string, error) {
+	if !r.present {
+		return nil, errSentinel("roster missing")
+	}
+	if r.corrupt {
+		return nil, errSentinel("roster corrupt")
+	}
+	return r.labels, nil
+}
+func (r *fakeRoster) removeRoster() error { r.present = false; return nil }
+
 func spec() Spec {
 	return Spec{SelfPath: "/d/daemon", Workdir: "/wd", Github: "o/r",
 		Asset: "platform-darwin-arm64", Interval: 10 * time.Second}
 }
 
 func TestInstallAllWritesAndLoadsThree(t *testing.T) {
-	c, fs := newFakeCtl(), newFakeFS()
-	if err := installAll(spec(), c, fs); err != nil {
+	c, fs, rs := newFakeCtl(), newFakeFS(), &fakeRoster{}
+	if err := installAll(spec(), c, fs, rs); err != nil {
 		t.Fatal(err)
 	}
 	if len(fs.files) != 3 || len(c.boots) != 3 {
@@ -78,16 +106,23 @@ func TestInstallAllWritesAndLoadsThree(t *testing.T) {
 			t.Fatalf("role %s not loaded", r)
 		}
 	}
+	// Install writes the masked roster (the 3 labels in AllRoles order).
+	if !rs.present || len(rs.labels) != 3 {
+		t.Fatalf("install must persist the 3-label roster, got present=%v labels=%v", rs.present, rs.labels)
+	}
+	if !sameRoster(rs.labels, rosterLabels(spec())) {
+		t.Fatalf("persisted roster %v != spec labels %v", rs.labels, rosterLabels(spec()))
+	}
 }
 
 func TestEnsureAllRecreatesOnlyMissing(t *testing.T) {
-	c, fs := newFakeCtl(), newFakeFS()
-	_ = installAll(spec(), c, fs)
+	c, fs, rs := newFakeCtl(), newFakeFS(), &fakeRoster{}
+	_ = installAll(spec(), c, fs, rs)
 	// Simulate the user killing role A's entry.
 	_ = c.bootout(spec().Label(RoleA))
 	delete(fs.files, fs.plistPath(spec().Label(RoleA)))
 
-	rec, err := ensureAll(spec(), c, fs)
+	rec, err := ensureAll(spec(), c, fs, rs)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -98,16 +133,46 @@ func TestEnsureAllRecreatesOnlyMissing(t *testing.T) {
 		t.Fatal("A must be loaded again after ensure")
 	}
 	// Second ensure is a no-op (idempotent).
-	rec2, _ := ensureAll(spec(), c, fs)
+	rec2, _ := ensureAll(spec(), c, fs, rs)
 	if len(rec2) != 0 {
 		t.Fatalf("ensure must be idempotent, recreated %v", rec2)
 	}
 }
 
+// TestEnsureAllHealsRosterFromMemory asserts acceptance #4 at the osadapter
+// seam: when the roster file is missing/corrupt, ensureAll rewrites it from
+// the in-memory (Spec) roster while the mesh keeps running.
+func TestEnsureAllHealsRosterFromMemory(t *testing.T) {
+	c, fs, rs := newFakeCtl(), newFakeFS(), &fakeRoster{}
+	_ = installAll(spec(), c, fs, rs)
+	writesAfterInstall := rs.writes
+
+	// Tamper: corrupt the file so readRoster errors.
+	rs.corrupt = true
+	if _, err := ensureAll(spec(), c, fs, rs); err != nil {
+		t.Fatal(err)
+	}
+	if rs.writes != writesAfterInstall+1 {
+		t.Fatalf("corrupt roster must be rewritten once, writes=%d (was %d)", rs.writes, writesAfterInstall)
+	}
+	if rs.corrupt || !rs.present {
+		t.Fatal("roster must be healed (present, not corrupt) after ensure")
+	}
+
+	// Delete: missing file is likewise rewritten from memory.
+	rs.present = false
+	if _, err := ensureAll(spec(), c, fs, rs); err != nil {
+		t.Fatal(err)
+	}
+	if !rs.present || !sameRoster(rs.labels, rosterLabels(spec())) {
+		t.Fatalf("missing roster must be rewritten from memory, got %v", rs.labels)
+	}
+}
+
 func TestUninstallAllRemovesEverything(t *testing.T) {
-	c, fs := newFakeCtl(), newFakeFS()
-	_ = installAll(spec(), c, fs)
-	if err := uninstallAll(Spec{}, c, fs); err != nil {
+	c, fs, rs := newFakeCtl(), newFakeFS(), &fakeRoster{}
+	_ = installAll(spec(), c, fs, rs)
+	if err := uninstallAll(Spec{}, c, fs, rs); err != nil {
 		t.Fatal(err)
 	}
 	for _, r := range AllRoles {
@@ -117,5 +182,8 @@ func TestUninstallAllRemovesEverything(t *testing.T) {
 	}
 	if len(fs.files) != 0 {
 		t.Fatalf("plists not removed: %v", fs.files)
+	}
+	if rs.present {
+		t.Fatal("uninstall must remove the masked roster file")
 	}
 }

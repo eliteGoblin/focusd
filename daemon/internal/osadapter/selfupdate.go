@@ -43,8 +43,10 @@ type binPlacer interface {
 // downloaded + Ed25519-verified newBin via fetch. newSpec MUST carry:
 //
 //   - SelfPath = the NEW rotated binary path inside cur.Workdir
-//   - Base     = a NEW random disguised label base (so old/new plists
-//     can coexist for the duration of the swap)
+//   - Roster   = a NEW set of 3 independent disguised labels (FEATURE 10
+//     / ADR-0014) so old/new plists can coexist for the swap. Generated
+//     via relocate.GenerateRoster (distinct vendor families, no shared
+//     base, no role token).
 //   - Workdir  = cur.Workdir (we never touch the workdir on update)
 //
 // keepOld=true skips the final best-effort cleanup of old plists +
@@ -56,7 +58,7 @@ type binPlacer interface {
 // passed AND old mesh entries are no longer registered with launchd.
 func SelfUpdate(
 	cur CurInstall, newSpec Spec, newBin []byte,
-	c controller, fs fsio, p prober, b binPlacer,
+	c controller, fs fsio, p prober, b binPlacer, rs rosterIO,
 	healthyTimeout, probeInterval time.Duration,
 	keepOld bool,
 ) error {
@@ -69,11 +71,23 @@ func SelfUpdate(
 		return fmt.Errorf("osadapter/selfupdate: incomplete install — found %d of %d mesh plists, binary=%q",
 			len(cur.PlistPaths), len(AllRoles), cur.BinaryPath)
 	}
-	// newSpec.base() returns the dev-fallback "com.focusd.daemon" when
-	// newSpec.Base is empty, so checking base() != "" always passes
-	// and is useless. Check the raw field. Copilot #1.
-	if newSpec.SelfPath == "" || newSpec.Workdir == "" || newSpec.Base == "" {
-		return errors.New("osadapter/selfupdate: newSpec missing SelfPath/Workdir/Base")
+	// FEATURE 10 / ADR-0014: newSpec must carry the rotated SelfPath, the
+	// preserved Workdir, AND a full 3-label Roster (the new independent
+	// mesh labels). An empty/short Roster would make Spec.Label fall back
+	// to the dev labels and collide the new mesh with… nothing useful —
+	// reject up front. Label resolution is positional over AllRoles, so
+	// the roster must have exactly len(AllRoles) non-empty entries.
+	if newSpec.SelfPath == "" || newSpec.Workdir == "" {
+		return errors.New("osadapter/selfupdate: newSpec missing SelfPath/Workdir")
+	}
+	if len(newSpec.Roster) != len(AllRoles) {
+		return fmt.Errorf("osadapter/selfupdate: newSpec.Roster has %d labels, want %d",
+			len(newSpec.Roster), len(AllRoles))
+	}
+	for i, l := range newSpec.Roster {
+		if l == "" {
+			return fmt.Errorf("osadapter/selfupdate: newSpec.Roster[%d] is empty", i)
+		}
 	}
 	if newSpec.Workdir != cur.Workdir {
 		// Workdir migration is OUT of scope and would strand state.db,
@@ -132,6 +146,17 @@ func SelfUpdate(
 		rollbackBootouts(c, bootedNew)
 		rollback(c, fs, b, newSpec, newPlists, newLabels)
 		return fmt.Errorf("osadapter/selfupdate: health: %w", err)
+	}
+
+	// F.5 Persist the NEW masked roster, overwriting the stale one the OLD
+	// mesh left behind (FEATURE 10 / ADR-0014). Without this, the workdir
+	// .roster still names the OLD labels: a new worker's cold-start read
+	// would succeed (valid mask) yet recover the wrong mesh, and ensureAll
+	// wouldn't rewrite it because the read didn't error. Best-effort: the
+	// new plists' --roster argv is the primary source of truth, so a write
+	// failure here does not roll back a healthy swap.
+	if rs != nil {
+		_ = rs.writeRoster(rosterLabels(newSpec))
 	}
 
 	// G. SWAP. Bootout old in REVERSE order (ensurer first, then B,
@@ -210,28 +235,25 @@ func probeOK(p prober, newLabels []string) bool {
 		}
 	}
 	// A + B must have live PIDs; ensure (StartInterval) may be idle
-	// between ticks and that is fine.
-	for _, l := range newLabels {
-		if isWorkerLabel(l) && !p.hasPID(l) {
+	// between ticks and that is fine. FEATURE 10 / ADR-0014: worker
+	// detection is POSITIONAL — newLabels is built in AllRoles order, so
+	// index i maps to AllRoles[i]. This must NOT key on label text: the
+	// independent labels no longer carry a .a/.b/.ensure role token, and
+	// a text-based guess would mis-classify the ensurer as a worker (or
+	// vice-versa) and false-fail the health poll → a botched migration
+	// self-update that leaves the old mesh double-running.
+	for i, l := range newLabels {
+		if i < len(AllRoles) && isWorkerRole(AllRoles[i]) && !p.hasPID(l) {
 			return false
 		}
 	}
 	return true
 }
 
-// isWorkerLabel reports whether a label is for role A or B (not the
-// ensurer). Used by the health poll to decide which entries must have
-// a live PID.
-func isWorkerLabel(label string) bool {
-	return endsWith(label, ".a") || endsWith(label, ".b")
-}
-
-func endsWith(s, suf string) bool {
-	if len(suf) > len(s) {
-		return false
-	}
-	return s[len(s)-len(suf):] == suf
-}
+// isWorkerRole reports whether r is a KeepAlive worker (A or B) rather
+// than the StartInterval ensurer. The health poll requires a live PID
+// only for workers.
+func isWorkerRole(r Role) bool { return r != RoleEnsure }
 
 // rollbackBootouts boots out labels in reverse-order. Used when a
 // failure interrupts the new-mesh bootstrap or health-poll.

@@ -3,6 +3,7 @@ package osadapter
 import (
 	"fmt"
 	"strings"
+	"time"
 )
 
 // args returns the daemon argv for a role. A/B run the supervised loop
@@ -15,11 +16,13 @@ func args(s Spec, r Role) []string {
 		"--asset", s.Asset,
 		"--interval", s.Interval.String(),
 		"--test-mode-flag", boolStr(s.isTest()),
-		// Every role carries the disguised base so any survivor can
-		// recompute sibling labels and rebuild their plists — no
-		// separate registry; the base lives in the plists (which must
-		// exist anyway).
-		"--mesh-base", s.base(),
+		// FEATURE 10 / ADR-0014: every role carries the FULL 3-label
+		// roster (comma-joined, AllRoles order) so any survivor relaunched
+		// cold reconstructs Spec.Roster from its own launch args and can
+		// rebuild every sibling plist — no shared base, no separate
+		// registry. The masked .roster workdir file is the cold-start /
+		// sibling fallback when a plist isn't to hand.
+		"--roster", rosterArg(s),
 	}
 	if r == RoleEnsure {
 		return append([]string{"ensure"}, common...)
@@ -35,9 +38,36 @@ func boolStr(b bool) string {
 	return "false"
 }
 
-// intervalSeconds is the StartInterval for the ensurer (min 1s).
+// rosterArg renders the comma-joined 3-label roster baked into every
+// plist's argv. It uses s.Label over AllRoles so the value reflects the
+// ACTUAL resolved labels (test-mode e2e, disguised roster, or dev
+// fallback) — whatever a survivor must rebuild. Aligned with AllRoles so
+// `--r <role>` + this roster pins each sibling's label by position.
+func rosterArg(s Spec) string {
+	labels := make([]string, len(AllRoles))
+	for i, r := range AllRoles {
+		labels[i] = s.Label(r)
+	}
+	return strings.Join(labels, ",")
+}
+
+// EnsureBackstopInterval is the default ensurer StartInterval (FEATURE 10
+// / ADR-0014). It is DECOUPLED from the worker reconcile cadence: launchd
+// floors small StartInterval values, so pushing the ~2s in-process worker
+// cadence here would be futile — the ensurer stays a ~10s backstop while
+// the live A/B workers do the fast self-heal. Override via Spec.EnsureInterval.
+const EnsureBackstopInterval = 10 * time.Second
+
+// intervalSeconds is the StartInterval for the ensurer (min 1s). It uses
+// Spec.EnsureInterval (the decoupled backstop cadence), NOT Spec.Interval
+// (the worker reconcile cadence). Empty EnsureInterval → the backstop
+// default. This keeps the ensurer at ~10s even when workers tick at ~2s.
 func intervalSeconds(s Spec) int {
-	n := int(s.Interval.Seconds())
+	d := s.EnsureInterval
+	if d <= 0 {
+		d = EnsureBackstopInterval
+	}
+	n := int(d.Seconds())
 	if n < 1 {
 		n = 1
 	}
@@ -64,6 +94,11 @@ func Plist(s Spec, r Role) string {
 		fmt.Fprintf(&sb, "  <key>StartInterval</key><integer>%d</integer>\n", intervalSeconds(s))
 	} else {
 		sb.WriteString("  <key>KeepAlive</key><true/>\n")
+		// FEATURE 10 / ADR-0014: override launchd's 10s default respawn
+		// throttle so a KILLED worker is relaunched in ~1s, not ~10s — the
+		// process-kill half of the manual-bypass loophole. KeepAlive workers
+		// are stable, so a low throttle does not cause respawn churn.
+		sb.WriteString("  <key>ThrottleInterval</key><integer>1</integer>\n")
 	}
 	sb.WriteString("  <key>ProcessType</key><string>Background</string>\n")
 	fmt.Fprintf(&sb, "  <key>StandardErrorPath</key><string>%s/daemon.log</string>\n", s.Workdir)

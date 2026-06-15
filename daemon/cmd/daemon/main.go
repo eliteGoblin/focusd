@@ -19,6 +19,7 @@ import (
 	"os/signal"
 	"regexp"
 	"runtime"
+	"strings"
 	"syscall"
 	"time"
 
@@ -112,14 +113,14 @@ type opts struct {
 	role       string
 	testMode   bool
 	mesh       bool
-	base       string
+	roster     []string
 }
 
 func (o opts) spec(self string) osadapter.Spec {
 	return osadapter.Spec{
 		Mode: o.modeVal(), SelfPath: self, Workdir: o.workdir,
 		Github: o.github, Asset: o.asset, Interval: o.interval,
-		Base: o.base,
+		Roster: o.roster,
 	}
 }
 
@@ -136,7 +137,13 @@ func (o opts) modeVal() mode.Mode {
 func parse(name string, args []string) opts {
 	fs := flag.NewFlagSet(name, flag.ContinueOnError)
 	wd := fs.String("workdir", defaultWorkdir(), "daemon work directory")
-	iv := fs.Duration("interval", 10*time.Second, "reconcile interval")
+	// FEATURE 10 / ADR-0014: the WORKER in-process reconcile ticker now
+	// defaults to the fast ~2s self-heal cadence so a single manual mesh
+	// removal loses the whack-a-mole race (acceptance #2). This is the
+	// LIVE A/B heal loop. It is DECOUPLED from the ensurer's launchd
+	// StartInterval (still ~10s — launchd floors small StartInterval
+	// values, so a 2s StartInterval there would be futile).
+	iv := fs.Duration("interval", workerHealInterval, "worker reconcile interval (fast in-process self-heal)")
 	gh := fs.String("github", "eliteGoblin/focusd", "owner/repo for releases")
 	as := fs.String("asset", "", "release asset filename (per os/arch)")
 	rd := fs.String("release-dir", "", "use a local fake release dir instead of GitHub")
@@ -145,9 +152,29 @@ func parse(name string, args []string) opts {
 	rl := fs.String("r", "a", "mesh role: a|b")
 	tm := fs.String("test-mode-flag", "false", "use test-mode launchd labels")
 	mesh := fs.Bool("mesh", false, "self-heal the launchd mesh (set only by the installer)")
-	mb := fs.String("mesh-base", "", "disguised launchd label base (set by the installer)")
+	// --roster carries the 3 independent mesh labels (comma-joined,
+	// AllRoles order) baked into every plist by the installer, so any
+	// survivor relaunched cold reconstructs Spec.Roster from its own argv
+	// and can rebuild every sibling plist (FEATURE 10 / ADR-0014).
+	rs := fs.String("roster", "", "comma-joined 3-label mesh roster (set by the installer)")
 	_ = fs.Parse(args)
-	return opts{*wd, *iv, *gh, *as, *rd, *hd, *ud, *rl, *tm == "true", *mesh, *mb}
+	return opts{*wd, *iv, *gh, *as, *rd, *hd, *ud, *rl, *tm == "true", *mesh, splitRoster(*rs)}
+}
+
+// workerHealInterval is the fast in-process worker reconcile cadence
+// (FEATURE 10 / ADR-0014, acceptance #2). The live A/B workers tick this
+// fast so a single manual mesh removal is healed in ~2s — inside the ~5s
+// a person needs for the next one-at-a-time removal. The ensurer's
+// launchd StartInterval stays the slower osadapter.EnsureBackstopInterval.
+const workerHealInterval = 2 * time.Second
+
+// splitRoster parses the comma-joined --roster flag into the label set.
+// Empty → nil (the dev/test fallback in Spec.Label takes over).
+func splitRoster(s string) []string {
+	if s == "" {
+		return nil
+	}
+	return strings.Split(s, ",")
 }
 
 func defaultWorkdir() string {
@@ -368,7 +395,6 @@ func doInstall(args []string) int {
 	wd := fs.String("workdir", defaultWorkdir(), "daemon work directory")
 	gh := fs.String("github", "eliteGoblin/focusd", "owner/repo")
 	as := fs.String("asset", "", "release asset filename")
-	iv := fs.Duration("interval", 10*time.Second, "reconcile interval")
 	desired := fs.String("v", "",
 		"REQUIRED desired platform version (e.g. v0.9.0) — the daemon does NOT auto-resolve from GitHub")
 	wantTest := registerTestMode(fs) // --test-mode only under -tags e2e
@@ -412,14 +438,22 @@ func doInstall(args []string) int {
 	}
 	spec := osadapter.Spec{
 		Mode: m, SelfPath: self, Workdir: *wd,
-		Github: *gh, Asset: *as, Interval: *iv,
+		Github: *gh, Asset: *as,
+		// FEATURE 10 / ADR-0014: the worker heal cadence is a FIXED ~2s
+		// security constant (it closes the manual-removal whack-a-mole), baked
+		// into the worker plists — NOT an operator knob (a stale --interval
+		// must not be able to reopen the loophole). The ensurer's launchd
+		// StartInterval stays the slower backstop, DECOUPLED from it.
+		Interval:       workerHealInterval,
+		EnsureInterval: osadapter.EnsureBackstopInterval,
 	}
 	if m != mode.Test {
 		// user/system: self-relocate into a hidden random workdir under
 		// this mode's Application Support root (user → ~/Library,
-		// system → /Library) + a disguised per-install label base. Test
-		// mode stays fixed/deterministic + uses the given workdir so e2e
-		// is safe & removable.
+		// system → /Library) + three INDEPENDENT disguised mesh labels
+		// (FEATURE 10 / ADR-0014: distinct vendor families, no shared
+		// base, no role token). Test mode stays fixed/deterministic + uses
+		// the given workdir so e2e is safe & removable.
 		home, _ := os.UserHomeDir()
 		wd := relocate.HiddenWorkdir(mode.SupportRoot(m, home))
 		reloc, rerr := relocate.RelocateInto(self, wd)
@@ -429,8 +463,11 @@ func doInstall(args []string) int {
 		}
 		spec.SelfPath = reloc
 		spec.Workdir = wd
-		spec.Base = relocate.RandomBase()
-		fmt.Printf("relocated → %s (mode %s, base %s)\n", reloc, m, spec.Base)
+		spec.Roster = relocate.GenerateRoster()
+		// Do NOT print the disguised roster labels — they are the strings a
+		// weak-moment self needs for a targeted bootout. Print only the
+		// relocation fact, not the mesh names.
+		fmt.Printf("relocated → %s (mode %s)\n", reloc, m)
 	}
 	// Pin the desired platform version BEFORE calling Install so the
 	// launchd mesh comes up with version.json already in place. If we
@@ -561,7 +598,10 @@ func doUninstall(args []string) int {
 		return 1
 	}
 	_ = uninstallgate.Clear(gpath) // gate state dies with the install
-	fmt.Printf("uninstalled (prod): %v\n", removed)
+	// Redact the disguised labels (consistent with install/self-update): the
+	// removed set is exactly the strings a targeted bootout would need. Count
+	// only. (go-reviewer L4 / security-reviewer MEDIUM.)
+	fmt.Printf("uninstalled (prod): %d entries removed\n", len(removed))
 	return 0
 }
 

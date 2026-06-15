@@ -37,7 +37,7 @@ func SelfUpdateProd(CurInstall, Spec, []byte, time.Duration, time.Duration, bool
 // references it still compiles on non-darwin (where it is always zero).
 type CurInstall struct {
 	Mode       mode.Mode
-	Base       string
+	Roster     []string
 	Workdir    string
 	BinaryPath string
 	Interval   time.Duration

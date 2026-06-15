@@ -22,6 +22,13 @@ type Store struct{ Dir string }
 // this single source of truth rather than hardcoding the literal.
 const VersionFile = "version.json"
 
+// RosterFile is the basename of the masked mesh-label roster under the
+// workdir (FEATURE 10 / ADR-0014). It holds the three independent mesh
+// labels XOR-masked so a casual `cat` shows non-plaintext bytes; a
+// freshly relaunched survivor reads it to recover the roster on a cold
+// start. In-memory roster is authoritative; this file self-heals from it.
+const RosterFile = ".roster"
+
 type versionConfig struct {
 	Desired string `json:"desired"`
 }
@@ -29,6 +36,11 @@ type versionConfig struct {
 func (s *Store) versionPath() string { return filepath.Join(s.Dir, VersionFile) }
 func (s *Store) goodPath() string    { return filepath.Join(s.Dir, "good") }
 func (s *Store) badDir() string      { return filepath.Join(s.Dir, "bad") }
+
+// RosterPath is the absolute path of the masked mesh-label roster file
+// under the workdir. Exported so the osadapter mesh layer can read/write
+// it via the core roster helpers.
+func (s *Store) RosterPath() string { return filepath.Join(s.Dir, RosterFile) }
 
 // BinPath is where the platform binary for version v lives.
 func (s *Store) BinPath(v string) string {

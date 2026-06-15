@@ -16,9 +16,36 @@ type fsio interface {
 	plistPath(label string) string
 }
 
-// installAll writes + (re)loads all three mesh entries (idempotent:
-// any stale instance is booted out first).
-func installAll(s Spec, c controller, fs fsio) error {
+// rosterIO is the masked-roster-file seam (FEATURE 10 / ADR-0014). Real
+// on darwin (core.WriteRoster/ReadRoster over the workdir .roster file);
+// tests inject a fake. Kept OS-agnostic here so the install/ensure/
+// uninstall ordering is unit-tested without launchd or a real FS.
+type rosterIO interface {
+	writeRoster(labels []string) error
+	readRoster() ([]string, error)
+	removeRoster() error
+}
+
+// rosterLabels returns the three mesh labels in AllRoles order — the
+// payload persisted to the masked roster file.
+func rosterLabels(s Spec) []string {
+	labels := make([]string, len(AllRoles))
+	for i, r := range AllRoles {
+		labels[i] = s.Label(r)
+	}
+	return labels
+}
+
+// installAll writes the masked roster FIRST (so a survivor relaunched
+// before the plists settle can still recover), then writes + (re)loads
+// all three mesh entries (idempotent: any stale instance is booted out
+// first).
+func installAll(s Spec, c controller, fs fsio, rs rosterIO) error {
+	if rs != nil {
+		if err := rs.writeRoster(rosterLabels(s)); err != nil {
+			return fmt.Errorf("osadapter: write roster: %w", err)
+		}
+	}
 	for _, r := range AllRoles {
 		label := s.Label(r)
 		pp := fs.plistPath(label)
@@ -33,8 +60,10 @@ func installAll(s Spec, c controller, fs fsio) error {
 	return nil
 }
 
-// uninstallAll boots out and removes all three entries (idempotent).
-func uninstallAll(s Spec, c controller, fs fsio) error {
+// uninstallAll boots out and removes all three entries (idempotent), then
+// removes the masked roster file LAST — after the mesh it described is
+// gone, so a mid-uninstall survivor can still recover until the end.
+func uninstallAll(s Spec, c controller, fs fsio, rs rosterIO) error {
 	var first error
 	for _, r := range AllRoles {
 		label := s.Label(r)
@@ -43,12 +72,27 @@ func uninstallAll(s Spec, c controller, fs fsio) error {
 			first = err
 		}
 	}
+	if rs != nil {
+		if err := rs.removeRoster(); err != nil && first == nil {
+			first = err
+		}
+	}
 	return first
 }
 
 // ensureAll recreates any missing entry — the mutual self-healing the
-// mesh relies on (a survivor rebuilds dead siblings). Idempotent.
-func ensureAll(s Spec, c controller, fs fsio) (recreated []Role, err error) {
+// mesh relies on (a survivor rebuilds dead siblings) — and self-heals the
+// masked roster file from the in-memory roster if it is missing or
+// corrupt (acceptance #4). Idempotent.
+func ensureAll(s Spec, c controller, fs fsio, rs rosterIO) (recreated []Role, err error) {
+	if rs != nil {
+		if _, rerr := rs.readRoster(); rerr != nil {
+			// Missing/tampered/corrupt → rewrite from the in-memory roster.
+			// Best-effort: a roster-write failure must not block plist
+			// self-heal (the in-memory roster keeps the mesh running).
+			_ = rs.writeRoster(rosterLabels(s))
+		}
+	}
 	for _, r := range AllRoles {
 		label := s.Label(r)
 		if c.loaded(label) {

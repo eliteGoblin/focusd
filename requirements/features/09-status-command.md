@@ -1,6 +1,6 @@
 # Feature 09 — `daemon status` health snapshot
 
-- **Status:** in build (2026-06-01) · ships with the next daemon release
+- **Status:** ✅ shipped (#45, daemon-v0.5.x)
 - **Decision:** [ADR-0011](../decisions/0011-status-redaction.md) (redaction) ·
   [ADR-0012](../decisions/0012-status-delegates-to-platform.md) (KISS layering)
 

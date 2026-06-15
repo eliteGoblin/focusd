@@ -68,15 +68,16 @@ The two-faced nature of the user is the key insight. Most security designs assum
 | **Pubkey grep-resistance** | XOR-mask the embedded Ed25519 pubkey at build time | `strings daemon \| grep "BEGIN PUBLIC"` returns 0 | ✅ shipped (FEATURE 3) | Disassembler still extracts the key; friction not crypto |
 | **Ed25519 signed releases** | All daemon + platform binaries Ed25519-signed; daemon verifies before exec | Prevents fake-release injection that the daemon would run | ✅ shipped | Private key still on dev's machine (`~/.creds/`); should move to CI-only |
 | **3-step uninstall ritual** | `daemon uninstall` requires transcribing 3 long passages with 2h + 4h waits | Defeats impulsive uninstall (~6h real-time delay) | ✅ shipped | User who knows the passages can paste them; the wait, not the typing, is the defense |
-| **Skill-protector plugin** | Re-injects `~/.claude/skills/focusd-protection/SKILL.md` + always-on rule + SessionStart hook | Stops the bypass where user `rm`s the skill then asks Claude to disable | ✅ shipped (FEATURE 1) | Periodic re-injection (every 5m) requires user-mode platform mesh → currently NOT firing on schedule (see #37) |
+| **Skill-protector plugin** | Re-injects `~/.claude/skills/focusd-protection/SKILL.md` + always-on rule + SessionStart hook | Stops the bypass where user `rm`s the skill then asks Claude to disable | ✅ shipped (FEATURE 1) | Periodic re-injection (every 5m) now fires on schedule via FEATURE 8's runtime privilege-drop (system platform steps down to the console user, `run_as: current_user`). Resolved #37 |
 | **5-gated override path** | Claude refuses bypass unless: GH issue ≥24h old, signed override commit, today's BBC SHA256, hand-typed 40-word passphrase | Defeats Claude-mediated bypass requests | ✅ shipped (in SKILL.md) | Honor-system on "typed by hand"; clock-manipulation partly mitigated by gate 4 |
 | **Skill redaction rule** | Skill instructs Claude to refuse showing disguised paths/labels/binary-names, refuse discovery commands (ps/launchctl/find/log-tail) | Closes "Claude leaks the strings while helpfully answering an indirect question" path | ✅ shipped (FEATURE 5) | Claude must voluntarily follow its own skill — behavioral only |
 | **dns-block plugin** | Writes `0.0.0.0 steampowered.com` etc. to /etc/hosts | First-line block (DNS resolution fails) | ✅ shipped (pre-session) | Bypassed by custom resolver / DoH / hardcoded IPs in client app |
 | **kill-steam plugin** | If Steam.app process found, kill it and remove `/Applications/Steam.app` | Direct process kill + on-disk removal | ✅ shipped (pre-session) | User can reinstall; the loop catches that within 10s |
 | **network-block plugin** | Reconciles `pfctl` table with DoH-resolved Steam IPs every 30m | Defense-in-depth: direct-IP traffic (bypassing DNS) caught at kernel packet filter | ✅ shipped (FEATURE 4); disabled by default, enabled via override config | Manual prereqs (pf anchor + /etc/pf.conf entry); IPs rotate; reconciler keeps it current |
 | **Daemon bug fixes** | Bug 1 (config staleness), Bug 2 (atomic install + rollback), Bug 3 (no auto-resolve from reconcile loop) | Foundational reliability fixes | ✅ shipped (v0.10.0 + daemon-v0.1.0) | None outstanding |
-| **`daemon status` health snapshot** | Read-only health read that NEVER leaks disguised tokens — closes the "indirect question whose answer is a bypass recipe" path. `daemon status` reports only daemon-owned facts (mesh roles up / platform process / version) and **delegates** plugin/protection detail to a new `platform status`, so the daemon stays plugin-agnostic (KISS) | 🔧 in build (FEATURE 9, #42; redaction structural per ADR-0011; KISS layering per ADR-0012) | Status is a read, not a protection; per-protection recency is a last-run-status proxy (not a live re-probe) per ADR-0012; mesh/admin lines read "unknown" without sudo; age buckets coarse by design |
-| **Platform singleton enforcement (daemon-held flock)** | Both mesh roles were independently starting a platform → two platforms on one healthy install (double plugin runs + DB contention; surfaced by `daemon status`). A crash-safe OS advisory lock held by the **daemon** lets exactly one daemon supervise the single platform; the loser starts nothing | 🔧 in build (daemon-v0.5.x; daemon-layer only; decision per ADR-0013) | Only macOS double-launches today (mesh is macOS-only); Windows/Linux carry the lock for future-readiness with no mesh yet to dedup |
+| **`daemon status` health snapshot** | Read-only health read that NEVER leaks disguised tokens — closes the "indirect question whose answer is a bypass recipe" path. `daemon status` reports only daemon-owned facts (mesh roles up / platform process / version) and **delegates** plugin/protection detail to a new `platform status`, so the daemon stays plugin-agnostic (KISS) | ✅ shipped (FEATURE 9, #45; redaction structural per ADR-0011; KISS layering per ADR-0012) | Status is a read, not a protection; per-protection recency is a last-run-status proxy (not a live re-probe) per ADR-0012; mesh/admin lines read "unknown" without sudo; age buckets coarse by design |
+| **Platform singleton enforcement (daemon-held flock)** | Both mesh roles were independently starting a platform → two platforms on one healthy install (double plugin runs + DB contention; surfaced by `daemon status`). A crash-safe OS advisory lock held by the **daemon** lets exactly one daemon supervise the single platform; the loser starts nothing | ✅ shipped (#48; daemon-layer only; decision per ADR-0013) | Only macOS double-launches today (mesh is macOS-only); Windows/Linux carry the lock for future-readiness with no mesh yet to dedup |
+| **Mesh label decorrelation + faster self-heal** | The 3 mesh entries shared one random base + role suffix (`.a`/`.b`/`.ensure`) — find one, grep the prefix, all three fall out; and the suffix advertised the backstop. Each role now gets an independent random label (no shared base, no role tell), the roster is persisted as a XOR-masked workdir file (reusing FEATURE 3's mask), and the heal loop tightens ~10s → ~2s so single-entry manual removal loses the race. Closes #20 | 🔧 defining (FEATURE 10; decision per ADR-0014) | Casual-grade friction only: defeats `cat`/`ls` + the `grep <prefix>` cluster-find + slow manual removal; does NOT stop reading the binary to recover the XOR key, the daemon's own un-mask path, or a scripted atomic bootout+rm of all three |
 
 ---
 
@@ -145,8 +146,8 @@ Every commit message + every PR description includes an explicit "honest" or "ho
 
 | Component | Tag prefix | Current latest | Notes |
 |---|---|---|---|
-| Platform | `v*` (e.g. `v0.12.2`) | v0.12.2 | Triggers `platform.yml` CI |
-| Daemon | `daemon-v*` (e.g. `daemon-v0.3.0`) | daemon-v0.3.0 | Triggers `daemon-release.yml`, signed in CI |
+| Platform | `v*` (e.g. `v0.14.0`) | v0.14.0 | Triggers `platform.yml` CI |
+| Daemon | `daemon-v*` (e.g. `daemon-v0.5.1`) | daemon-v0.5.1 | Triggers `daemon-release.yml`, signed in CI. Daemon status (FEATURE 9) + singleton flock (ADR-0013) shipped in the daemon-v0.5.x line |
 | Legacy app_mon | `appmon-v*` | (none since refactor) | Triggers legacy `release.yml`; scoped down in PR #39 so platform tags don't trigger it |
 
 Platform releases ship bundled plugin binaries embedded via `//go:embed` (`platform/internal/bundle/data/<plugin>/<plugin>`). Bundled binaries are force-committed past `data/.gitignore` to ensure CI builds them in. **Hygiene gap (#38):** `scripts/build-platform.sh` does not auto-rebundle plugins; bundle staleness caused v0.12.0 → v0.12.1 hotfix. Should be fixed.
@@ -157,13 +158,13 @@ Platform releases ship bundled plugin binaries embedded via `//go:embed` (`platf
 
 - Platform: deployed via daemon-managed pre-populate workaround (`<workdir>/bin/<version>/platform` + write desired version). Daemon swaps within ~10s.
 - Daemon code: deployed via `sudo daemon self-update <daemon-tag>` which path-rotates to a new disguised location (FEATURE 1.5).
-- Skill files: written into `~/.claude/` once per skill-protector invocation. Until #37 lands, that's a manual step.
+- Skill files: written into `~/.claude/` by the skill-protector plugin. Re-injection now runs on schedule (every ~5m) via FEATURE 8's privilege-drop — no longer a manual step (#37 resolved).
 
 ---
 
 ## 9. Open follow-ups (tracked in task list)
 
-- **#37 — activate user-mode platform mesh** so skill-protector fires on its 5-min schedule. Currently the system-mode platform gates user-domain plugins, so re-injection is manual-only.
+- ~~**#37 — activate user-mode platform mesh** so skill-protector fires on its 5-min schedule.~~ **RESOLVED by FEATURE 8** (see §6). The separate user-mode-mesh approach was superseded: the system platform now steps down to the console user at runtime (`run_as: current_user`) to fire the skill-protector job on schedule. (The live 5-min cadence is not re-verified here — daemon inspection is out of bounds — but it is resolved by design + artifacts.)
 - **#38 — `scripts/build-platform.sh` should `make bundle` each plugin** before building. Prevents v0.12.0→v0.12.1-style hotfixes from stale bundles.
 - **(unfiled) Remove `~/.creds/focusd_ed25519_private.pem`** and rely on the GH Actions secret only. Highest-impact security hardening still pending.
 - **(unfiled) Move the source repo to a path Claude (uid 502) cannot read**. The cheapest defense against Claude-as-threat specifically.
@@ -176,7 +177,7 @@ Platform releases ship bundled plugin binaries embedded via `//go:embed` (`platf
 |---|---|
 | **AMFI** | Apple Mobile File Integrity. macOS kernel subsystem that caches per-path CDHashes and rejects mismatched replacements. |
 | **CDHash** | Code Directory Hash — SHA256 of a Mach-O binary's code signature directory. AMFI's cache key. |
-| **Mesh** | Three coordinated launchd jobs (a, b, ensurer) that monitor each other so killing one respawns it. |
+| **Mesh** | Three coordinated launchd jobs (two workers + an ensurer/backstop) that monitor each other so killing one respawns it. *(FEATURE 10, defining: their labels are being decorrelated so the role suffix and shared prefix no longer leak the structure.)* |
 | **Workdir** | The hidden, disguised directory under `/Library/Application Support/.<random>/` that holds the daemon binary, platform versions, state.db, etc. |
 | **Path rotation** | Generating a new random disguised path during self-update so AMFI sees a new binary at a previously-untrusted location. |
 | **Override path** | The 5-gate ceremony (GH issue + 24h wait + signed commit + BBC SHA256 + 40-word passphrase) that legitimately disables focusd. Lives in SKILL.md. |
@@ -208,4 +209,4 @@ Platform releases ship bundled plugin binaries embedded via `//go:embed` (`platf
 
 ---
 
-*Last updated: 2026-06-01. Maintainer: Frank Sun + Claude (joint).*
+*Last updated: 2026-06-15. Maintainer: Frank Sun + Claude (joint).*
