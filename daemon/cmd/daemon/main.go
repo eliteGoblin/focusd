@@ -598,7 +598,10 @@ func doUninstall(args []string) int {
 		return 1
 	}
 	_ = uninstallgate.Clear(gpath) // gate state dies with the install
-	fmt.Printf("uninstalled (prod): %v\n", removed)
+	// Redact the disguised labels (consistent with install/self-update): the
+	// removed set is exactly the strings a targeted bootout would need. Count
+	// only. (go-reviewer L4 / security-reviewer MEDIUM.)
+	fmt.Printf("uninstalled (prod): %d entries removed\n", len(removed))
 	return 0
 }
 

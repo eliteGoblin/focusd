@@ -106,7 +106,11 @@ func atomicWrite0600(path string, b []byte) error {
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return err
 	}
-	tmp := path + ".tmp"
+	// PID-unique temp: both A and B workers rewrite the roster on a ~2s
+	// cadence. They write identical bytes (same Spec.Roster), so a shared
+	// temp would still be correct via atomic rename — but a per-PID temp
+	// removes the cross-process clobber window entirely. (go-reviewer M1.)
+	tmp := fmt.Sprintf("%s.tmp.%d", path, os.Getpid())
 	if err := os.WriteFile(tmp, b, 0o600); err != nil {
 		return err
 	}
