@@ -57,6 +57,17 @@ if [ -n "$newp" ]; then rt=$(awk -v a="$t0" -v b="$t1" 'BEGIN{printf "%.2f",b-a}
   awk -v r="$rt" 'BEGIN{exit !(r<2.0)}' || { echo "  FAIL: restart >= 2s"; fail=1; }
 else echo "  FAIL: not restarted"; fail=1; fi
 
+echo "=== TEST 3: DISABLE worker B (launchctl disable ~ the Login Items toggle) + remove ==="
+launchctl disable "$(dom "$B")"; launchctl bootout "$(dom "$B")" 2>/dev/null; rm -f "$LA/$B.plist"
+dl=$(( $(date +%s)+8 )); back=""
+while :; do [ -f "$LA/$B.plist" ] && loaded "$B" && { back=1; break; }; [ $(date +%s) -ge $dl ]&&break; done
+if [ -n "$back" ]; then echo "  re-loaded despite disable (enable-before-bootstrap)"
+else echo "  FAIL: disabled+removed B stayed unloaded"; fail=1; fi
+launchctl enable "$(dom "$B")" 2>/dev/null
+# NOTE: this covers `launchctl disable`. The System Settings GUI "Allow in
+# Background" toggle uses the BackgroundTaskManagement (btm) store, which has
+# NO scriptable setter — it is NOT covered here and must be checked by hand.
+
 cleanup
-[ "$fail" = 0 ] && echo "=== PASS: both bypass vectors heal < 2s ===" || echo "=== FAIL ==="
+[ "$fail" = 0 ] && echo "=== PASS: bootout, kill, and launchctl-disable all heal < 2s ===" || echo "=== FAIL ==="
 exit $fail

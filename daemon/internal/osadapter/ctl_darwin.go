@@ -31,6 +31,15 @@ func (c launchctlCtl) bootout(label string) error {
 	return exec.Command("launchctl", "bootout", c.domain()+"/"+label).Run()
 }
 func (c launchctlCtl) bootstrap(pp string) error {
+	// FEATURE 10 / ADR-0014: clear any prior `launchctl disable` before
+	// loading. Disabling a label (the CLI form of the System Settings
+	// "Allow in Background" toggle) otherwise makes launchd REFUSE to
+	// bootstrap it — so a weak-moment "disable then remove" would leave the
+	// rebuilt entry unloaded forever. enable takes the service target
+	// (domain/label); derive the label from the plist filename. Best-effort
+	// (ignore error: a not-yet-known label simply has nothing to enable).
+	label := strings.TrimSuffix(filepath.Base(pp), ".plist")
+	_ = exec.Command("launchctl", "enable", c.domain()+"/"+label).Run()
 	out, err := exec.Command("launchctl", "bootstrap", c.domain(), pp).CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("%w: %s", err, out)
