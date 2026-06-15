@@ -45,6 +45,18 @@ jobs:
     allow_overlap: false
     config: {}
 
+  # FEATURE 11: keep the Freedom focus app + its proxy alive (relaunch if the
+  # user kills them), best-effort re-enable its login item. run_as current_user
+  # (from the plugin manifest). 10s cadence so a killed Freedom comes back fast.
+  - id: freedom-protector-reconcile
+    plugin: freedom-protector
+    enabled: true
+    schedule: "@every 10s"
+    timeout: 20s
+    retry: 0
+    allow_overlap: false
+    config: {}
+
   # NOTE: disabled by default — the network-block plugin needs MANUAL
   # prerequisites before it can do anything useful:
   #   1. /etc/pf.anchors/focusd-block-steam exists with the table + rule
