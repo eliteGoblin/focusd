@@ -25,6 +25,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 )
 
 // prefixes is the disguise pool of launchd-label prefixes. The mix is
@@ -220,41 +221,98 @@ func pick(s []string) string {
 	return s[int(b[0])%len(s)]
 }
 
-// RandomBase is a disguised, plausible-launchd-label base, e.g.
-// "com.apple.metadata.helper.7f3a2c11ab" or
-// "com.jetbrains.toolbox.helper.proxy.8c1f4e9d22". Generated once at
-// install and persisted (baked into the plists); never re-randomized.
-// The SAME base is shared by all three mesh roles — see [RoleLabel]
-// for the per-role label scheme and the deferred-review note.
+// family returns the org/vendor segment of a launchd-label prefix: the
+// first two dot-separated components (e.g. "com.apple", "com.google",
+// "org.mozilla", "us.zoom", "io.tailscale", "notion.id"). Entries with
+// fewer than two segments are returned whole. This is the grouping key
+// FEATURE 10 uses to draw the three mesh labels from DISTINCT vendors so
+// they don't visually cluster under one developer to a casual reader.
+func family(prefix string) string {
+	i := strings.IndexByte(prefix, '.')
+	if i < 0 {
+		return prefix
+	}
+	j := strings.IndexByte(prefix[i+1:], '.')
+	if j < 0 {
+		return prefix
+	}
+	return prefix[:i+1+j]
+}
+
+// RandomBase is a single disguised, plausible-launchd-label base, e.g.
+// "com.apple.metadata.helper.7f3a2c11ab". Format: "<prefix>.<suffix>.
+// <10-hex>". The prefix is drawn from a pool that mixes Apple subsystems
+// and plausible third-party bundle IDs so a single label is
+// indistinguishable from the dozens of third-party background agents
+// present on a normal Mac developer machine.
 //
-// Format: "<prefix>.<suffix>.<10-hex>". The prefix is drawn from a
-// pool that mixes Apple subsystems and plausible third-party bundle
-// IDs so a single label is indistinguishable from the dozens of
-// third-party background agents present on a normal Mac developer
-// machine.
+// NOTE (FEATURE 10 / ADR-0014): the mesh no longer shares one base
+// across roles. The three mesh labels are generated independently by
+// [GenerateRoster] (no shared prefix, no role-revealing suffix). This
+// primitive remains for single disguised-label needs (e.g. self-update's
+// download temp name via [RandomBinaryName]); it is NOT the mesh roster.
 func RandomBase() string {
 	return fmt.Sprintf("%s.%s.%s", pick(prefixes), pick(suffixes), randHex(randomTailBytes))
 }
 
-// RoleLabel is the SINGLE authoritative function that turns an install
-// base + a role into a launchd label. Every label for the daemon mesh
-// (roles "a"/"b") and the periodic ensurer/cron ("ensure") is produced
-// here and nowhere else — osadapter.Spec.Label delegates to it.
+// GenerateRoster produces the three independent mesh labels (FEATURE 10 /
+// ADR-0014). Each label is a fully random "<prefix>.<suffix>.<10-hex>"
+// drawn from the existing disguise pool, with NO shared base, NO
+// role-revealing token (.a/.b/.ensure), and — critically — each from a
+// DISTINCT vendor family so the three read as unrelated third-party
+// agents (acceptance #1). The returned slice is positional, aligned with
+// osadapter.AllRoles (index 0 → RoleA, 1 → RoleB, 2 → RoleEnsure).
 //
-// Current implementation (intentionally kept): all three roles share one
-// random base, so the label set is:
-//
-//	<base>.a   <base>.b   <base>.ensure      e.g. com.apple.security.worker.ca800c0c11.{a,b,ensure}
-//
-// Known trade-off (accepted for now): the shared prefix means finding one
-// label reveals the other two via a prefix grep. This is acceptable under
-// the casual-grade-friction philosophy (durable weight is the server, not
-// secrecy). Deferred for future review — to switch to independent
-// per-role random labels, change ONLY this function (and how the base(s)
-// are persisted in osadapter.Spec). Tracked in:
-// https://github.com/eliteGoblin/focusd/issues/20
-func RoleLabel(base, role string) string {
-	return base + "." + role
+// Families are sampled WITHOUT replacement so no two labels share a
+// prefix/stem; the suffix and 10-hex tail are then drawn independently
+// per label. All randomness uses crypto/rand (via pick/randHex).
+func GenerateRoster() []string {
+	const meshSize = 3
+	// Group the prefix pool by vendor family.
+	byFamily := map[string][]string{}
+	var fams []string
+	for _, p := range prefixes {
+		f := family(p)
+		if _, ok := byFamily[f]; !ok {
+			fams = append(fams, f)
+		}
+		byFamily[f] = append(byFamily[f], p)
+	}
+	// Sample meshSize DISTINCT families without replacement (Fisher–Yates
+	// partial shuffle over the family list, crypto/rand driven).
+	for i := 0; i < meshSize && i < len(fams); i++ {
+		j := i + randIntn(len(fams)-i)
+		fams[i], fams[j] = fams[j], fams[i]
+	}
+	out := make([]string, 0, meshSize)
+	for i := 0; i < meshSize; i++ {
+		f := fams[i]
+		prefix := pickFrom(byFamily[f])
+		out = append(out, fmt.Sprintf("%s.%s.%s", prefix, pick(suffixes), randHex(randomTailBytes)))
+	}
+	return out
+}
+
+// pickFrom returns a crypto/rand-chosen element of s (s must be
+// non-empty; every family bucket has at least one prefix).
+func pickFrom(s []string) string { return s[randIntn(len(s))] }
+
+// randIntn returns a crypto/rand integer in [0,n) for n>0 (0 for n<=0).
+// Uses rejection sampling over a single byte's range to avoid the modulo
+// bias pick() tolerates — the family pool is small enough that one byte
+// always suffices.
+func randIntn(n int) int {
+	if n <= 0 {
+		return 0
+	}
+	limit := 256 - (256 % n) // largest multiple of n that fits in a byte
+	b := make([]byte, 1)
+	for {
+		_, _ = rand.Read(b)
+		if int(b[0]) < limit {
+			return int(b[0]) % n
+		}
+	}
 }
 
 // HiddenWorkdir is a dotted, Apple-metadata-looking directory under the
