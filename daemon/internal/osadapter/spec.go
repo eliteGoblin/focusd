@@ -14,7 +14,6 @@ import (
 	"time"
 
 	"github.com/eliteGoblin/focusd/daemon/internal/mode"
-	"github.com/eliteGoblin/focusd/daemon/internal/relocate"
 )
 
 // Role identifies one of the three mesh entries.
@@ -36,33 +35,51 @@ type Spec struct {
 	Workdir  string        // daemon work directory
 	Github   string        // owner/repo
 	Asset    string        // release asset filename
-	Interval time.Duration // reconcile / ensure interval
-	// Base is the disguised, per-install random launchd label base
-	// (user/system only; e.g. "com.apple.metadata.helper.7f3a2c11").
-	// Empty + non-test falls back to the non-disguised default (dev).
-	// Test mode always uses the fixed e2e base so e2e stays
-	// deterministic/safely removable.
-	Base string
+	Interval time.Duration // worker reconcile cadence (the fast in-process self-heal, ~2s)
+	// EnsureInterval is the ensurer plist's StartInterval — the periodic
+	// launchd backstop (FEATURE 10 / ADR-0014). DECOUPLED from Interval:
+	// the workers tick fast (~2s) for the real self-heal; the ensurer
+	// stays a ~10s backstop because launchd floors small StartInterval
+	// values. Empty → EnsureBackstopInterval.
+	EnsureInterval time.Duration
+	// Roster carries the three INDEPENDENT mesh labels (FEATURE 10 /
+	// ADR-0014), positional and aligned with AllRoles (index 0 → RoleA,
+	// 1 → RoleB, 2 → RoleEnsure). Generated once at install via
+	// relocate.GenerateRoster (distinct vendor families, no shared base,
+	// no role-revealing token) and persisted in the masked workdir roster
+	// + baked into each plist's argv so any survivor reconstructs it.
+	// Empty + non-test falls back to the non-disguised dev labels. Test
+	// mode ignores Roster and uses the fixed e2e labels.
+	Roster []string
 }
 
 // isTest reports whether this is the throwaway e2e install mode.
 func (s Spec) isTest() bool { return s.Mode == mode.Test }
 
-func (s Spec) base() string {
+// Label is the launchd label for a role. Resolution order:
+//   - test mode → the fixed, deterministic e2e label (safely removable)
+//   - a populated Roster → the independent label at the role's position
+//     in AllRoles (FEATURE 10: no shared base, used verbatim)
+//   - otherwise → the non-disguised dev fallback "com.focusd.daemon.<r>"
+func (s Spec) Label(r Role) string {
 	if s.isTest() {
-		return "com.focusd.daemon.e2e" // fixed → deterministic, safely removable
+		return "com.focusd.daemon.e2e." + string(r) // fixed → deterministic
 	}
-	if s.Base != "" {
-		return s.Base // user/system: per-install random disguised base
+	if i := roleIndex(r); i >= 0 && i < len(s.Roster) && s.Roster[i] != "" {
+		return s.Roster[i] // user/system: independent per-role disguised label
 	}
-	return "com.focusd.daemon" // dev fallback (unsigned, not disguised)
+	return "com.focusd.daemon." + string(r) // dev fallback (unsigned, not disguised)
 }
 
-// Label is the launchd label for a role. The label scheme itself lives in
-// exactly one place — relocate.RoleLabel — so the shared-prefix design
-// can be reviewed/changed in a single function (see the issue referenced
-// there). This method only picks the base (test/prod/dev).
-func (s Spec) Label(r Role) string { return relocate.RoleLabel(s.base(), string(r)) }
+// roleIndex returns r's position in AllRoles, or -1 if not found.
+func roleIndex(r Role) int {
+	for i, rr := range AllRoles {
+		if rr == r {
+			return i
+		}
+	}
+	return -1
+}
 
 // LabelFor builds a role label for the given test-mode flag.
 func LabelFor(testMode bool, r Role) string {

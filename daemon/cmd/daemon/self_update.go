@@ -185,11 +185,11 @@ func runSelfUpdate(o selfUpdateOpts) int {
 		return 1
 	}
 
-	// Build the new Spec: rotated SelfPath + new Base; same workdir.
-	// Preserve install-mode + non-disguised dev fallback handling by
-	// reusing osadapter.Spec.Label downstream — the new Base is the
-	// disguised label namespace that lets old/new plists coexist
-	// during the swap.
+	// Build the new Spec: rotated SelfPath + a NEW independent-label
+	// roster; same workdir. Reusing osadapter.Spec.Label downstream, the
+	// new roster (FEATURE 10 / ADR-0014: distinct vendor families, no
+	// shared base, no role token) is the disguised label set that lets the
+	// old and new meshes coexist during the swap.
 	newPath := filepath.Join(workdir, relocate.RandomBinaryName())
 	if newPath == cur.BinaryPath {
 		// Defensive: 4-hex collision is astronomical but explicit
@@ -197,7 +197,7 @@ func runSelfUpdate(o selfUpdateOpts) int {
 		fmt.Fprintln(os.Stderr, "self-update: rotated path matches current (try again)")
 		return 1
 	}
-	newBase := relocate.RandomBase()
+	newRoster := relocate.GenerateRoster()
 	// Preserve the install-time --interval instead of clobbering it
 	// with the package default. Operators who tuned it (e.g. via
 	// `daemon install --interval 30s`) shouldn't see cadence change
@@ -213,7 +213,10 @@ func runSelfUpdate(o selfUpdateOpts) int {
 		Github:   o.github,
 		Asset:    asset,
 		Interval: interval,
-		Base:     newBase,
+		// Keep the ensurer's launchd StartInterval the slower backstop,
+		// decoupled from the fast worker --interval (FEATURE 10 / ADR-0014).
+		EnsureInterval: osadapter.EnsureBackstopInterval,
+		Roster:         newRoster,
 	}
 
 	if o.dryRun {
@@ -226,7 +229,9 @@ func runSelfUpdate(o selfUpdateOpts) int {
 		fmt.Fprintln(os.Stderr, "self-update:", err)
 		return 1
 	}
-	fmt.Printf("self-update ok: %s → %s (new base=%s)\n", cur.BinaryPath, newPath, newBase)
+	// Do NOT print the disguised roster labels — they are exactly the
+	// strings a targeted bootout needs (FEATURE 10 honest-limitations).
+	fmt.Printf("self-update ok: %s → %s\n", cur.BinaryPath, newPath)
 	return 0
 }
 
@@ -237,12 +242,13 @@ func printDryRun(cur osadapter.CurInstall, newSpec osadapter.Spec, o selfUpdateO
 	fmt.Fprintln(w, "self-update --dry-run")
 	fmt.Fprintln(w, "  tag           ", o.tag)
 	fmt.Fprintln(w, "  current binary", cur.BinaryPath)
-	fmt.Fprintln(w, "  current base  ", cur.Base)
-	fmt.Fprintln(w, "  current labels", strings.Join(cur.Labels, ", "))
 	fmt.Fprintln(w, "  new binary    ", newSpec.SelfPath)
-	fmt.Fprintln(w, "  new base      ", newSpec.Base)
-	fmt.Fprintln(w, "  new labels    ",
-		newSpec.Label(osadapter.RoleA), newSpec.Label(osadapter.RoleB), newSpec.Label(osadapter.RoleEnsure))
+	// The disguised roster labels (old + new) are deliberately NOT printed
+	// — they are the strings a targeted bootout needs (FEATURE 10 /
+	// ADR-0014). We show only the count so the operator sees the mesh size
+	// is right without learning the names.
+	fmt.Fprintln(w, "  current mesh  ", len(cur.Labels), "labels (redacted)")
+	fmt.Fprintln(w, "  new mesh      ", len(osadapter.AllRoles), "labels (redacted)")
 	fmt.Fprintln(w, "  workdir       ", newSpec.Workdir, "(unchanged)")
 	fmt.Fprintln(w, "  --keep-old    ", o.keepOld)
 	fmt.Fprintln(w, "  health timeout", o.healthyTimeout)

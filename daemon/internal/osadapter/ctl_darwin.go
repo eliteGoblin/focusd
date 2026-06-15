@@ -57,21 +57,30 @@ func (laFS) remove(path string) error {
 	return nil
 }
 
-// Install writes + loads all three mesh entries.
+// Install writes the masked roster + loads all three mesh entries.
 func Install(s Spec) error {
 	_ = os.MkdirAll(s.Workdir, 0o755)
-	return installAll(s, launchctlCtl{m: s.Mode}, laFS{m: s.Mode})
+	return installAll(s, launchctlCtl{m: s.Mode}, laFS{m: s.Mode}, newWorkdirRoster(s.Workdir))
 }
 
-// Uninstall boots out + removes all three entries.
+// Uninstall boots out + removes all three entries + the roster file.
 func Uninstall(testMode bool) error {
 	m := modeFromTestFlag(testMode)
-	return uninstallAll(Spec{Mode: m}, launchctlCtl{m: m}, laFS{m: m})
+	// Uninstall via the legacy fixed-label path doesn't know the workdir;
+	// the disguised-install teardown is UninstallProd. Test-mode uninstall
+	// uses the given workdir via the caller; here we have none, so skip the
+	// roster removal (the prod teardown path handles the real file).
+	return uninstallAll(Spec{Mode: m}, launchctlCtl{m: m}, laFS{m: m}, nil)
 }
 
-// EnsureAll recreates any missing mesh entry (mutual self-healing).
+// EnsureAll recreates any missing mesh entry (mutual self-healing) and
+// self-heals the masked roster file from the in-memory roster.
 func EnsureAll(s Spec) ([]Role, error) {
-	return ensureAll(s, launchctlCtl{m: s.Mode}, laFS{m: s.Mode})
+	var rs rosterIO
+	if s.Workdir != "" {
+		rs = newWorkdirRoster(s.Workdir)
+	}
+	return ensureAll(s, launchctlCtl{m: s.Mode}, laFS{m: s.Mode}, rs)
 }
 
 // IsLoaded reports whether a role's launchd entry is registered.
@@ -99,13 +108,17 @@ func modeFromTestFlag(testMode bool) mode.Mode {
 // already owns that identifier in this package.
 //
 // Each field is populated when the scan finds the full mesh (3 plists
-// whose Label shares the same disguised base AND whose ProgramArguments
-// point at the same Ed25519-verified binary). When the mesh is
-// incomplete the entries that were found are still returned in the
-// slices in scan order (caller decides whether that is fatal).
+// whose ProgramArguments point at the same Ed25519-verified binary AND
+// carry the same --roster label set). When the mesh is incomplete the
+// entries that were found are still returned in the slices in scan order
+// (caller decides whether that is fatal).
+//
+// FEATURE 10 / ADR-0014: the three mesh labels are now INDEPENDENT (no
+// shared base), so correlation is by verified-binary + the --roster argv
+// the installer baked into every plist — NOT by a shared label stem.
 type CurInstall struct {
 	Mode       mode.Mode     // user | system (Test is not discovered this way)
-	Base       string        // disguised label base, e.g. "com.apple.metadata.helper.7f3a"
+	Roster     []string      // the 3 independent mesh labels (AllRoles order), from --roster argv
 	Workdir    string        // recovered from the plist's --workdir argv
 	BinaryPath string        // the ProgramArguments[0] binary path
 	Interval   time.Duration // reconcile interval recovered from --interval argv (0 if absent)
@@ -121,8 +134,8 @@ type CurInstall struct {
 // found, an error only for filesystem failure.
 //
 // All three mesh entries must agree on the same binary path and the
-// same disguised label base; otherwise the function returns whatever
-// it could parse and the caller decides.
+// same --roster label set; otherwise the function returns whatever it
+// could parse and the caller decides.
 // Verifier is the signature-check seam — production passes sig.VerifyFile
 // (the real Ed25519 check against the embedded public key); tests pass
 // a fake to avoid needing the offline private key in CI. Replaces the
@@ -159,18 +172,21 @@ func FindCurrentInstall(m mode.Mode, verify Verifier) (CurInstall, error) {
 		if ok, verr := verify(bin); verr != nil || !ok {
 			continue // not a genuine focusd binary → not ours
 		}
-		// Establish the install's binary path + base from the FIRST
-		// matched plist; subsequent matches must agree.
+		// Establish the install's binary path + roster from the FIRST
+		// matched plist; subsequent matches must agree on BOTH. The
+		// roster (--roster argv) is the FEATURE 10 correlation key that
+		// replaced the retired shared-base check: the three independent
+		// labels share no stem, but every plist carries the same roster.
 		if cur.BinaryPath == "" {
 			cur.BinaryPath = bin
 		} else if cur.BinaryPath != bin {
 			continue // unrelated focusd install (different rotation)
 		}
-		base := labelBase(label)
-		if cur.Base == "" {
-			cur.Base = base
-		} else if cur.Base != base {
-			continue
+		roster := rosterFromArgv(argv)
+		if cur.Roster == nil {
+			cur.Roster = roster
+		} else if !sameRoster(cur.Roster, roster) {
+			continue // a different mesh's plist (different roster) → not ours
 		}
 		if cur.Workdir == "" {
 			cur.Workdir = workdirFromArgv(argv)
@@ -207,15 +223,41 @@ func MeshStatus(m mode.Mode) (loaded, total int, found bool, err error) {
 	return loaded, len(cur.Labels), true, nil
 }
 
-// labelBase strips a trailing ".a"/".b"/".ensure" suffix off a launchd
-// label, returning the disguised install base.
-func labelBase(label string) string {
-	for _, suf := range []string{".a", ".b", ".ensure"} {
-		if strings.HasSuffix(label, suf) {
-			return strings.TrimSuffix(label, suf)
+// rosterFromArgv pulls the comma-joined "--roster" value out of a parsed
+// argv and splits it into the mesh-label set (FEATURE 10 / ADR-0014).
+// Returns nil when the flag is absent or empty. This is the correlation
+// key FindCurrentInstall uses now that the three labels share no base.
+func rosterFromArgv(argv []string) []string {
+	var raw string
+	for i, a := range argv {
+		if a == "--roster" && i+1 < len(argv) {
+			raw = argv[i+1]
+			break
+		}
+		if strings.HasPrefix(a, "--roster=") {
+			raw = strings.TrimPrefix(a, "--roster=")
+			break
 		}
 	}
-	return label
+	if raw == "" {
+		return nil
+	}
+	return strings.Split(raw, ",")
+}
+
+// sameRoster reports whether two roster label sets are identical in
+// order and content — the agreement check that ties three plists to one
+// install.
+func sameRoster(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
 }
 
 // workdirFromArgv pulls the value following "--workdir" out of a parsed
@@ -280,6 +322,13 @@ func UninstallProd() (removed []string, err error) {
 		_ = c.bootout(label)
 		_ = os.Remove(cur.PlistPaths[i])
 		removed = append(removed, label)
+	}
+	// Remove the masked roster file LAST (best-effort): the mesh it
+	// described is gone, so a mid-uninstall survivor could recover until
+	// here. A leftover roster is harmless dead weight, not a correctness
+	// problem — so a remove failure does not fail the teardown.
+	if cur.Workdir != "" {
+		_ = newWorkdirRoster(cur.Workdir).removeRoster()
 	}
 	return removed, nil
 }
@@ -404,7 +453,11 @@ func SelfUpdateProd(
 	c := launchctlCtl{m: newSpec.Mode}
 	fs := laFS{m: newSpec.Mode}
 	p := launchctlProber{m: newSpec.Mode}
-	return SelfUpdate(cur, newSpec, newBin, c, fs, p, binPlacerFS{},
+	var rs rosterIO
+	if newSpec.Workdir != "" {
+		rs = newWorkdirRoster(newSpec.Workdir)
+	}
+	return SelfUpdate(cur, newSpec, newBin, c, fs, p, binPlacerFS{}, rs,
 		healthyTimeout, probeInterval, keepOld)
 }
 
