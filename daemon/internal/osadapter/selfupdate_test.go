@@ -95,10 +95,13 @@ func (b *fakeBinPlacer) remove(p string) error {
 
 // --- shared spec helpers --------------------------------------------------
 
+// curInstall models a PRE-FEATURE-10 (old-scheme) install: a shared base
+// with role-revealing .a/.b/.ensure suffixes. self-update migrates this to
+// the new independent-label roster. cur.Labels/PlistPaths are explicit
+// here (SelfUpdate receives cur directly; it does not re-discover).
 func curInstall() CurInstall {
 	return CurInstall{
 		Mode:       mode.User,
-		Base:       "com.apple.metadata.helper.OLD",
 		Workdir:    "/wd",
 		BinaryPath: "/wd/com.apple.metadata.helper.OLD",
 		PlistPaths: []string{
@@ -114,16 +117,26 @@ func curInstall() CurInstall {
 	}
 }
 
-func newSpecRotated(workdir, newBin, newBase string) Spec {
+// newRosterFixture is the NEW independent-label roster (distinct vendor
+// families, no shared stem, no role token) self-update rotates to.
+func newRosterFixture() []string {
+	return []string{
+		"com.apple.cfprefsd.helper.NEW1111111",
+		"com.google.keystone.daemon.NEW2222222",
+		"org.mozilla.updater.agent.NEW3333333",
+	}
+}
+
+func newSpecRotated(workdir, newBin string, roster []string) Spec {
 	return Spec{
 		Mode: mode.User, SelfPath: newBin, Workdir: workdir,
 		Github: "o/r", Asset: "daemon-darwin-arm64",
-		Interval: 10 * time.Second, Base: newBase,
+		Interval: 10 * time.Second, Roster: roster,
 	}
 }
 
 func newSpec() Spec {
-	return newSpecRotated("/wd", "/wd/com.apple.cfprefsd.helper.NEW", "com.apple.cfprefsd.helper.NEW")
+	return newSpecRotated("/wd", "/wd/com.apple.cfprefsd.helper.NEW", newRosterFixture())
 }
 
 // allHealthy returns prober maps that mark every new label as loaded
@@ -157,7 +170,7 @@ func TestSelfUpdate_HappyPath(t *testing.T) {
 	loaded, pids := allHealthy(s)
 	p := newFakeProber(loaded, pids)
 
-	if err := SelfUpdate(cur, s, []byte("NEWBIN"), c, fs, p, &fakeBinPlacerWrap{b}, 2*time.Second, 5*time.Millisecond, false); err != nil {
+	if err := SelfUpdate(cur, s, []byte("NEWBIN"), c, fs, p, &fakeBinPlacerWrap{b}, nil, 2*time.Second, 5*time.Millisecond, false); err != nil {
 		t.Fatalf("happy path: %v", err)
 	}
 
@@ -199,7 +212,7 @@ func TestSelfUpdate_KeepOldLeavesOldOnDisk(t *testing.T) {
 	loaded, pids := allHealthy(s)
 	p := newFakeProber(loaded, pids)
 
-	if err := SelfUpdate(cur, s, []byte("NEWBIN"), c, fs, p, &fakeBinPlacerWrap{b}, 2*time.Second, 5*time.Millisecond, true); err != nil {
+	if err := SelfUpdate(cur, s, []byte("NEWBIN"), c, fs, p, &fakeBinPlacerWrap{b}, nil, 2*time.Second, 5*time.Millisecond, true); err != nil {
 		t.Fatalf("keep-old: %v", err)
 	}
 
@@ -222,7 +235,7 @@ func TestSelfUpdate_PreflightNoInstall(t *testing.T) {
 	c, fs := newFakeCtl(), newFakeFS()
 	b := &fakeBinPlacer{}
 	p := newFakeProber(nil, nil)
-	err := SelfUpdate(CurInstall{}, newSpec(), []byte("X"), c, fs, p, &fakeBinPlacerWrap{b}, time.Second, 5*time.Millisecond, false)
+	err := SelfUpdate(CurInstall{}, newSpec(), []byte("X"), c, fs, p, &fakeBinPlacerWrap{b}, nil, time.Second, 5*time.Millisecond, false)
 	if err == nil || !strings.Contains(err.Error(), "incomplete install") {
 		t.Fatalf("expected preflight failure, got %v", err)
 	}
@@ -242,7 +255,7 @@ func TestSelfUpdate_RejectsSamePath(t *testing.T) {
 	s.SelfPath = cur.BinaryPath // same path → must reject (AMFI premise)
 	b := &fakeBinPlacer{}
 	p := newFakeProber(nil, nil)
-	err := SelfUpdate(cur, s, []byte("X"), c, fs, p, &fakeBinPlacerWrap{b}, time.Second, 5*time.Millisecond, false)
+	err := SelfUpdate(cur, s, []byte("X"), c, fs, p, &fakeBinPlacerWrap{b}, nil, time.Second, 5*time.Millisecond, false)
 	if err == nil || !strings.Contains(err.Error(), "path rotation") {
 		t.Fatalf("expected path-rotation rejection, got %v", err)
 	}
@@ -264,7 +277,7 @@ func TestSelfUpdate_BootstrapFailRollsBack(t *testing.T) {
 	// Make role B bootstrap fail.
 	c.bootstrapFailOn = fs.plistPath(s.Label(RoleB))
 
-	err := SelfUpdate(cur, s, []byte("NEWBIN"), c, fs, p, &fakeBinPlacerWrap{b}, time.Second, 5*time.Millisecond, false)
+	err := SelfUpdate(cur, s, []byte("NEWBIN"), c, fs, p, &fakeBinPlacerWrap{b}, nil, time.Second, 5*time.Millisecond, false)
 	if err == nil || !strings.Contains(err.Error(), "bootstrap new") {
 		t.Fatalf("expected bootstrap error, got %v", err)
 	}
@@ -306,7 +319,7 @@ func TestSelfUpdate_PlistWriteFailRollsBack(t *testing.T) {
 	// Make plist write fail for role ensure (last one).
 	fs.writeFailOn = fs.plistPath(s.Label(RoleEnsure))
 
-	err := SelfUpdate(cur, s, []byte("NEWBIN"), c, fs, newFakeProber(nil, nil), &fakeBinPlacerWrap{b}, time.Second, 5*time.Millisecond, false)
+	err := SelfUpdate(cur, s, []byte("NEWBIN"), c, fs, newFakeProber(nil, nil), &fakeBinPlacerWrap{b}, nil, time.Second, 5*time.Millisecond, false)
 	if err == nil || !strings.Contains(err.Error(), "write new plist") {
 		t.Fatalf("expected write-plist error, got %v", err)
 	}
@@ -332,7 +345,7 @@ func TestSelfUpdate_HealthPollTimeoutRollsBack(t *testing.T) {
 	p := newFakeProber(nil, nil)
 	p.neverHealthy = true
 
-	err := SelfUpdate(cur, s, []byte("NEWBIN"), c, fs, p, &fakeBinPlacerWrap{b}, 30*time.Millisecond, 5*time.Millisecond, false)
+	err := SelfUpdate(cur, s, []byte("NEWBIN"), c, fs, p, &fakeBinPlacerWrap{b}, nil, 30*time.Millisecond, 5*time.Millisecond, false)
 	if err == nil || !strings.Contains(err.Error(), "health-poll timeout") {
 		t.Fatalf("expected health-poll timeout, got %v", err)
 	}
@@ -371,7 +384,7 @@ func TestSelfUpdate_OldBootoutFailureNotFatal(t *testing.T) {
 	// = ensure → B → A) — error is swallowed and the run succeeds anyway.
 	c.bootoutErrOn = map[string]error{cur.Labels[0]: errors.New("synthetic")}
 
-	if err := SelfUpdate(cur, s, []byte("NEWBIN"), c, fs, p, &fakeBinPlacerWrap{b}, time.Second, 5*time.Millisecond, false); err != nil {
+	if err := SelfUpdate(cur, s, []byte("NEWBIN"), c, fs, p, &fakeBinPlacerWrap{b}, nil, time.Second, 5*time.Millisecond, false); err != nil {
 		t.Fatalf("old-bootout failure must not be fatal: %v", err)
 	}
 	// New mesh up.
@@ -398,7 +411,7 @@ func TestSelfUpdate_HealthPollNeedsTwoConsecutiveOKs(t *testing.T) {
 	// OKs are required AND that intermittent failures don't latch.)
 	p.gateRounds = 1
 
-	if err := SelfUpdate(cur, s, []byte("NEWBIN"), c, fs, p, &fakeBinPlacerWrap{b}, 1*time.Second, 5*time.Millisecond, false); err != nil {
+	if err := SelfUpdate(cur, s, []byte("NEWBIN"), c, fs, p, &fakeBinPlacerWrap{b}, nil, 1*time.Second, 5*time.Millisecond, false); err != nil {
 		t.Fatalf("expected eventual healthy: %v", err)
 	}
 }
@@ -413,7 +426,7 @@ func TestSelfUpdate_PlaceBinaryFailureFatal(t *testing.T) {
 	b := &fakeBinPlacer{bytes: map[string][]byte{cur.BinaryPath: {0x01}}}
 	s := newSpec()
 	b.failOn = s.SelfPath
-	err := SelfUpdate(cur, s, []byte("X"), c, fs, newFakeProber(nil, nil), &fakeBinPlacerWrap{b}, time.Second, 5*time.Millisecond, false)
+	err := SelfUpdate(cur, s, []byte("X"), c, fs, newFakeProber(nil, nil), &fakeBinPlacerWrap{b}, nil, time.Second, 5*time.Millisecond, false)
 	if err == nil || !strings.Contains(err.Error(), "place new binary") {
 		t.Fatalf("expected place failure, got %v", err)
 	}
@@ -421,6 +434,103 @@ func TestSelfUpdate_PlaceBinaryFailureFatal(t *testing.T) {
 	for _, oldL := range cur.Labels {
 		if !c.loaded(oldL) {
 			t.Errorf("old label %s must remain loaded after place failure", oldL)
+		}
+	}
+}
+
+// TestSelfUpdate_MigratesOldSchemeMeshNoDoubleRun is the FEATURE 10 /
+// ADR-0014 migration integration test (the must-test path): an install
+// running the OLD shared-base scheme (labels `<base>.a/.b/.ensure`) is
+// self-updated to the NEW independent-label roster (distinct families, no
+// role token). It asserts acceptance #2's safety invariant — after the
+// swap the three OLD entries are booted out and ONLY the three NEW entries
+// are loaded, so the mesh never double-runs (6 fighting daemons).
+//
+// It also pins the positional-health-poll fix: the new labels carry no
+// .a/.b/.ensure token, so a text-keyed worker check (the retired
+// isWorkerLabel) would never see a worker, skip the PID gate, and pass a
+// migration that wasn't actually healthy. Here only A/B (positions 0/1)
+// are given PIDs; the run must still go green via positional detection.
+func TestSelfUpdate_MigratesOldSchemeMeshNoDoubleRun(t *testing.T) {
+	c, fs := newFakeCtl(), newFakeFS()
+
+	// Stand up the OLD-scheme mesh (shared base + .a/.b/.ensure).
+	cur := curInstall()
+	for i, l := range cur.Labels {
+		c.loadedSet[l] = true
+		fs.files[cur.PlistPaths[i]] = "OLD"
+		// Sanity: the OLD labels really do carry role tokens (the thing
+		// F10 removes) — so this test exercises the migration, not a no-op.
+		if !strings.HasSuffix(l, ".a") && !strings.HasSuffix(l, ".b") && !strings.HasSuffix(l, ".ensure") {
+			t.Fatalf("fixture not old-scheme: %q", l)
+		}
+	}
+	b := &fakeBinPlacer{bytes: map[string][]byte{cur.BinaryPath: {0x01}}}
+	rs := &fakeRoster{labels: cur.Labels, present: true} // stale OLD roster on disk
+
+	// NEW spec: independent roster, no shared stem, no role token.
+	s := newSpec()
+	for _, l := range s.Roster {
+		if strings.HasSuffix(l, ".a") || strings.HasSuffix(l, ".b") || strings.HasSuffix(l, ".ensure") {
+			t.Fatalf("new roster must NOT carry a role token: %q", l)
+		}
+	}
+
+	// Health: only A/B (positions 0/1) get a live PID. The ensurer (pos 2)
+	// is StartInterval and intentionally has no PID. Positional detection
+	// must accept this; a text-keyed check would not.
+	loaded := map[string]bool{
+		s.Label(RoleA): true, s.Label(RoleB): true, s.Label(RoleEnsure): true,
+	}
+	pids := map[string]bool{s.Label(RoleA): true, s.Label(RoleB): true}
+	p := newFakeProber(loaded, pids)
+
+	if err := SelfUpdate(cur, s, []byte("NEWBIN"), c, fs, p, &fakeBinPlacerWrap{b}, rs,
+		2*time.Second, 5*time.Millisecond, false); err != nil {
+		t.Fatalf("migration self-update failed: %v", err)
+	}
+
+	// NO DOUBLE-RUN: every OLD label booted out; only the 3 NEW labels loaded.
+	for _, oldL := range cur.Labels {
+		if c.loaded(oldL) {
+			t.Errorf("old-scheme label %q still loaded after migration (double-run risk)", oldL)
+		}
+	}
+	loadedCount := 0
+	for _, r := range AllRoles {
+		if !c.loaded(s.Label(r)) {
+			t.Errorf("new role %s not loaded after migration", r)
+		}
+	}
+	for l := range c.loadedSet {
+		loadedCount++
+		isNew := false
+		for _, r := range AllRoles {
+			if l == s.Label(r) {
+				isNew = true
+			}
+		}
+		if !isNew {
+			t.Errorf("unexpected label still loaded after migration: %q", l)
+		}
+	}
+	if loadedCount != len(AllRoles) {
+		t.Fatalf("exactly %d entries must be loaded post-migration, got %d", len(AllRoles), loadedCount)
+	}
+
+	// The masked roster file was rewritten to the NEW labels (stale OLD
+	// roster overwritten) so a cold-start survivor recovers the new mesh.
+	if !sameRoster(rs.labels, s.Roster) {
+		t.Errorf("roster file not migrated: got %v, want %v", rs.labels, s.Roster)
+	}
+
+	// OLD binary + plists cleaned up (the migration completed, not --keep-old).
+	if _, ok := b.bytes[cur.BinaryPath]; ok {
+		t.Errorf("old binary not removed after migration")
+	}
+	for _, pp := range cur.PlistPaths {
+		if _, ok := fs.files[pp]; ok {
+			t.Errorf("old plist %q not removed after migration", pp)
 		}
 	}
 }
