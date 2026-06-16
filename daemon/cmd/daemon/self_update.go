@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/eliteGoblin/focusd/daemon/internal/core"
 	"github.com/eliteGoblin/focusd/daemon/internal/fetch"
 	"github.com/eliteGoblin/focusd/daemon/internal/mode"
 	"github.com/eliteGoblin/focusd/daemon/internal/osadapter"
@@ -228,6 +229,14 @@ func runSelfUpdate(o selfUpdateOpts) int {
 		o.healthyTimeout, o.probeInterval, o.keepOld); err != nil {
 		fmt.Fprintln(os.Stderr, "self-update:", err)
 		return 1
+	}
+	// FEATURE 12 / ADR-0016: keep the out-of-band watchdog copy in sync with
+	// the rotated binary — place a fresh copy of the new binary + rewrite the
+	// cron line to it (and the current desired). Best-effort; do NOT print
+	// paths, and a refresh failure must not fail the (completed) self-update.
+	desired := (&core.Store{Dir: workdir}).Desired()
+	if werr := osadapter.RefreshWatchdog(invokeMode, newPath, desired); werr != nil {
+		fmt.Fprintln(os.Stderr, "self-update: refresh watchdog (best-effort)")
 	}
 	// Do NOT print the disguised roster labels — they are exactly the
 	// strings a targeted bootout needs (FEATURE 10 honest-limitations).

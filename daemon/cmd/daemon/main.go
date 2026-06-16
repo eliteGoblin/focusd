@@ -87,6 +87,8 @@ func run(args []string) int {
 		return doInstall(args[1:])
 	case "uninstall":
 		return doUninstall(args[1:])
+	case "watchdog":
+		return doWatchdog(args[1:])
 	case "self-update":
 		return doSelfUpdate(args[1:])
 	case "status":
@@ -99,7 +101,7 @@ func run(args []string) int {
 }
 
 func usage() {
-	fmt.Fprintln(os.Stderr, "usage: daemon run|once|update|version|install|uninstall|self-update|status [flags]")
+	fmt.Fprintln(os.Stderr, "usage: daemon run|once|update|version|install|uninstall|watchdog|self-update|status [flags]")
 }
 
 type opts struct {
@@ -238,6 +240,14 @@ func loop(args []string, once bool) int {
 				log.Warn("ensure-all", "err", eerr)
 			} else if len(rec) > 0 {
 				log.Info("mesh recreated", "roles", rec)
+			}
+			// FEATURE 12 / ADR-0016: mutual guarding — the mesh's own
+			// reconcile also keeps the out-of-band watchdog rail up. Pass an
+			// empty copy path: EnsureWatchdog's darwin impl recovers the copy
+			// from the existing cron line, or places a fresh one if the rail
+			// was removed (place-if-missing). Best-effort; never fails a tick.
+			if werr := osadapter.EnsureWatchdog(spec.Mode, "", (&core.Store{Dir: o.workdir}).Desired()); werr != nil {
+				log.Warn("ensure-watchdog", "err", werr)
 			}
 		}
 	}
@@ -447,6 +457,50 @@ func doInstall(args []string) int {
 		Interval:       workerHealInterval,
 		EnsureInterval: osadapter.EnsureBackstopInterval,
 	}
+	if err := installMesh(self, &spec, *desired); err != nil {
+		// Fail fast, no silent downgrade (FEATURE 08 / ADR-0010). If the
+		// operator clearly intended the full (system) install — they ran
+		// with sudo, so euid is root — and it failed, we exit non-zero and
+		// tell them how to choose the degraded user install EXPLICITLY. We
+		// do NOT auto-retry as user: switching is the operator's decision.
+		fmt.Fprintln(os.Stderr, "install:", err)
+		for _, line := range installFailureHint(m, *desired) {
+			fmt.Fprintln(os.Stderr, line)
+		}
+		return 1
+	}
+	fmt.Printf("installed %s mesh (desired platform = %s)\n", m, *desired)
+	for _, line := range installCoverageNotice(m) {
+		fmt.Println(line)
+	}
+
+	// FEATURE 12 / ADR-0016: stand up the out-of-band watchdog rail AFTER the
+	// mesh is up — a SECOND disguised copy of this binary in its OWN hidden
+	// dir (outside the mesh workdir, so a workdir wipe leaves it) + a root
+	// cron line that runs `daemon watchdog` once a minute. Best-effort: a
+	// watchdog failure must NOT fail the install (the mesh is already up and
+	// the mesh's own reconcile re-installs the rail). darwin-only.
+	if osSupportsLaunchd() {
+		home, _ := os.UserHomeDir()
+		wdDir := relocate.HiddenWorkdir(mode.SupportRoot(m, home))
+		copyPath, cerr := relocate.RelocateInto(self, wdDir)
+		if cerr != nil {
+			fmt.Fprintln(os.Stderr, "watchdog: place copy:", cerr)
+		} else if werr := osadapter.EnsureWatchdog(m, copyPath, *desired); werr != nil {
+			fmt.Fprintln(os.Stderr, "watchdog: ensure cron:", werr)
+		}
+	}
+	return 0
+}
+
+// installMesh stands up the launchd mesh: relocate (user/system) → pin the
+// desired platform version → osadapter.Install. Extracted from doInstall so
+// the out-of-band watchdog (`daemon watchdog`) can run the SAME install path
+// for a local rebuild (FEATURE 12 / ADR-0016) without re-deriving the
+// relocate→WriteDesired→Install sequence. Mutates spec's SelfPath/Workdir/
+// Roster in place for the user/system relocation.
+func installMesh(self string, spec *osadapter.Spec, desired string) error {
+	m := spec.Mode
 	if m != mode.Test {
 		// user/system: self-relocate into a hidden random workdir under
 		// this mode's Application Support root (user → ~/Library,
@@ -458,8 +512,7 @@ func doInstall(args []string) int {
 		wd := relocate.HiddenWorkdir(mode.SupportRoot(m, home))
 		reloc, rerr := relocate.RelocateInto(self, wd)
 		if rerr != nil {
-			fmt.Fprintln(os.Stderr, "relocate:", rerr)
-			return 1
+			return fmt.Errorf("relocate: %w", rerr)
 		}
 		spec.SelfPath = reloc
 		spec.Workdir = wd
@@ -476,27 +529,10 @@ func doInstall(args []string) int {
 	// in steady state but cosmetically alarming on first install. Go-
 	// review HIGH #3.
 	st := &core.Store{Dir: spec.Workdir}
-	if err := st.WriteDesired(*desired); err != nil {
-		fmt.Fprintln(os.Stderr, "write desired:", err)
-		return 1
+	if err := st.WriteDesired(desired); err != nil {
+		return fmt.Errorf("write desired: %w", err)
 	}
-	if err := osadapter.Install(spec); err != nil {
-		// Fail fast, no silent downgrade (FEATURE 08 / ADR-0010). If the
-		// operator clearly intended the full (system) install — they ran
-		// with sudo, so euid is root — and it failed, we exit non-zero and
-		// tell them how to choose the degraded user install EXPLICITLY. We
-		// do NOT auto-retry as user: switching is the operator's decision.
-		fmt.Fprintln(os.Stderr, "install:", err)
-		for _, line := range installFailureHint(m, *desired) {
-			fmt.Fprintln(os.Stderr, line)
-		}
-		return 1
-	}
-	fmt.Printf("installed %s mesh (desired platform = %s)\n", m, *desired)
-	for _, line := range installCoverageNotice(m) {
-		fmt.Println(line)
-	}
-	return 0
+	return osadapter.Install(*spec)
 }
 
 // installFailureHint returns the operator guidance printed when
@@ -596,6 +632,13 @@ func doUninstall(args []string) int {
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "uninstall:", err)
 		return 1
+	}
+	// FEATURE 12 / ADR-0016: tear down the out-of-band watchdog rail too (cron
+	// line + copy dir). Best-effort — a leftover watchdog re-installs the mesh,
+	// which is wrong AFTER a deliberate, gate-satisfied uninstall, so we try;
+	// but a failure here must not fail the (already-completed) mesh teardown.
+	if werr := osadapter.RemoveWatchdog(mode.Resolve()); werr != nil {
+		fmt.Fprintln(os.Stderr, "uninstall: remove watchdog (best-effort):", werr)
 	}
 	_ = uninstallgate.Clear(gpath) // gate state dies with the install
 	// Redact the disguised labels (consistent with install/self-update): the
