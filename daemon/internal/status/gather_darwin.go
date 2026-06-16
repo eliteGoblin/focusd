@@ -62,6 +62,15 @@ func Gather(workdirOverride string, jsonMode bool) (Snapshot, PlatformDetail) {
 		s.Found = found
 	}
 
+	// --- Out-of-band watchdog rail liveness (bools only) ---
+	// FEATURE 12 / ADR-0016: a silently-dead cron watchdog must be checkable.
+	// WatchdogStatus crosses ONLY bools (cron line present / copy on disk) —
+	// the copy path never leaves the osadapter boundary, so this cannot leak.
+	cronPresent, copyOK := osadapter.WatchdogStatus(m)
+	s.WatchdogChecked = true
+	s.WatchdogCron = cronPresent
+	s.WatchdogCopyOK = copyOK
+
 	// --- Discover the install (workdir + binary path stay tokenised) ---
 	var workdirTok redact.Token
 	if workdirOverride != "" {

@@ -62,6 +62,15 @@ type Snapshot struct {
 	// Found reports whether any genuine install was discovered at all.
 	// found=false with no permission error ⇒ clean DOWN ("nothing installed").
 	Found bool
+
+	// Watchdog rail liveness (FEATURE 12 / ADR-0016). WatchdogCron: the root
+	// cron line is present; WatchdogCopyOK: the binary copy it points at is on
+	// disk. Bools only (no paths) — a silently-dead cron watchdog must be
+	// checkable (ADR-0016 honest limitation). WatchdogChecked is false on
+	// non-darwin / when the rail does not apply, so render can stay silent.
+	WatchdogChecked bool
+	WatchdogCron    bool
+	WatchdogCopyOK  bool
 }
 
 // Result is the assessor's verdict plus a short, redaction-safe note.
