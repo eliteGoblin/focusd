@@ -107,6 +107,12 @@ func RenderText(s Snapshot, res Result, pd PlatformDetail, out io.Writer, color 
 	fmt.Fprintf(out, "  %-22s %s\n", "platform process", procLine(s))
 	fmt.Fprintf(out, "  %-22s %s\n", "platform version", versionLine(s))
 
+	// Out-of-band watchdog rail liveness (FEATURE 12 / ADR-0016). Only shown
+	// where the rail applies (darwin); bools only, no paths.
+	if s.WatchdogChecked {
+		fmt.Fprintf(out, "  %-22s %s\n", "out-of-band watchdog", watchdogLine(s))
+	}
+
 	// Platform passthrough section.
 	fmt.Fprintln(out, "platform protections")
 	if pd.Available && pd.TextOutput != "" {
@@ -150,6 +156,21 @@ func procLine(s Snapshot) string {
 	}
 }
 
+// watchdogLine describes the out-of-band watchdog rail in bools-only terms:
+// "present" (cron line + copy both there), "MISSING" (no cron line), or a
+// partial "cron present, copy MISSING" (cron fires but its binary is gone —
+// the silently-broken state ADR-0016 says must be visible).
+func watchdogLine(s Snapshot) string {
+	switch {
+	case s.WatchdogCron && s.WatchdogCopyOK:
+		return "present"
+	case s.WatchdogCron && !s.WatchdogCopyOK:
+		return "cron present, copy MISSING"
+	default:
+		return "MISSING"
+	}
+}
+
 func versionLine(s Snapshot) string {
 	if s.VersionsUnknown {
 		return "unknown (re-run with sudo)"
@@ -178,6 +199,9 @@ type daemonJSON struct {
 	VersionsUnknown bool   `json:"versions_unknown"`
 	WarmingUp       bool   `json:"warming_up"`
 	Found           bool   `json:"found"`
+	WatchdogChecked bool   `json:"watchdog_checked"`
+	WatchdogCron    bool   `json:"watchdog_cron"`
+	WatchdogCopyOK  bool   `json:"watchdog_copy_ok"`
 	Verdict         string `json:"verdict"`
 	Note            string `json:"note"`
 }
@@ -207,6 +231,9 @@ func RenderJSON(s Snapshot, res Result, pd PlatformDetail, out io.Writer) {
 			VersionsUnknown: s.VersionsUnknown,
 			WarmingUp:       s.WarmingUp,
 			Found:           s.Found,
+			WatchdogChecked: s.WatchdogChecked,
+			WatchdogCron:    s.WatchdogCron,
+			WatchdogCopyOK:  s.WatchdogCopyOK,
 			Verdict:         string(res.Verdict),
 			Note:            res.Note,
 		},
