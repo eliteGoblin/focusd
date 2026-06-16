@@ -485,7 +485,10 @@ func doInstall(args []string) int {
 		wdDir := relocate.HiddenWorkdir(mode.SupportRoot(m, home))
 		copyPath, cerr := relocate.RelocateInto(self, wdDir)
 		if cerr != nil {
-			fmt.Fprintln(os.Stderr, "watchdog: place copy:", cerr)
+			// Do NOT print cerr: its underlying MkdirAll/Link error string
+			// embeds the hidden watchdog dir path (the exact string a
+			// weak-moment self would `rm`). Generic message only.
+			fmt.Fprintln(os.Stderr, "watchdog: could not place out-of-band copy")
 		} else if werr := osadapter.EnsureWatchdog(m, copyPath, *desired); werr != nil {
 			fmt.Fprintln(os.Stderr, "watchdog: ensure cron:", werr)
 		}
@@ -517,10 +520,11 @@ func installMesh(self string, spec *osadapter.Spec, desired string) error {
 		spec.SelfPath = reloc
 		spec.Workdir = wd
 		spec.Roster = relocate.GenerateRoster()
-		// Do NOT print the disguised roster labels — they are the strings a
-		// weak-moment self needs for a targeted bootout. Print only the
-		// relocation fact, not the mesh names.
-		fmt.Printf("relocated → %s (mode %s)\n", reloc, m)
+		// Do NOT print the disguised roster labels OR the relocated binary
+		// PATH — both are strings a weak-moment self needs for a targeted
+		// bootout / rm. (This line also runs in the watchdog rebuild context.)
+		// Print only the relocation FACT + mode, never the path.
+		fmt.Printf("relocated (mode %s)\n", m)
 	}
 	// Pin the desired platform version BEFORE calling Install so the
 	// launchd mesh comes up with version.json already in place. If we

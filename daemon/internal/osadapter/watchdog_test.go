@@ -72,14 +72,14 @@ func TestEnsureWatchdogReadModifyWrite(t *testing.T) {
 			name:         "absent writes line with explicit copy path",
 			start:        "",
 			copyPath:     "/sep/wd/bin",
-			wantContains: "* * * * * /sep/wd/bin watchdog -v " + wdDesired + " >/dev/null 2>&1",
+			wantContains: "* * * * * '/sep/wd/bin' watchdog -v '" + wdDesired + "' >/dev/null 2>&1",
 			wantReplaces: 1,
 		},
 		{
 			name:         "absent with empty copyPath places a fresh copy",
 			start:        "",
 			copyPath:     "",
-			wantContains: " watchdog -v " + wdDesired,
+			wantContains: " watchdog -v '" + wdDesired + "'",
 			wantReplaces: 1,
 			wantPlaced:   true,
 		},
@@ -175,10 +175,11 @@ func TestRemoveWatchdogAbsentNoRewrite(t *testing.T) {
 
 // TestRefreshWatchdogRewritesInPlace: a refresh after self-update places a
 // fresh copy and rewrites the line to the new copy path — exactly ONE marker
-// line remains (no orphaned stale duplicate in the crontab).
+// line remains (no orphaned stale duplicate in the crontab) — and removes the
+// OLD copy's parent dir so self-updates don't accumulate orphan dirs.
 func TestRefreshWatchdogRewritesInPlace(t *testing.T) {
 	ct := &fakeCron{
-		content: "* * * * * /old/wd/bin watchdog -v v1.0.0 >/dev/null 2>&1\n",
+		content: "* * * * * '/old/wd/bin' watchdog -v 'v1.0.0' >/dev/null 2>&1\n",
 	}
 	fs := &fakeCopyFS{nextName: "new-copy"}
 	if err := refreshWatchdog(mode.User, "/new/daemon-bin", wdDesired, ct, fs); err != nil {
@@ -190,11 +191,80 @@ func TestRefreshWatchdogRewritesInPlace(t *testing.T) {
 	if strings.Contains(ct.content, "/old/wd/bin") {
 		t.Fatalf("old copy path still in crontab: %q", ct.content)
 	}
-	if !strings.Contains(ct.content, "new-copy watchdog -v "+wdDesired) {
+	if !strings.Contains(ct.content, "new-copy' watchdog -v '"+wdDesired+"'") {
 		t.Fatalf("new copy line not present: %q", ct.content)
 	}
 	if len(fs.placed) != 1 {
 		t.Fatalf("expected one fresh copy placement, got %v", fs.placed)
+	}
+	// The OLD copy's parent dir (/old/wd) must be removed so stale watchdog
+	// copy dirs don't accumulate across self-updates.
+	if len(fs.removed) != 1 || fs.removed[0] != "/old/wd" {
+		t.Fatalf("old copy dir not removed (parent of /old/wd/bin): %v", fs.removed)
+	}
+}
+
+// TestRefreshWatchdogNoPriorLineNoRemove: a refresh with no prior watchdog
+// line (e.g. first wiring via refresh) places the new copy but has no old dir
+// to remove.
+func TestRefreshWatchdogNoPriorLineNoRemove(t *testing.T) {
+	ct := &fakeCron{content: "0 9 * * * /usr/bin/backup\n"}
+	fs := &fakeCopyFS{nextName: "new-copy"}
+	if err := refreshWatchdog(mode.User, "/new/daemon-bin", wdDesired, ct, fs); err != nil {
+		t.Fatalf("refreshWatchdog: %v", err)
+	}
+	if len(fs.removed) != 0 {
+		t.Fatalf("removed a dir with no prior watchdog line: %v", fs.removed)
+	}
+}
+
+// TestEnsureWatchdogInvalidVersion (HIGH-1): an empty or non-semver version
+// must make ensureWatchdog return an error and write NOTHING — a
+// present-but-useless cron line could never rebuild the mesh.
+func TestEnsureWatchdogInvalidVersion(t *testing.T) {
+	for _, bad := range []string{"", "latest", "1.2.3", "v", "vlatest", "../etc"} {
+		t.Run("desired="+bad, func(t *testing.T) {
+			ct := &fakeCron{}
+			fs := &fakeCopyFS{}
+			err := ensureWatchdog(mode.User, "/sep/wd/bin", bad, ct, fs, fakeSelf)
+			if err == nil {
+				t.Fatalf("ensureWatchdog(%q) = nil error, want error", bad)
+			}
+			if ct.replaces != 0 {
+				t.Fatalf("crontab rewritten for invalid version %q: replaces=%d", bad, ct.replaces)
+			}
+			if len(fs.placed) != 0 {
+				t.Fatalf("placed a copy for invalid version %q: %v", bad, fs.placed)
+			}
+		})
+	}
+}
+
+// TestRefreshWatchdogInvalidVersion (HIGH-1): same guard on the refresh path —
+// no rewrite, no copy placement on a bad version.
+func TestRefreshWatchdogInvalidVersion(t *testing.T) {
+	ct := &fakeCron{
+		content: "* * * * * '/old/wd/bin' watchdog -v 'v1.0.0' >/dev/null 2>&1\n",
+	}
+	fs := &fakeCopyFS{}
+	if err := refreshWatchdog(mode.User, "/new/daemon-bin", "", ct, fs); err == nil {
+		t.Fatalf("refreshWatchdog with empty version = nil error, want error")
+	}
+	if ct.replaces != 0 {
+		t.Fatalf("crontab rewritten for empty version: replaces=%d", ct.replaces)
+	}
+	if len(fs.placed) != 0 {
+		t.Fatalf("placed a copy for empty version: %v", fs.placed)
+	}
+}
+
+// TestCronLineCopyPathQuotedWithSpace: the quoted form survives a copy path
+// that contains a space (a home dir like `/Users/Some One/...`), which a bare
+// positional split would mis-parse.
+func TestCronLineCopyPathQuotedWithSpace(t *testing.T) {
+	line := cronLine("/Users/Some One/.x/bin", wdDesired) + "\n"
+	if got := cronLineCopyPath(line); got != "/Users/Some One/.x/bin" {
+		t.Fatalf("cronLineCopyPath = %q, want %q", got, "/Users/Some One/.x/bin")
 	}
 }
 
