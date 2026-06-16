@@ -43,6 +43,11 @@ Enforcement mode **removes the disable authority from the machine entirely**:
 - **Server-side liveness:** the client heartbeats; missing heartbeats are
   themselves an alert. Killing the client becomes visible to your future self
   and grants no freedom, because the policy you'd need to relax is server-held.
+  → This **detection/alerting half** is now captured on its own as
+  [FEATURE 13 — Heartbeat + accountability-partner alerting](./features/13-heartbeat-accountability-alerting.md),
+  which the product owner flagged as "very important for addicted people." It can
+  potentially ship as a lighter detection-only slice *before* the full
+  policy-loosening half below; decide when promoting.
 
 **Why it might matter.** It's the first design that delivers a commitment a
 root-equipped weak-moment self genuinely cannot shortcut quickly — strictly
