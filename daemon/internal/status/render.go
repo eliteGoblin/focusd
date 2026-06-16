@@ -156,16 +156,19 @@ func procLine(s Snapshot) string {
 	}
 }
 
-// watchdogLine describes the out-of-band watchdog rail in bools-only terms:
-// "present" (cron line + copy both there), "MISSING" (no cron line), or a
-// partial "cron present, copy MISSING" (cron fires but its binary is gone —
-// the silently-broken state ADR-0016 says must be visible).
+// watchdogLine describes the out-of-band watchdog rail in bools-only terms,
+// WITHOUT naming the underlying mechanism (the rail's implementation is a
+// disguised identifier — naming it tells a weak-moment user exactly where to
+// look). "present" (rail + copy both there), "MISSING" (no rail), or
+// "degraded (recovering)" — the rail exists but its binary copy is gone, the
+// silently-broken state ADR-0016 says must be visible. Self-heals on the next
+// in-band reconcile.
 func watchdogLine(s Snapshot) string {
 	switch {
 	case s.WatchdogCron && s.WatchdogCopyOK:
 		return "present"
 	case s.WatchdogCron && !s.WatchdogCopyOK:
-		return "cron present, copy MISSING"
+		return "degraded (recovering)"
 	default:
 		return "MISSING"
 	}
@@ -200,7 +203,7 @@ type daemonJSON struct {
 	WarmingUp       bool   `json:"warming_up"`
 	Found           bool   `json:"found"`
 	WatchdogChecked bool   `json:"watchdog_checked"`
-	WatchdogCron    bool   `json:"watchdog_cron"`
+	WatchdogCron    bool   `json:"watchdog_rail"` // rail presence; mechanism name deliberately not exposed
 	WatchdogCopyOK  bool   `json:"watchdog_copy_ok"`
 	Verdict         string `json:"verdict"`
 	Note            string `json:"note"`
