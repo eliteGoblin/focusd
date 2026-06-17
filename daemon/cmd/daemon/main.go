@@ -146,7 +146,7 @@ func parse(name string, args []string) opts {
 	// StartInterval (still ~10s — launchd floors small StartInterval
 	// values, so a 2s StartInterval there would be futile).
 	iv := fs.Duration("interval", workerHealInterval, "worker reconcile interval (fast in-process self-heal)")
-	gh := fs.String("github", "eliteGoblin/focusd", "owner/repo for releases")
+	gh := fs.String("github", defaultGithubRepo, "owner/repo for releases")
 	// --asset is accepted ONLY for backward-compatibility with already-baked
 	// plists (their argv still carries it); its value is IGNORED. The platform
 	// asset is DERIVED (platformAsset) so a stale/wrong baked value — the old
@@ -186,6 +186,12 @@ const workerHealInterval = 2 * time.Second
 // don't configure, so every rebuild path (install, self-update, watchdog)
 // is correct by construction.
 func platformAsset() string { return "platform-" + runtime.GOOS + "-" + runtime.GOARCH }
+
+// defaultGithubRepo is the fixed product release repo. Single source of
+// truth so the flag defaults and the watchdog's local rebuild (which has
+// no operator argv to read) can never drift to an empty/different value —
+// an empty repo would malform the fetch URL → 404 → no self-heal.
+const defaultGithubRepo = "eliteGoblin/focusd"
 
 // splitRoster parses the comma-joined --roster flag into the label set.
 // Empty → nil (the dev/test fallback in Spec.Label takes over).
@@ -309,7 +315,7 @@ func doUpdate(args []string) int {
 	// "discover the running install"; a non-empty value is an explicit
 	// target the operator chose.
 	wd := fs.String("workdir", "", "explicit daemon work directory (default: discover the running install)")
-	gh := fs.String("github", "eliteGoblin/focusd", "owner/repo (for `update` with no version arg)")
+	gh := fs.String("github", defaultGithubRepo, "owner/repo (for `update` with no version arg)")
 	_ = fs.Parse(args)
 	explicit := fs.Arg(0) // optional positional version, e.g. v1.2.3
 
@@ -419,7 +425,7 @@ func doInstall(args []string) int {
 	}
 	fs := flag.NewFlagSet("install", flag.ContinueOnError)
 	wd := fs.String("workdir", defaultWorkdir(), "daemon work directory")
-	gh := fs.String("github", "eliteGoblin/focusd", "owner/repo")
+	gh := fs.String("github", defaultGithubRepo, "owner/repo")
 	desired := fs.String("v", "",
 		"REQUIRED desired platform version (e.g. v0.9.0) — the daemon does NOT auto-resolve from GitHub")
 	wantTest := registerTestMode(fs) // --test-mode only under -tags e2e

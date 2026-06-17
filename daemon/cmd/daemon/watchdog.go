@@ -94,9 +94,13 @@ func runWatchdog(
 	spec := osadapter.Spec{
 		Mode:     m,
 		SelfPath: self,
-		// Derived platform asset. This was EMPTY here — a latent 404 if the
-		// watchdog ever rebuilt the mesh (the run loop derives it too, so
-		// this is belt-and-suspenders, but keep the baked argv honest).
+		// Github + Asset must be set here too: the rebuilt plists bake BOTH
+		// into argv. Left empty, the worker would parse `--github ""` /
+		// `--asset ""` and the platform fetch URL would be malformed → 404,
+		// so a watchdog-rebuilt mesh could never re-fetch the engine (the
+		// exact self-heal class of bug ADR-0017 closes). Github is the fixed
+		// product repo; Asset is derived from os/arch.
+		Github:         defaultGithubRepo,
 		Asset:          platformAsset(),
 		Interval:       workerHealInterval,
 		EnsureInterval: osadapter.EnsureBackstopInterval,

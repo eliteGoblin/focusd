@@ -67,7 +67,7 @@ func doSelfUpdate(args []string) int {
 func parseSelfUpdate(args []string) (selfUpdateOpts, int) {
 	fs := flag.NewFlagSet("self-update", flag.ContinueOnError)
 	wd := fs.String("workdir", "", "override discovered workdir")
-	gh := fs.String("github", "eliteGoblin/focusd", "owner/repo for releases")
+	gh := fs.String("github", defaultGithubRepo, "owner/repo for releases")
 	ap := fs.String("asset-pattern", "daemon-darwin-{arch}",
 		"asset name template — {arch} substituted with runtime.GOARCH")
 	rd := fs.String("release-dir", "", "use a local fake release dir instead of GitHub (testing)")
