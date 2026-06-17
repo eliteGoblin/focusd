@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"time"
 )
 
 // Seams — real implementations hit GitHub / launchd / processes; tests
@@ -50,14 +51,42 @@ type Executor struct {
 	// The lock is acquired ONCE (its fd stays open for the executor's
 	// lifetime) so later ticks skip re-acquisition.
 	holdsLock bool
+	// fetchRetryAfter throttles platform-binary fetch retries (ADR-0015):
+	// after a failed EnsureBinary the next attempt is deferred until this
+	// time, so a persistently-failing fetch (network down, CDN hiccup) is
+	// retried ~once per fetchRetryCooldown rather than every ~2s reconcile
+	// tick. This throttles only the *fetch*, never the mesh heal cadence.
+	fetchRetryAfter time.Time
+	// fetchRetryVersion scopes the cooldown to the version whose fetch
+	// failed. If the desired target changes (operator pins a different
+	// version) the new version's first fetch must NOT be deferred by the
+	// prior version's cooldown — so we only defer when v matches.
+	fetchRetryVersion string
+	// now is the clock seam (defaults to time.Now); tests inject a fake.
+	now func() time.Time
 }
 
 // New builds an Executor.
 func NewExecutor(st *Store, f Fetcher, p Platform, lk ProcessLock, log *slog.Logger) *Executor {
-	return &Executor{Store: st, Fetch: f, Plat: p, Lock: lk, Log: log, crashHit: map[string]int{}}
+	return &Executor{Store: st, Fetch: f, Plat: p, Lock: lk, Log: log, crashHit: map[string]int{}, now: time.Now}
 }
 
 const crashThreshold = 3 // consecutive fast exits ⇒ mark version bad
+
+// fetchRetryCooldown caps how often a failing platform-binary fetch is
+// retried (ADR-0015 defense-in-depth). The reconcile loop ticks ~2s; a
+// failing fetch must NOT be re-attempted every tick. This throttles the
+// fetch retry only — it does NOT change the mesh worker-heal cadence.
+const fetchRetryCooldown = 30 * time.Second
+
+// nowOrDefault returns the executor clock (time.Now unless a test injected
+// a fake), tolerating zero-valued executors built without NewExecutor.
+func (e *Executor) nowOrDefault() time.Time {
+	if e.now != nil {
+		return e.now()
+	}
+	return time.Now()
+}
 
 // Tick performs exactly one reconcile step. Returns the Action taken.
 func (e *Executor) Tick(ctx context.Context) (Action, error) {
@@ -140,9 +169,20 @@ func (e *Executor) apply(ctx context.Context, a Action) error {
 		// WITHOUT having stopped anything — the old platform keeps
 		// running uninterrupted. Replacement-running invariant first.
 		if !e.Store.HaveBin(v) {
+			// ADR-0015 fetch-retry cooldown: a fetch that failed recently is
+			// not re-attempted until fetchRetryAfter, so a persistent failure
+			// (network down, CDN hiccup) is retried ~once/30s instead of every
+			// ~2s tick. The old platform keeps running meanwhile.
+			if now := e.nowOrDefault(); v == e.fetchRetryVersion && now.Before(e.fetchRetryAfter) {
+				return fmt.Errorf("ensure binary %s: deferred until %s (fetch cooldown)", v, e.fetchRetryAfter.Format(time.RFC3339))
+			}
 			if err := e.Fetch.EnsureBinary(ctx, e.Store, v); err != nil {
+				e.fetchRetryAfter = e.nowOrDefault().Add(fetchRetryCooldown)
+				e.fetchRetryVersion = v
 				return fmt.Errorf("ensure binary %s: %w", v, err)
 			}
+			e.fetchRetryAfter = time.Time{} // success: clear the cooldown
+			e.fetchRetryVersion = ""
 		}
 
 		// Step 2 — snapshot the current running version BEFORE stopping
