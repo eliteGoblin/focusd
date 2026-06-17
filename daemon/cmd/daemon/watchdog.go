@@ -92,8 +92,16 @@ func runWatchdog(
 	// Mesh absent or incomplete → rebuild LOCALLY from this (copy) binary via
 	// the normal install path (fresh roster per FEATURE 10). No github fetch.
 	spec := osadapter.Spec{
-		Mode:           m,
-		SelfPath:       self,
+		Mode:     m,
+		SelfPath: self,
+		// Github + Asset must be set here too: the rebuilt plists bake BOTH
+		// into argv. Left empty, the worker would parse `--github ""` /
+		// `--asset ""` and the platform fetch URL would be malformed → 404,
+		// so a watchdog-rebuilt mesh could never re-fetch the engine (the
+		// exact self-heal class of bug ADR-0017 closes). Github is the fixed
+		// product repo; Asset is derived from os/arch.
+		Github:         defaultGithubRepo,
+		Asset:          platformAsset(),
 		Interval:       workerHealInterval,
 		EnsureInterval: osadapter.EnsureBackstopInterval,
 	}

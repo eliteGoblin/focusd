@@ -67,7 +67,7 @@ func doSelfUpdate(args []string) int {
 func parseSelfUpdate(args []string) (selfUpdateOpts, int) {
 	fs := flag.NewFlagSet("self-update", flag.ContinueOnError)
 	wd := fs.String("workdir", "", "override discovered workdir")
-	gh := fs.String("github", "eliteGoblin/focusd", "owner/repo for releases")
+	gh := fs.String("github", defaultGithubRepo, "owner/repo for releases")
 	ap := fs.String("asset-pattern", "daemon-darwin-{arch}",
 		"asset name template — {arch} substituted with runtime.GOARCH")
 	rd := fs.String("release-dir", "", "use a local fake release dir instead of GitHub (testing)")
@@ -212,7 +212,11 @@ func runSelfUpdate(o selfUpdateOpts) int {
 		SelfPath: newPath,
 		Workdir:  workdir,
 		Github:   o.github,
-		Asset:    asset,
+		// The PLATFORM asset is derived (platform-{os}-{arch}), NOT the
+		// daemon asset `asset` used above to download the daemon binary.
+		// Baking the daemon asset here was the self-heal bug: the rebuilt
+		// mesh fetched a non-existent platform asset → 404 → no recovery.
+		Asset:    platformAsset(),
 		Interval: interval,
 		// Keep the ensurer's launchd StartInterval the slower backstop,
 		// decoupled from the fast worker --interval (FEATURE 10 / ADR-0014).
