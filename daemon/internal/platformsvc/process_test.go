@@ -57,7 +57,11 @@ func TestStartAppendsAcrossRestarts(t *testing.T) {
 		if err := p.Start(script, "v1"); err != nil {
 			t.Fatalf("start %d: %v", i, err)
 		}
-		<-p.exitCh
+		select {
+		case <-p.exitCh:
+		case <-time.After(3 * time.Second):
+			t.Fatalf("engine restart %d did not exit in time", i)
+		}
 	}
 	b, err := os.ReadFile(filepath.Join(wd, PlatformLogName))
 	if err != nil {
