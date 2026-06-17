@@ -100,8 +100,8 @@ backlog item**, not a spec yet.
 its status/metrics to a server, and the **user + an accountability partner get a
 dashboard** showing whether protection is actually on — overall and **per
 component** (the enforcement engine plus each plugin: kill-steam, dns-block,
-etc.): "is there an issue or not." The headline metric is a **coverage-of-online-
-time** number: *of the time the device was connected to the internet, how much
+etc.): "is there an issue or not." The headline metric is a
+**coverage-of-online-time** number: *of the time the device was connected to the internet, how much
 was it actually protected?* ("Once connected to the internet, protection should
 be on.")
 
@@ -139,7 +139,7 @@ failure or a coverage dip can actually act on it.
 idea is the **metrics + dashboard + coverage view layered on top**. Also shares
 F13's server / device-auth / off-box-server prerequisites — don't re-derive them.
 
-**Open question to resolve before promoting.**
+**Open questions to resolve before promoting.**
 - **Where does the coverage metric live?** Does the **device itself** track its
   own protected-vs-online time and report the computed coverage, or is coverage
   **derived server-side** from heartbeats? (Device-side is richer but more
