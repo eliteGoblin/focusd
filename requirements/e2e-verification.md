@@ -68,17 +68,48 @@ less**. Self-update path-rotation and watchdog rebuilds must not leave
   rotated binary left behind. Any unexpected/unsigned/old-version process is a
   FAIL to investigate, not noise to ignore.
 
+### V7 — Observability / white-box (every component must have logs)
+Verification is **not black-box only.** Every component must emit **captured,
+persisted logs** (and any metrics/telemetry it has), and the verifier must read
+them — a behaviour that "looks" fine while the logs show errors is a FAIL.
+- **Every component must have logs.** If a component's stdio can't be captured,
+  the app itself must write log entries — observability is non-negotiable, like
+  self-recovery. A component logging to `/dev/null` is a defect (it hides
+  failures — exactly how the ADR-0017 self-heal bug stayed invisible).
+- **Exercise:** confirm each component's log exists and is being written
+  (daemon + engine + plugin job history). Scan the test window for `ERROR`/`WARN`.
+- **Pass:** logs are present and current; **zero unexpected** ERROR/WARN. Every
+  ERROR/WARN is either absent or **explained as expected** (and confirmed with
+  the dev team if its meaning is unclear). **Inverse check:** when you cause a
+  failure (V1/V2), the logs MUST contain the corresponding error entry — a
+  failure that produces no log is itself a FAIL.
+
+### V8 — Automated test coverage exists
+White-box also means the build is backed by **automated tests**, not just a
+live demo.
+- **Exercise:** confirm the feature/build has **unit tests** (and ideally
+  **integration tests**) that actually run in CI and pass; sanity-check coverage
+  of the changed code.
+- **Pass:** unit tests exist + green; integration coverage present for
+  cross-component behaviour where it matters; the live e2e supplements — it does
+  not replace — automated tests. A feature shipped with no automated test for
+  its core path is a FAIL to flag.
+
 ## Status — daemon-v0.5.3 + platform v0.15.0 (2026-06-17)
-Verdict: **PASS** — all six exercised on the live system.
+Verdict: **PASS on V1–V6 and V8** (live + automated). **V7 PARTIAL** — daemon
+logging verified clean; the engine was logging to `/dev/null` (a real
+observability gap, now fixed in code, pending deploy + re-verify).
 
 | # | Feature | Verified? | Evidence (what was actually exercised) |
 |---|---------|-----------|----------------------------------------|
 | V1 | Engine self-heal | ✅ VERIFIED | Killed the engine process **and** deleted its on-disk binary; the daemon re-fetched it via the release CDN and restarted — **fresh binary (new mtime), new pid, ~4s**, no manual placement. |
-| V2 | Total-teardown recovery | ✅ VERIFIED | Booted out all 3 supervisor entries + killed every process + wiped the work directory → fully DOWN. The out-of-band rail rebuilt the mesh (3/3) and the rebuilt workers re-fetched the engine — **HEALTHY in ~45-60s**, no manual help. |
+| V2 | Total-teardown recovery | ✅ VERIFIED | Booted out all 3 launchd mesh entries + killed every process + wiped the work directory → fully DOWN. The out-of-band rail rebuilt the mesh (3/3) and the rebuilt workers re-fetched the engine — **HEALTHY in ~45-60s**, no manual help. |
 | V3 | App removal (kill-steam) | ✅ VERIFIED | `brew reinstall --cask steam --force` placed `/Applications/Steam.app`; kill-steam removed it **~6s later** (within the @10s reconcile). Placement→removal observed in one run (not stale brew metadata). |
 | V4 | Skill self-heal | ✅ VERIFIED | Deleted `~/.claude/skills/focusd-protection/`; skill-protector re-injected `SKILL.md` (identical size) within **~70s** (@5m cycle). |
 | V5 | Claude refusal stance | ✅ VERIFIED | Skill + always-on rule + SessionStart hook present and current; the focusd-protection skill is loaded and followed this session (redaction + refusal). Fresh-session refusal is enforced by the SessionStart hook every session. |
 | V6 | Process-set accuracy / no orphans | ✅ VERIFIED | After two path-rotating self-updates AND the teardown rebuild: exactly **2 workers (role a+b), both daemon-v0.5.3**, **1 engine (v0.15.0)**, **1 on-disk daemon binary (current)** — no orphaned old-version process or binary. |
+| V7 | Observability / white-box logs | ⚠️ PARTIAL | `daemon.log` present + current, **0 ERROR / 0 WARN**, captures real reconcile/fetch activity; the daemon logs fetch failures at ERROR (so the 404 bug *was* loggable — black-box missed it, logs wouldn't have). **GAP found:** the engine child was launched with stdio → `/dev/null`, so engine + plugin logs were discarded. **Fixed in code** (capture to `<workdir>/platform.log`, with tests); pending deploy + re-verify that `platform.log` fills on the live box. |
+| V8 | Automated test coverage | ✅ VERIFIED | Full daemon unit suite + `internal/e2e` integration suite green (`go test -race`); new `platformsvc` tests assert engine stdout+stderr land in `platform.log` and append across restarts; the ADR-0015/0017 fixes each shipped with regression tests that run in CI. |
 
 > Note: the engine version pin (v0.15.0) and the bundled plugin set (incl.
 > freedom-protector) are current; `browser-monitor` is not bundled (no bundle

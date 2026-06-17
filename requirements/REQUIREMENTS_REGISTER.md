@@ -107,6 +107,19 @@ can be set wrong, drift between code paths, and fail silently. When a value can
 only ever be one correct thing, compute it once; don't let anyone configure it.
 (Captured as a decision in ADR-0017.)
 
+### Observability is non-negotiable
+Every component must be **observable through captured, persisted logs** (plus any
+metrics/telemetry it has). If a component's stdio can't be captured by its
+supervisor, the component must **write its own log entries** — logging is not
+optional. A component that logs to `/dev/null` is a defect: it hides failures,
+and a "healthy"-looking system whose logs you never read is the same *latent
+failure* the self-recovery principle warns about. This is why verification is
+**white-box** (see `e2e-verification.md` V7/V8): the verifier reads the logs,
+metrics, and automated-test results — not just the externally-visible behaviour —
+and treats an unexplained `ERROR`/`WARN`, a missing log, or a missing automated
+test as a finding to raise with the dev team. (Live lesson: the ADR-0017 self-heal
+bug stayed invisible for so long because the engine's logs were being discarded.)
+
 ### Friction, not cryptography
 None of the defenses are mathematically unbreakable. Every one is a delay or an inconvenience. The bet: an impulsive person will give up before paying the cost; a calm person who genuinely wants out has the 5-gated override.
 
@@ -197,7 +210,8 @@ Platform releases ship bundled plugin binaries embedded via `//go:embed` (`platf
 - **(unfiled) Move the source repo to a path Claude (uid 502) cannot read**. The cheapest defense against Claude-as-threat specifically.
 - ~~**(unfiled) FEATURE 12 — out-of-band watchdog** is **defining** (ADR-0016 accepted)... Awaiting human gate before build.~~ **SHIPPED 2026-06-17 (PR #52).** Closes the total-atomic-teardown gap via a cron rail running a second copy of the daemon binary. Verified live (one-command install, redaction-safe status, total-teardown rebuilt in ~5s). The design questions raised here were resolved in DESIGN/build per ADR-0016.
 - **(unfiled, tracked) ADR-0015 fetch-storm bug still open.** Because of it, the platform v0.15.0 binary for the F12 deploy was **placed manually** rather than fetched. Fixing the fetch path so deploys don't need the manual pre-populate workaround is a tracked follow-up. **→ Recommended next priority (roadmap call 2026-06-17):** this is the only open item that breaks a *shipped, load-bearing* capability — the out-of-band watchdog (F12) can't actually self-recover the platform binary, so auto-recovery is not yet self-sufficient. Closing it before any new feature.
-- **(in progress) Wrong download identity for the protection-engine binary across all rebuild paths** — see §6 limitation 10 + ADR-0017. Every recovery path baked a wrong/empty download identity, so auto-recovery 404'd; masked because the binary had been hand-placed. Fix: derive the deterministic identity once, delete the knob, ship via in-place self-update. This is the **same self-recovery hole** the ADR-0015 fetch follow-up above is about — both must close before auto-recovery is genuinely self-sufficient.
+- **(RESOLVED, daemon-v0.5.3) Wrong download identity for the protection-engine binary across all rebuild paths** — see §6 limitation 10 + ADR-0017. Every recovery path baked a wrong/empty download identity, so auto-recovery 404'd; masked because the binary had been hand-placed. Fixed: derive the deterministic identity once, delete the knob, shipped via in-place self-update. **Verified live** (engine self-heal ~4s; full-teardown recovery ~45-60s — `e2e-verification.md` V1/V2). This closed the **same self-recovery hole** the ADR-0015 fetch follow-up was about — auto-recovery is now self-sufficient.
+- **(NEW, in progress) Observability gap: the protection engine logged to `/dev/null`** — found during V7 white-box verification: the engine child's stdio was discarded, so engine + plugin errors/warnings were invisible (which is *why* the self-heal bug stayed hidden). Fix in flight: capture the engine's output to `<workdir>/platform.log` so every component is observable (the observability principle, §5). Pending deploy + re-verify.
 
 ---
 
