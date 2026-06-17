@@ -4,6 +4,7 @@
 package platformsvc
 
 import (
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -25,7 +26,6 @@ type ProcSvc struct {
 	exited    bool
 	exitedAt  time.Time
 	exitCh    chan struct{} // closed by the SINGLE waiter when cmd exits
-	logf      *os.File      // captures the child's stdout+stderr; closed by the waiter
 }
 
 // PlatformLogName is the engine log file under the workdir. The engine's
@@ -64,7 +64,12 @@ func (p *ProcSvc) Start(binPath, v string) error {
 	// workdir is writable (it already holds state.db) — always succeeds.
 	logf, lerr := os.OpenFile(filepath.Join(p.Workdir, PlatformLogName),
 		os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
-	if lerr == nil {
+	if lerr != nil {
+		// Observability must not fail SILENTLY. Record why on the daemon's
+		// own stderr (captured to daemon.log) before degrading to discarded
+		// engine output — so a missing platform.log is itself explained.
+		fmt.Fprintf(os.Stderr, "platformsvc: cannot open %s (engine output will be discarded): %v\n", PlatformLogName, lerr)
+	} else {
 		c.Stdout = logf
 		c.Stderr = logf
 	}
@@ -81,7 +86,6 @@ func (p *ProcSvc) Start(binPath, v string) error {
 	p.exited = false
 	p.exitedAt = time.Time{}
 	p.exitCh = exitCh
-	p.logf = logf
 
 	// The ONLY waiter for this child. Whoever needs to know it exited
 	// observes exitCh — no second Wait() (double-reap race).

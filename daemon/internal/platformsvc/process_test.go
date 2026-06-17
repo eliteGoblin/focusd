@@ -59,7 +59,10 @@ func TestStartAppendsAcrossRestarts(t *testing.T) {
 		}
 		<-p.exitCh
 	}
-	b, _ := os.ReadFile(filepath.Join(wd, PlatformLogName))
+	b, err := os.ReadFile(filepath.Join(wd, PlatformLogName))
+	if err != nil {
+		t.Fatalf("read %s: %v", PlatformLogName, err)
+	}
 	if n := strings.Count(string(b), "RUN_MARKER"); n != 2 {
 		t.Errorf("expected 2 appended markers across restarts, got %d", n)
 	}
