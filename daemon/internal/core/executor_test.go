@@ -286,6 +286,44 @@ func TestExecutorFetchFailureBacksOff(t *testing.T) {
 	}
 }
 
+// TestExecutorFetchCooldownScopedToVersion proves the cooldown is keyed to the
+// version that FAILED, not applied globally: pinning a different version after
+// a failure must fetch it immediately, even within the prior version's cooldown
+// window (Copilot review on PR #54).
+func TestExecutorFetchCooldownScopedToVersion(t *testing.T) {
+	e, st, f, p := newExec(t)
+	st.WriteDesired("v1")
+	p.running = ""
+
+	clk := time.Unix(1_000_000, 0)
+	e.now = func() time.Time { return clk }
+
+	// v1 fetch fails → cooldown armed for v1.
+	f.ensureErr = map[string]error{"v1": errors.New("network down")}
+	if _, err := e.Tick(context.Background()); err == nil {
+		t.Fatal("first fetch failure must surface an error")
+	}
+	if f.ensureCalls != 1 {
+		t.Fatalf("expected 1 fetch attempt, got %d", f.ensureCalls)
+	}
+
+	// Operator re-pins to v2, still WITHIN v1's cooldown window. v2 must NOT
+	// be deferred by v1's cooldown — it fetches immediately and starts.
+	clk = clk.Add(5 * time.Second) // << 30s cooldown
+	st.WriteDesired("v2")
+	f.ensureErr = nil // v2 fetch succeeds
+	a, err := e.Tick(context.Background())
+	if err != nil {
+		t.Fatalf("v2 tick within v1 cooldown must not be deferred: %v", err)
+	}
+	if f.ensureCalls != 2 {
+		t.Fatalf("v2 fetch must be attempted immediately: attempts=%d (want 2)", f.ensureCalls)
+	}
+	if a.Kind != EnsureRunning || p.running != "v2" || !st.HaveBin("v2") {
+		t.Fatalf("v2 must start despite v1 cooldown: act=%+v running=%q bin=%v", a, p.running, st.HaveBin("v2"))
+	}
+}
+
 type errPlat struct{}
 
 func (*errPlat) RunningVersion() (string, error) { return "", os.ErrPermission }

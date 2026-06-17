@@ -57,6 +57,11 @@ type Executor struct {
 	// retried ~once per fetchRetryCooldown rather than every ~2s reconcile
 	// tick. This throttles only the *fetch*, never the mesh heal cadence.
 	fetchRetryAfter time.Time
+	// fetchRetryVersion scopes the cooldown to the version whose fetch
+	// failed. If the desired target changes (operator pins a different
+	// version) the new version's first fetch must NOT be deferred by the
+	// prior version's cooldown — so we only defer when v matches.
+	fetchRetryVersion string
 	// now is the clock seam (defaults to time.Now); tests inject a fake.
 	now func() time.Time
 }
@@ -168,14 +173,16 @@ func (e *Executor) apply(ctx context.Context, a Action) error {
 			// not re-attempted until fetchRetryAfter, so a persistent failure
 			// (network down, CDN hiccup) is retried ~once/30s instead of every
 			// ~2s tick. The old platform keeps running meanwhile.
-			if now := e.nowOrDefault(); now.Before(e.fetchRetryAfter) {
+			if now := e.nowOrDefault(); v == e.fetchRetryVersion && now.Before(e.fetchRetryAfter) {
 				return fmt.Errorf("ensure binary %s: deferred until %s (fetch cooldown)", v, e.fetchRetryAfter.Format(time.RFC3339))
 			}
 			if err := e.Fetch.EnsureBinary(ctx, e.Store, v); err != nil {
 				e.fetchRetryAfter = e.nowOrDefault().Add(fetchRetryCooldown)
+				e.fetchRetryVersion = v
 				return fmt.Errorf("ensure binary %s: %w", v, err)
 			}
 			e.fetchRetryAfter = time.Time{} // success: clear the cooldown
+			e.fetchRetryVersion = ""
 		}
 
 		// Step 2 — snapshot the current running version BEFORE stopping

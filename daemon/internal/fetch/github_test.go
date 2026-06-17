@@ -83,39 +83,83 @@ const (
 )
 
 // TestDownloadVerified_NoAPIHit is the core ADR-0015 regression: a pinned
-// download must hit ONLY the direct release-download URL on github.com and
-// make ZERO requests to api.github.com (the 60/hr rate-limited host that
-// caused the fetch-storm → 403s).
+// download must hit the direct release-download URL on github.com and make
+// ZERO requests to api.github.com (the 60/hr rate-limited host that caused
+// the fetch-storm → 403s). It deliberately does NOT depend on the offline
+// signing key — the request is issued BEFORE verification, so serving an
+// unsigned body (verification then fails, which we ignore) lets the host/path
+// regression run on EVERY CI runner, not just ones with the secret. The
+// assertion tolerates the real-world 302 to objects.githubusercontent.com:
+// it checks "no api.github.com hop" + "first hop is the direct CDN path",
+// not an exact request count.
 func TestDownloadVerified_NoAPIHit(t *testing.T) {
+	rt := &recordingTransport{
+		serve: func(r *http.Request) (*http.Response, error) {
+			return okBody([]byte("unsigned platform bytes")), nil
+		},
+	}
+	g := &GitHub{Repo: testRepo, Asset: testAsset, HTTP: &http.Client{Transport: rt}}
+
+	// Verification will fail on the unsigned body; we only assert on the
+	// requests that were made to reach it.
+	dst := filepath.Join(t.TempDir(), "platform")
+	_ = g.DownloadVerified(context.Background(), testTag, testAsset, dst)
+
+	if len(rt.hosts) == 0 {
+		t.Fatal("DownloadVerified made no request")
+	}
+	for _, h := range rt.hosts {
+		if h == "api.github.com" {
+			t.Fatalf("DownloadVerified hit api.github.com (rate-limited) — hosts: %v", rt.hosts)
+		}
+	}
+	if rt.hosts[0] != "github.com" {
+		t.Fatalf("first hop host = %q, want github.com — hosts: %v", rt.hosts[0], rt.hosts)
+	}
+	wantPath := "/" + testRepo + "/releases/download/" + testTag + "/" + testAsset
+	if rt.paths[0] != wantPath {
+		t.Fatalf("first-hop download path = %q, want %q", rt.paths[0], wantPath)
+	}
+}
+
+// TestDownloadVerified_NoBearerForwarded asserts the download request itself
+// carries no Authorization header (even with GITHUB_TOKEN set) and uses an
+// octet-stream Accept. A bearer must not ride the CDN download leg — Go's
+// http.Client also strips it across the cross-host 302 to objects.githubusercontent.com.
+// Key-free: the header check runs before verification, so an unsigned body
+// (verify then fails, ignored) keeps this regression live in plain CI.
+func TestDownloadVerified_NoBearerForwarded(t *testing.T) {
+	t.Setenv("GITHUB_TOKEN", "should-not-be-forwarded")
+	rt := &recordingTransport{
+		serve: func(r *http.Request) (*http.Response, error) {
+			if r.Header.Get("Authorization") != "" {
+				t.Errorf("Authorization forwarded to download leg: %q", r.Header.Get("Authorization"))
+			}
+			if a := r.Header.Get("Accept"); a != "application/octet-stream" {
+				t.Errorf("Accept = %q, want application/octet-stream", a)
+			}
+			return okBody([]byte("unsigned platform bytes")), nil
+		},
+	}
+	g := &GitHub{Repo: testRepo, Asset: testAsset, HTTP: &http.Client{Transport: rt}}
+	dst := filepath.Join(t.TempDir(), "platform")
+	_ = g.DownloadVerified(context.Background(), testTag, testAsset, dst)
+}
+
+// TestDownloadVerified_PlacesVerifiedBytes is the happy-path complement: a
+// genuinely-signed body is verified and atomically placed at dst (0755). This
+// one needs the offline signing key, so it skips on runners without it — but
+// the host/path/header REGRESSIONS above no longer depend on the key.
+func TestDownloadVerified_PlacesVerifiedBytes(t *testing.T) {
 	body := signedBytes(t, []byte("genuine platform bytes"))
 	rt := &recordingTransport{
 		serve: func(r *http.Request) (*http.Response, error) { return okBody(body), nil },
 	}
 	g := &GitHub{Repo: testRepo, Asset: testAsset, HTTP: &http.Client{Transport: rt}}
-
 	dst := filepath.Join(t.TempDir(), "platform")
 	if err := g.DownloadVerified(context.Background(), testTag, testAsset, dst); err != nil {
 		t.Fatalf("DownloadVerified: %v", err)
 	}
-
-	// Zero api.github.com requests, all on github.com.
-	for _, h := range rt.hosts {
-		if h == "api.github.com" {
-			t.Fatalf("DownloadVerified hit api.github.com (rate-limited) — hosts: %v", rt.hosts)
-		}
-		if h != "github.com" {
-			t.Fatalf("unexpected host %q — hosts: %v", h, rt.hosts)
-		}
-	}
-	if len(rt.hosts) != 1 {
-		t.Fatalf("expected exactly 1 request (the direct download), got %d: %v", len(rt.hosts), rt.hosts)
-	}
-	wantPath := "/" + testRepo + "/releases/download/" + testTag + "/" + testAsset
-	if rt.paths[0] != wantPath {
-		t.Fatalf("download path = %q, want %q", rt.paths[0], wantPath)
-	}
-
-	// The verified bytes landed at dst, mode 0755.
 	got, err := os.ReadFile(dst)
 	if err != nil {
 		t.Fatalf("read dst: %v", err)
@@ -126,31 +170,6 @@ func TestDownloadVerified_NoAPIHit(t *testing.T) {
 	fi, _ := os.Stat(dst)
 	if fi.Mode().Perm() != 0o755 {
 		t.Fatalf("dst mode = %v, want 0755", fi.Mode().Perm())
-	}
-}
-
-// TestDownloadVerified_NoBearerForwarded asserts the download request itself
-// carries no Authorization header (even with GITHUB_TOKEN set) and uses an
-// octet-stream Accept. A bearer must not ride the CDN download leg — Go's
-// http.Client also strips it across the cross-host 302 to objects.githubusercontent.com.
-func TestDownloadVerified_NoBearerForwarded(t *testing.T) {
-	body := signedBytes(t, []byte("genuine platform bytes"))
-	t.Setenv("GITHUB_TOKEN", "should-not-be-forwarded")
-	rt := &recordingTransport{
-		serve: func(r *http.Request) (*http.Response, error) {
-			if r.Header.Get("Authorization") != "" {
-				t.Errorf("Authorization forwarded to download leg: %q", r.Header.Get("Authorization"))
-			}
-			if a := r.Header.Get("Accept"); a != "application/octet-stream" {
-				t.Errorf("Accept = %q, want application/octet-stream", a)
-			}
-			return okBody(body), nil
-		},
-	}
-	g := &GitHub{Repo: testRepo, Asset: testAsset, HTTP: &http.Client{Transport: rt}}
-	dst := filepath.Join(t.TempDir(), "platform")
-	if err := g.DownloadVerified(context.Background(), testTag, testAsset, dst); err != nil {
-		t.Fatalf("DownloadVerified: %v", err)
 	}
 }
 
