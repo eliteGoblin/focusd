@@ -1,6 +1,6 @@
 # Feature 12 — Out-of-band watchdog (close the total-atomic-teardown gap)
 
-- **Status:** defining (2026-06-16) · awaiting human gate before build
+- **Status:** ✅ shipped (2026-06-17) · merged to master in **PR #52** · deployed live + battle-tested
 - **Decision:** [ADR-0016](../decisions/0016-out-of-band-watchdog-rail.md)
 - **Closes:** the one proven residual of the in-band mesh — a **total atomic
   teardown** leaves no survivor to rebuild.
@@ -77,10 +77,38 @@ after a total wipe. User-locked design — Option A: KISS, **local** recovery.
 4. The watchdog uses the **same daemon binary** (no separate program) and
    recovers **locally** (no network fetch).
 
+## Verified outcomes (live install + battle-test, 2026-06-17, PR #52)
+
+This shipped and was exercised on the live system. What was confirmed:
+
+- **One-command install set up everything in one shot.** A single
+  `sudo daemon install -v <ver>` stood up the mesh (3/3), the platform
+  (v0.15.0, reporting good), **and** the out-of-band watchdog (the cron rail
+  present) — no extra steps. **Acceptance #3 and #4 verified.**
+- **Status abstracts the mechanism.** `daemon status` shows every component and
+  reports the watchdog as **"out-of-band watchdog: present"** — it never names
+  cron or any underlying mechanism. This addresses the "the watchdog's own
+  health must itself be checkable" limit below: its presence is now a
+  redaction-safe line in the status view.
+- **Total teardown self-healed (battle-test). Acceptance #1 verified live.** A
+  *total* atomic teardown — all three plists deleted **and** all processes
+  killed **and** the mesh workdir wiped, i.e. fully down — was **rebuilt by the
+  out-of-band watchdog in ~5 seconds**. (This run happened to land just before a
+  cron minute boundary; worst case is still ~60s per the recorded ~1-minute
+  limit.) The mesh came back 3/3, the platform recovered, and overall health
+  returned to HEALTHY with no manual action.
+- **Reviewed before merge.** Went through go-reviewer + security-reviewer; **two
+  HIGH findings were fixed before merge**: (1) an empty-version guard so the
+  install can't write a broken cron entry, and (2) the watchdog copy is
+  Ed25519-verified before any root reinstall (no unsigned second copy can be
+  promoted to root).
+
 ## Honest limitations
 
-This raises the cost of a total teardown; it is **not** an absolute seal. Record
-all of these explicitly — do not over-claim.
+These were recorded at design time and **held in practice** — the live
+battle-test did not invalidate any of them. This raises the cost of a total
+teardown; it is **not** an absolute seal. Record all of these explicitly — do
+not over-claim.
 
 - **Cron is fragile on modern macOS.** Apple is deprecating cron and it can need
   Full Disk Access to run — even though it fired cleanly on this machine. A
@@ -96,6 +124,11 @@ all of these explicitly — do not over-claim.
 - **Adds complexity to a delicate path.** The path-rotating self-update now has
   to maintain **two** binary copies in sync, adding moving parts to an already
   subtle update flow.
+- **Resurrection-vs-uninstall footgun (accepted).** The same rail that defeats a
+  total teardown also means a half-removed install can resurrect itself. The
+  legitimate `uninstall` ritual best-effort-removes the watchdog rail, but a
+  partial/manual removal that misses the rail can be rebuilt by it. Accepted: the
+  supported way out is the gated uninstall, not a manual wipe.
 
 ## Design questions / cross-cutting notes (for the architect — decide in DESIGN)
 
