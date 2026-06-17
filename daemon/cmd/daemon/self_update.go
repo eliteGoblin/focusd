@@ -212,7 +212,11 @@ func runSelfUpdate(o selfUpdateOpts) int {
 		SelfPath: newPath,
 		Workdir:  workdir,
 		Github:   o.github,
-		Asset:    asset,
+		// The PLATFORM asset is derived (platform-{os}-{arch}), NOT the
+		// daemon asset `asset` used above to download the daemon binary.
+		// Baking the daemon asset here was the self-heal bug: the rebuilt
+		// mesh fetched a non-existent platform asset → 404 → no recovery.
+		Asset:    platformAsset(),
 		Interval: interval,
 		// Keep the ensurer's launchd StartInterval the slower backstop,
 		// decoupled from the fast worker --interval (FEATURE 10 / ADR-0014).

@@ -92,8 +92,12 @@ func runWatchdog(
 	// Mesh absent or incomplete → rebuild LOCALLY from this (copy) binary via
 	// the normal install path (fresh roster per FEATURE 10). No github fetch.
 	spec := osadapter.Spec{
-		Mode:           m,
-		SelfPath:       self,
+		Mode:     m,
+		SelfPath: self,
+		// Derived platform asset. This was EMPTY here — a latent 404 if the
+		// watchdog ever rebuilt the mesh (the run loop derives it too, so
+		// this is belt-and-suspenders, but keep the baked argv honest).
+		Asset:          platformAsset(),
 		Interval:       workerHealInterval,
 		EnsureInterval: osadapter.EnsureBackstopInterval,
 	}

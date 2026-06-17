@@ -85,6 +85,28 @@ The two-faced nature of the user is the key insight. Most security designs assum
 
 ## 5. Cross-cutting design principles
 
+### Self-recovery is non-negotiable
+The whole system is designed to be reliable and self-healing: **every protection
+layer must recover without manual intervention after any single failure.** A
+status that reads "healthy" but secretly depends on a hand-placed or leftover
+artifact is a **latent failure, not health** — the moment that artifact is gone,
+protection is gone, with no green warning. "Recovered" must mean the system
+re-created what it needed *on its own* (re-fetched, re-installed, re-started),
+end-to-end. Therefore verification must exercise the **real failure-and-recover
+path**, not a surface-green check: tear the thing down for real and confirm it
+comes back by itself. (See §6 limitation 10 for the live lesson that motivated
+making this a named principle.)
+
+### KISS — streamline, don't be "too smart"
+KISS is a core philosophy, not a nicety. Prefer the **simplest correct**
+solution; avoid over-clever, over-configurable designs that make the product
+complex and create footguns. Concretely: **prefer deriving a deterministic value
+over exposing an operator-supplied knob.** Speculative flexibility that wasn't
+required is a defect surface, not a feature — every knob is one more thing that
+can be set wrong, drift between code paths, and fail silently. When a value can
+only ever be one correct thing, compute it once; don't let anyone configure it.
+(Captured as a decision in ADR-0017.)
+
 ### Friction, not cryptography
 None of the defenses are mathematically unbreakable. Every one is a delay or an inconvenience. The bet: an impulsive person will give up before paying the cost; a calm person who genuinely wants out has the 5-gated override.
 
@@ -141,6 +163,7 @@ Every commit message + every PR description includes an explicit "honest" or "ho
 7. **Customized settings don't pick up new shipped defaults.** When focusd ships a new default for a feature you've customized via an on-disk override, your override keeps your old value — focusd won't silently overwrite your choice, but it also won't merge in the new default. You must update the override to adopt new defaults. (Caught in practice: a release shipped the full Steam domain list, but an install whose override still held the old short list kept blocking only the short list until the override was refreshed.)
 8. **Single engine = shared fate.** If the one protection engine crashes, all protections pause for the few seconds it takes to auto-restart (the previous two-engine design failed independently). Accepted trade for simplicity — see ADR-0010.
 9. **Console-user assumption.** The step-down-to-user mechanism assumes one primary person at the keyboard; during login-window / fast-user-switch it correctly waits rather than mis-writing, and a shared/multi-user Mac is out of scope.
+10. **Latent self-heal gap: the protection engine couldn't actually re-fetch itself (in progress).** A serious flaw was found live: every rebuild path (first install, self-update, and the out-of-band watchdog) used the **wrong download identity for the protection-engine binary**, so the recovery download failed. It was masked for a long time because the binary had been placed by hand — so status read HEALTHY while auto-recovery was in fact broken (exactly the *latent failure* the self-recovery principle in §5 warns about). **Two root causes, both lessons:** (a) an over-configurable free-form input for a value that should always have been **derived** — directly the anti-pattern KISS / ADR-0017 now forbids; and (b) the same mistake **copied across every rebuild path**, so no single path was a safe fallback. **Fix (in progress):** derive the deterministic download identity once and remove the knob — every recovery path becomes correct by construction — and ship it via the in-place self-update so protection never drops. Tracked under §9 (this is the same load-bearing capability the open fetch-path follow-up depends on). Decision recorded in ADR-0017.
 
 ---
 
@@ -174,6 +197,7 @@ Platform releases ship bundled plugin binaries embedded via `//go:embed` (`platf
 - **(unfiled) Move the source repo to a path Claude (uid 502) cannot read**. The cheapest defense against Claude-as-threat specifically.
 - ~~**(unfiled) FEATURE 12 — out-of-band watchdog** is **defining** (ADR-0016 accepted)... Awaiting human gate before build.~~ **SHIPPED 2026-06-17 (PR #52).** Closes the total-atomic-teardown gap via a cron rail running a second copy of the daemon binary. Verified live (one-command install, redaction-safe status, total-teardown rebuilt in ~5s). The design questions raised here were resolved in DESIGN/build per ADR-0016.
 - **(unfiled, tracked) ADR-0015 fetch-storm bug still open.** Because of it, the platform v0.15.0 binary for the F12 deploy was **placed manually** rather than fetched. Fixing the fetch path so deploys don't need the manual pre-populate workaround is a tracked follow-up. **→ Recommended next priority (roadmap call 2026-06-17):** this is the only open item that breaks a *shipped, load-bearing* capability — the out-of-band watchdog (F12) can't actually self-recover the platform binary, so auto-recovery is not yet self-sufficient. Closing it before any new feature.
+- **(in progress) Wrong download identity for the protection-engine binary across all rebuild paths** — see §6 limitation 10 + ADR-0017. Every recovery path baked a wrong/empty download identity, so auto-recovery 404'd; masked because the binary had been hand-placed. Fix: derive the deterministic identity once, delete the knob, ship via in-place self-update. This is the **same self-recovery hole** the ADR-0015 fetch follow-up above is about — both must close before auto-recovery is genuinely self-sufficient.
 
 ---
 
@@ -215,4 +239,4 @@ Platform releases ship bundled plugin binaries embedded via `//go:embed` (`platf
 
 ---
 
-*Last updated: 2026-06-17 (release-review: FEATURE 12 shipped, PR #52). Maintainer: Frank Sun + Claude (joint).*
+*Last updated: 2026-06-17 (BA update: §5 +2 named principles [self-recovery, KISS]; §6 +limitation 10 [latent self-heal gap]; ADR-0017 derive-don't-configure). Maintainer: Frank Sun + Claude (joint).*

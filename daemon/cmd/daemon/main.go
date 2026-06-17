@@ -147,7 +147,13 @@ func parse(name string, args []string) opts {
 	// values, so a 2s StartInterval there would be futile).
 	iv := fs.Duration("interval", workerHealInterval, "worker reconcile interval (fast in-process self-heal)")
 	gh := fs.String("github", "eliteGoblin/focusd", "owner/repo for releases")
-	as := fs.String("asset", "", "release asset filename (per os/arch)")
+	// --asset is accepted ONLY for backward-compatibility with already-baked
+	// plists (their argv still carries it); its value is IGNORED. The platform
+	// asset is DERIVED (platformAsset) so a stale/wrong baked value — the old
+	// self-heal bug — can never break the fetch again. Keeping the flag defined
+	// also stops flag.Parse from choking on it and dropping later args
+	// (--roster/--mesh/--r) on an existing install's restart.
+	_ = fs.String("asset", "", "(deprecated, ignored) platform asset is derived from os/arch")
 	rd := fs.String("release-dir", "", "use a local fake release dir instead of GitHub")
 	hd := fs.Duration("healthy", 5*time.Second, "alive longer than this ⇒ promote good")
 	ud := fs.Duration("unhealthy", 3*time.Second, "exit sooner than this ⇒ crashed")
@@ -160,7 +166,7 @@ func parse(name string, args []string) opts {
 	// and can rebuild every sibling plist (FEATURE 10 / ADR-0014).
 	rs := fs.String("roster", "", "comma-joined 3-label mesh roster (set by the installer)")
 	_ = fs.Parse(args)
-	return opts{*wd, *iv, *gh, *as, *rd, *hd, *ud, *rl, *tm == "true", *mesh, splitRoster(*rs)}
+	return opts{*wd, *iv, *gh, platformAsset(), *rd, *hd, *ud, *rl, *tm == "true", *mesh, splitRoster(*rs)}
 }
 
 // workerHealInterval is the fast in-process worker reconcile cadence
@@ -169,6 +175,17 @@ func parse(name string, args []string) opts {
 // a person needs for the next one-at-a-time removal. The ensurer's
 // launchd StartInterval stays the slower osadapter.EnsureBackstopInterval.
 const workerHealInterval = 2 * time.Second
+
+// platformAsset is the protection-engine release asset name for THIS
+// daemon's OS/arch. Releases are named platform-{GOOS}-{GOARCH}, so the
+// name is FULLY DETERMINED — it is DERIVED, never an operator knob.
+// A free-form asset flag was a self-heal footgun: a wrong/empty value
+// (the daemon's own asset name, or "") silently 404'd the platform fetch,
+// so the engine binary could never be re-fetched and had to be hand-placed
+// — defeating the daemon's whole self-recovery purpose. KISS: derive,
+// don't configure, so every rebuild path (install, self-update, watchdog)
+// is correct by construction.
+func platformAsset() string { return "platform-" + runtime.GOOS + "-" + runtime.GOARCH }
 
 // splitRoster parses the comma-joined --roster flag into the label set.
 // Empty → nil (the dev/test fallback in Spec.Label takes over).
@@ -293,7 +310,6 @@ func doUpdate(args []string) int {
 	// target the operator chose.
 	wd := fs.String("workdir", "", "explicit daemon work directory (default: discover the running install)")
 	gh := fs.String("github", "eliteGoblin/focusd", "owner/repo (for `update` with no version arg)")
-	as := fs.String("asset", "", "release asset filename")
 	_ = fs.Parse(args)
 	explicit := fs.Arg(0) // optional positional version, e.g. v1.2.3
 
@@ -311,7 +327,7 @@ func doUpdate(args []string) int {
 		return 1
 	}
 
-	o := opts{workdir: workdir, github: *gh, asset: *as}
+	o := opts{workdir: workdir, github: *gh, asset: platformAsset()}
 	_, log := build(o)
 
 	st := &core.Store{Dir: o.workdir}
@@ -404,7 +420,6 @@ func doInstall(args []string) int {
 	fs := flag.NewFlagSet("install", flag.ContinueOnError)
 	wd := fs.String("workdir", defaultWorkdir(), "daemon work directory")
 	gh := fs.String("github", "eliteGoblin/focusd", "owner/repo")
-	as := fs.String("asset", "", "release asset filename")
 	desired := fs.String("v", "",
 		"REQUIRED desired platform version (e.g. v0.9.0) — the daemon does NOT auto-resolve from GitHub")
 	wantTest := registerTestMode(fs) // --test-mode only under -tags e2e
@@ -448,7 +463,7 @@ func doInstall(args []string) int {
 	}
 	spec := osadapter.Spec{
 		Mode: m, SelfPath: self, Workdir: *wd,
-		Github: *gh, Asset: *as,
+		Github: *gh, Asset: platformAsset(),
 		// FEATURE 10 / ADR-0014: the worker heal cadence is a FIXED ~2s
 		// security constant (it closes the manual-removal whack-a-mole), baked
 		// into the worker plists — NOT an operator knob (a stale --interval
