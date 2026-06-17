@@ -4,7 +4,10 @@
 package platformsvc
 
 import (
+	"fmt"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"sync"
 	"syscall"
 	"time"
@@ -24,6 +27,14 @@ type ProcSvc struct {
 	exitedAt  time.Time
 	exitCh    chan struct{} // closed by the SINGLE waiter when cmd exits
 }
+
+// PlatformLogName is the engine log file under the workdir. The engine's
+// stdout+stderr (its slog stream, plugin job output, errors/warnings) are
+// captured here so the engine is OBSERVABLE. Previously the child's stdio
+// was left nil → connected to /dev/null, which silently discarded every
+// engine/plugin log line and hid real failures (the silent-failure trap the
+// observability principle forbids).
+const PlatformLogName = "platform.log"
 
 // New builds a ProcSvc with sane default windows.
 func New(workdir string) *ProcSvc {
@@ -46,7 +57,26 @@ func (p *ProcSvc) Start(binPath, v string) error {
 	defer p.mu.Unlock()
 
 	c := exec.Command(binPath, "--workdir", p.Workdir)
+	// Capture the engine's stdout+stderr to <workdir>/platform.log so the
+	// engine + plugins are observable. Best-effort: a log-open failure must
+	// NOT block protection from starting, so we degrade to the prior
+	// (discarded) behavior rather than refuse to run. The common path — the
+	// workdir is writable (it already holds state.db) — always succeeds.
+	logf, lerr := os.OpenFile(filepath.Join(p.Workdir, PlatformLogName),
+		os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
+	if lerr != nil {
+		// Observability must not fail SILENTLY. Record why on the daemon's
+		// own stderr (captured to daemon.log) before degrading to discarded
+		// engine output — so a missing platform.log is itself explained.
+		fmt.Fprintf(os.Stderr, "platformsvc: cannot open %s (engine output will be discarded): %v\n", PlatformLogName, lerr)
+	} else {
+		c.Stdout = logf
+		c.Stderr = logf
+	}
 	if err := c.Start(); err != nil {
+		if logf != nil {
+			logf.Close()
+		}
 		return err
 	}
 	exitCh := make(chan struct{})
@@ -67,6 +97,9 @@ func (p *ProcSvc) Start(binPath, v string) error {
 			p.exitedAt = time.Now()
 		}
 		p.mu.Unlock()
+		if logf != nil {
+			logf.Close() // release the engine-log fd when the child exits
+		}
 		close(exitCh)
 	}()
 	return nil
