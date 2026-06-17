@@ -96,9 +96,9 @@ live demo.
   its core path is a FAIL to flag.
 
 ## Status — daemon-v0.5.3 + platform v0.15.0 (2026-06-17)
-Verdict: **PASS on V1–V6 and V8** (live + automated). **V7 PARTIAL** — daemon
-logging verified clean; the engine was logging to `/dev/null` (a real
-observability gap, now fixed in code, pending deploy + re-verify).
+Verdict: **PASS — all of V1–V8 verified** (live + automated). The V7 engine-log
+gap was fixed (daemon-v0.5.4) and re-verified live: `platform.log` now fills
+with engine + plugin activity, 0 unexpected ERROR/WARN.
 
 | # | Feature | Verified? | Evidence (what was actually exercised) |
 |---|---------|-----------|----------------------------------------|
@@ -108,7 +108,7 @@ observability gap, now fixed in code, pending deploy + re-verify).
 | V4 | Skill self-heal | ✅ VERIFIED | Deleted `~/.claude/skills/focusd-protection/`; skill-protector re-injected `SKILL.md` (identical size) within **~70s** (@5m cycle). |
 | V5 | Claude refusal stance | ✅ VERIFIED | Skill + always-on rule + SessionStart hook present and current; the focusd-protection skill is loaded and followed this session (redaction + refusal). Fresh-session refusal is enforced by the SessionStart hook every session. |
 | V6 | Process-set accuracy / no orphans | ✅ VERIFIED | After two path-rotating self-updates AND the teardown rebuild: exactly **2 workers (role a+b), both daemon-v0.5.3**, **1 engine (v0.15.0)**, **1 on-disk daemon binary (current)** — no orphaned old-version process or binary. |
-| V7 | Observability / white-box logs | ⚠️ PARTIAL | `daemon.log` present + current, **0 ERROR / 0 WARN**, captures real reconcile/fetch activity; the daemon logs fetch failures at ERROR (so the 404 bug *was* loggable — black-box missed it, logs wouldn't have). **GAP found:** the engine child was launched with stdio → `/dev/null`, so engine + plugin logs were discarded. **Fixed in code** (capture to `<workdir>/platform.log`, with tests); pending deploy + re-verify that `platform.log` fills on the live box. |
+| V7 | Observability / white-box logs | ✅ VERIFIED | `daemon.log` present + current, **0 ERROR / 0 WARN**, captures real reconcile/fetch activity; the daemon logs fetch failures at ERROR (so the 404 *was* loggable — black-box missed it). **GAP found + fixed:** the engine child was launched with stdio → `/dev/null`, discarding engine + plugin logs. Fixed in daemon-v0.5.4 (capture to `<workdir>/platform.log`, with tests) and **re-verified live**: after self-update, `platform.log` fills with engine + every plugin's job runs (kill-steam, freedom-protector, dns-block, skill-protector), **0 ERROR / 0 WARN**. |
 | V8 | Automated test coverage | ✅ VERIFIED | Full daemon unit suite + `internal/e2e` integration suite green (`go test -race`); new `platformsvc` tests assert engine stdout+stderr land in `platform.log` and append across restarts; the ADR-0015/0017 fixes each shipped with regression tests that run in CI. |
 
 > Note: the engine version pin (v0.15.0) and the bundled plugin set (incl.
