@@ -91,6 +91,64 @@ so promote from here rather than re-deriving from those older notes.
 
 ---
 
+## Protection-coverage dashboard (server-collected metrics + honest status)
+
+**Maturity:** [raw] — owner explicitly wants this as a **refinement-needed
+backlog item**, not a spec yet.
+
+**The idea (distilled).** After it authenticates, the protection engine reports
+its status/metrics to a server, and the **user + an accountability partner get a
+dashboard** showing whether protection is actually on — overall and **per
+component** (the enforcement engine plus each plugin: kill-steam, dns-block,
+etc.): "is there an issue or not." The headline metric is a **coverage-of-online-
+time** number: *of the time the device was connected to the internet, how much
+was it actually protected?* ("Once connected to the internet, protection should
+be on.")
+
+**Honest status, not "always green."** A device can be **offline / disconnected**
+— that is a *distinct* state, not "unprotected" and not "healthy." The dashboard
+must cleanly separate **offline/unknown** from **online-and-protected** from
+**online-and-failing**, both overall and per component.
+
+**Why it might matter.** The addicted user and their accountability partner get
+**real visibility** instead of a fake-green light. An honest coverage percentage
+("you were protected 96% of your online time") is more motivating and more
+trustworthy than a binary indicator — and a partner who can see a per-plugin
+failure or a coverage dip can actually act on it.
+
+**Tension with current philosophy.**
+- **Privacy / new data collection.** A server collecting client telemetry is
+  **new data collection and a scope expansion** — the register's threat model and
+  personas are single-machine today. What gets transmitted (status-only vs. richer
+  metrics) is an open product question. **Needs human sign-off before promotion.**
+- **Honest-status / observability principle (register §5 "Observability is
+  non-negotiable").** "Always green" is exactly the *latent-failure* anti-pattern
+  this idea is reacting against — so the dashboard must surface real
+  offline/failing states, never paper over them. This idea is aligned with §5 *if*
+  it stays honest; it betrays §5 the moment it shows green for a device it simply
+  hasn't heard from.
+- **The device is also the adversary.** The weak-moment self controls the
+  reporting device, so a status surface could be **gamed** (suppressed or
+  spoofed). Open question whether this is purely *informational* (and leans on
+  F13's authenticated-heartbeat dead-man semantics so silence ≠ healthy) or
+  something stronger.
+
+**Dependencies.** Builds on / overlaps
+[FEATURE 13 — heartbeat + accountability-partner alerting](./features/13-heartbeat-accountability-alerting.md):
+**F13 is the transport** (authenticated heartbeat + partner notification); this
+idea is the **metrics + dashboard + coverage view layered on top**. Also shares
+F13's server / device-auth / off-box-server prerequisites — don't re-derive them.
+
+**Open question to resolve before promoting.**
+- **Where does the coverage metric live?** Does the **device itself** track its
+  own protected-vs-online time and report the computed coverage, or is coverage
+  **derived server-side** from heartbeats? (Device-side is richer but more
+  game-able; server-derived is simpler but coarser.) Resolve before spec.
+- Plus F13's shared opens: what's transmitted (privacy), device enrollment/auth,
+  and where the server lives + how it's kept un-nukeable.
+
+---
+
 ## Secure self-update (blue-green, signed, auto-rollback)
 
 **Maturity:** [raw]
