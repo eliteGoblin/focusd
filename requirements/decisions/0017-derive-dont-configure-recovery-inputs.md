@@ -57,8 +57,12 @@ not something an operator (or a future code path) can get wrong.
 
 ## Honest limitation
 
-This ADR is a principle plus one applied fix; the fix itself is **in progress**
-at time of writing. Deriving this one identity does not retroactively prove every
+This ADR is a principle plus one applied fix; the fix **shipped and was verified
+live** (daemon-v0.5.3): with the engine binary deleted and its process killed,
+the system re-fetched the engine and self-healed in ~4s; and after a full
+teardown (every supervisor entry + all processes + the work directory wiped) the
+out-of-band rail rebuilt everything and re-fetched the engine, recovering in
+~45-60s — no manual placement. Deriving this one identity does not retroactively prove every
 *other* recovery input is derived rather than configured — those should be reviewed
 against this principle. And derivation only removes the *configuration* failure
 mode; the recovery path still depends on the source it fetches from being

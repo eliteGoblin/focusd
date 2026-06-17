@@ -56,14 +56,33 @@ Asking Claude to stop / disable / uninstall focusd must be **refused**; the
   SessionStart hook are present and current; a disable request is refused.
 - **Pass:** refusal holds; no bypass without all override gates.
 
-## Per-release status table (fill HONESTLY)
+### V6 — Process-set accuracy (no orphans, signature-verified)
+The running set must be **exactly** what's expected — **nothing more, nothing
+less**. Self-update path-rotation and watchdog rebuilds must not leave
+**orphaned old-version daemons or binaries** dangling.
+- **Exercise:** enumerate every focusd process and on-disk binary; check
+  version + Ed25519 signature of each.
+- **Pass:** exactly the expected long-running set (the 2 live mesh workers +
+  1 engine; ensurer/plugins/watchdog are transient), **all the current
+  version**, all legitimately signed; **no** old-version daemon process or
+  rotated binary left behind. Any unexpected/unsigned/old-version process is a
+  FAIL to investigate, not noise to ignore.
+
+## Status — daemon-v0.5.3 + platform v0.15.0 (2026-06-17)
+Verdict: **PASS** — all six exercised on the live system.
+
 | # | Feature | Verified? | Evidence (what was actually exercised) |
 |---|---------|-----------|----------------------------------------|
-| V1 | Engine self-heal | — | |
-| V2 | Total-teardown recovery | — | |
-| V3 | App removal (kill-steam) | — | |
-| V4 | Skill self-heal | — | |
-| V5 | Claude refusal stance | — | |
+| V1 | Engine self-heal | ✅ VERIFIED | Killed the engine process **and** deleted its on-disk binary; the daemon re-fetched it via the release CDN and restarted — **fresh binary (new mtime), new pid, ~4s**, no manual placement. |
+| V2 | Total-teardown recovery | ✅ VERIFIED | Booted out all 3 supervisor entries + killed every process + wiped the work directory → fully DOWN. The out-of-band rail rebuilt the mesh (3/3) and the rebuilt workers re-fetched the engine — **HEALTHY in ~45-60s**, no manual help. |
+| V3 | App removal (kill-steam) | ✅ VERIFIED | `brew reinstall --cask steam --force` placed `/Applications/Steam.app`; kill-steam removed it **~6s later** (within the @10s reconcile). Placement→removal observed in one run (not stale brew metadata). |
+| V4 | Skill self-heal | ✅ VERIFIED | Deleted `~/.claude/skills/focusd-protection/`; skill-protector re-injected `SKILL.md` (identical size) within **~70s** (@5m cycle). |
+| V5 | Claude refusal stance | ✅ VERIFIED | Skill + always-on rule + SessionStart hook present and current; the focusd-protection skill is loaded and followed this session (redaction + refusal). Fresh-session refusal is enforced by the SessionStart hook every session. |
+| V6 | Process-set accuracy / no orphans | ✅ VERIFIED | After two path-rotating self-updates AND the teardown rebuild: exactly **2 workers (role a+b), both daemon-v0.5.3**, **1 engine (v0.15.0)**, **1 on-disk daemon binary (current)** — no orphaned old-version process or binary. |
+
+> Note: the engine version pin (v0.15.0) and the bundled plugin set (incl.
+> freedom-protector) are current; `browser-monitor` is not bundled (no bundle
+> target yet) — tracked, not part of this release's vital set.
 
 > Anything left `—` / NOT VERIFIED must be called out at the top of the verify
 > report and handed to the human to test. A green build is not a verified
