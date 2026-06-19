@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/eliteGoblin/focusd/daemon/internal/core"
 	"github.com/eliteGoblin/focusd/daemon/internal/mode"
 	"github.com/eliteGoblin/focusd/daemon/internal/sig"
 )
@@ -127,10 +128,10 @@ func modeFromTestFlag(testMode bool) mode.Mode {
 // the installer baked into every plist — NOT by a shared label stem.
 type CurInstall struct {
 	Mode       mode.Mode     // user | system (Test is not discovered this way)
-	Roster     []string      // the 3 independent mesh labels (AllRoles order), from --roster argv
-	Workdir    string        // recovered from the plist's --workdir argv
-	BinaryPath string        // the ProgramArguments[0] binary path
-	Interval   time.Duration // reconcile interval recovered from --interval argv (0 if absent)
+	Roster     []string      // the 3 independent mesh labels (AllRoles order), from the masked workdir file (FEATURE 14); --roster argv is the old-plist fallback
+	Workdir    string        // recovered as filepath.Dir(BinaryPath) (FEATURE 14); --workdir argv is the old-plist fallback
+	BinaryPath string        // the ProgramArguments[0] binary path — the FEATURE 14 correlation key
+	Interval   time.Duration // reconcile interval recovered from --interval argv (0 if absent / new plist)
 	PlistPaths []string      // up to 3, in scan order
 	Labels     []string      // up to 3, in scan order (aligned with PlistPaths)
 }
@@ -142,9 +143,10 @@ type CurInstall struct {
 // daemon_design.md §6). Returns (zero, nil) when no genuine install is
 // found, an error only for filesystem failure.
 //
-// All three mesh entries must agree on the same binary path and the
-// same --roster label set; otherwise the function returns whatever it
-// could parse and the caller decides.
+// All three mesh entries must agree on the same Ed25519-verified binary
+// path (FEATURE 14 / ADR-0018 correlation key); otherwise the function
+// returns whatever it could parse and the caller decides. The roster and
+// workdir are then recovered off-argv (masked file + Dir(bin)).
 // Verifier is the signature-check seam — production passes sig.VerifyFile
 // (the real Ed25519 check against the embedded public key); tests pass
 // a fake to avoid needing the offline private key in CI. Replaces the
@@ -169,6 +171,16 @@ func FindCurrentInstall(m mode.Mode, verify Verifier) (CurInstall, error) {
 		return CurInstall{}, rerr
 	}
 	cur := CurInstall{Mode: m}
+	// lastArgv keeps the argv of the most recently matched plist; matchedArgvs
+	// keeps EVERY matched plist's argv. The post-loop workdir/roster recovery
+	// falls back to OLD-plist argv flags (--workdir/--roster) when the masked
+	// file / Dir(bin) path isn't available. In a HALF-MIGRATED install only
+	// SOME plists still carry --roster in argv (new minimized plists dropped
+	// it, FEATURE 14 / ADR-0018), so the roster fallback must scan ALL matched
+	// argvs — not just the last one, which may be a minimized plist with no
+	// --roster.
+	var lastArgv []string
+	var matchedArgvs [][]string
 	for _, e := range entries {
 		if e.IsDir() || !strings.HasSuffix(e.Name(), ".plist") {
 			continue
@@ -181,32 +193,81 @@ func FindCurrentInstall(m mode.Mode, verify Verifier) (CurInstall, error) {
 		if ok, verr := verify(bin); verr != nil || !ok {
 			continue // not a genuine focusd binary → not ours
 		}
-		// Establish the install's binary path + roster from the FIRST
-		// matched plist; subsequent matches must agree on BOTH. The
-		// roster (--roster argv) is the FEATURE 10 correlation key that
-		// replaced the retired shared-base check: the three independent
-		// labels share no stem, but every plist carries the same roster.
+		// FEATURE 14 / ADR-0018: correlation key is the shared, Ed25519-
+		// verified BINARY PATH across the three plists — NOT the --roster
+		// argv (new minimized plists no longer carry it). argv[0] is shared
+		// across all three mesh members and is a strictly stronger key: it
+		// is the verified install identity. Establish it from the FIRST
+		// matched plist; subsequent matches must agree.
 		if cur.BinaryPath == "" {
 			cur.BinaryPath = bin
 		} else if cur.BinaryPath != bin {
 			continue // unrelated focusd install (different rotation)
 		}
-		roster := rosterFromArgv(argv)
-		if cur.Roster == nil {
-			cur.Roster = roster
-		} else if !sameRoster(cur.Roster, roster) {
-			continue // a different mesh's plist (different roster) → not ours
-		}
-		if cur.Workdir == "" {
-			cur.Workdir = workdirFromArgv(argv)
-		}
+		// Recover the interval from argv if an OLD plist still bakes it;
+		// new plists omit it (the worker cadence is a fixed constant).
 		if cur.Interval == 0 {
 			cur.Interval = intervalFromArgv(argv)
 		}
 		cur.PlistPaths = append(cur.PlistPaths, pp)
 		cur.Labels = append(cur.Labels, label)
+		lastArgv = argv
+		matchedArgvs = append(matchedArgvs, argv)
+	}
+	// Recover the workdir + roster ONCE, after the binary path is known.
+	// FEATURE 14 / ADR-0018:
+	//   - Workdir: the disguised binary is relocated INSIDE the workdir, so
+	//     filepath.Dir(BinaryPath) IS the workdir. workdirFromArgv is the
+	//     fallback only for an OLD plist whose binary path has no parent.
+	//   - Roster: read from the masked workdir file (the single source of
+	//     truth). For an OLD plist where the file isn't present, fall back to
+	//     the --roster argv the installer baked.
+	if cur.BinaryPath != "" {
+		cur.Workdir = recoverWorkdir(cur.BinaryPath, lastArgv)
+		cur.Roster = recoverRoster(cur.Workdir, matchedArgvs)
 	}
 	return cur, nil
+}
+
+// recoverWorkdir resolves a discovered install's workdir (FEATURE 14 /
+// ADR-0018). The disguised binary lives inside the workdir, so the binary's
+// parent directory IS the workdir; workdirFromArgv (an OLD plist's --workdir)
+// is only the fallback when Dir(bin) yields nothing usable.
+func recoverWorkdir(bin string, argv []string) string {
+	if wd := WorkdirFromBinary(bin); wd != "" {
+		return wd
+	}
+	return workdirFromArgv(argv)
+}
+
+// recoverRoster resolves a discovered install's roster (FEATURE 14 /
+// ADR-0018). The masked workdir file is the single source of truth; an OLD
+// plist's --roster argv is the fallback for installs predating the masked
+// file (or when the file is unreadable).
+//
+// argvs is EVERY matched plist's argv: in a half-migrated install only the
+// OLD plist(s) still carry --roster (new minimized plists dropped it), and
+// scan order may make a minimized plist the last one, so we scan all of them
+// and take the first that yields a non-nil roster. Returns nil (the accepted
+// degraded mode) only when no plist carries a roster AND the masked file is
+// absent/unreadable.
+func recoverRoster(workdir string, argvs [][]string) []string {
+	if workdir != "" {
+		// Require the EXACT mesh size. core.ReadRoster validates non-empty
+		// labels but not count; a truncated/edited .roster yielding a short
+		// slice would let Spec.Label backfill missing positions with dev
+		// labels and corrupt correlation/rebuild — treat that as unreadable
+		// and fall through to the argv fallback (Copilot review).
+		if labels, err := core.ReadRoster((&core.Store{Dir: workdir}).RosterPath()); err == nil && len(labels) == len(AllRoles) {
+			return labels
+		}
+	}
+	for _, argv := range argvs {
+		if labels := rosterFromArgv(argv); labels != nil {
+			return labels
+		}
+	}
+	return nil
 }
 
 // MeshStatus reports how many of the discovered mesh roles are currently

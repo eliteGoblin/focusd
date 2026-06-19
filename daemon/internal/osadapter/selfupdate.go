@@ -3,6 +3,7 @@ package osadapter
 import (
 	"errors"
 	"fmt"
+	"os"
 	"time"
 )
 
@@ -152,11 +153,21 @@ func SelfUpdate(
 	// mesh left behind (FEATURE 10 / ADR-0014). Without this, the workdir
 	// .roster still names the OLD labels: a new worker's cold-start read
 	// would succeed (valid mask) yet recover the wrong mesh, and ensureAll
-	// wouldn't rewrite it because the read didn't error. Best-effort: the
-	// new plists' --roster argv is the primary source of truth, so a write
-	// failure here does not roll back a healthy swap.
+	// wouldn't rewrite it because the read didn't error.
+	//
+	// FEATURE 14 / ADR-0018: the new minimized plists NO LONGER carry the
+	// roster in their --roster argv, so this masked file is now the SOLE
+	// cold-start roster source for the new mesh. A write failure does not
+	// roll back an otherwise-healthy swap (the new mesh is already serving),
+	// but it leaves a stale/nil roster for the next FindCurrentInstall —
+	// surface it loudly so the gap is diagnosable from the daemon log
+	// instead of swallowed.
 	if rs != nil {
-		_ = rs.writeRoster(rosterLabels(newSpec))
+		if err := rs.writeRoster(rosterLabels(newSpec)); err != nil {
+			fmt.Fprintf(os.Stderr,
+				"WARN osadapter/selfupdate: persist masked roster failed (swap kept; next cold-start roster may be stale/nil): %v\n",
+				err)
+		}
 	}
 
 	// G. SWAP. Bootout old in REVERSE order (ensurer first, then B,
