@@ -199,7 +199,12 @@ func parse(name string, args []string) opts {
 			workdir = deriveMeshWorkdir()
 		}
 		if roster == nil && !testMode {
-			if labels, rerr := core.ReadRoster((&core.Store{Dir: workdir}).RosterPath()); rerr == nil {
+			// Require the EXACT mesh size: core.ReadRoster validates non-empty
+			// labels but not count, so a truncated/edited .roster could yield a
+			// short slice and let Spec.Label backfill missing positions with dev
+			// labels (corrupting mesh labels). A non-3 slice is treated as
+			// unreadable → roster stays nil (Spec.Label dev fallback). (Copilot.)
+			if labels, rerr := core.ReadRoster((&core.Store{Dir: workdir}).RosterPath()); rerr == nil && len(labels) == len(osadapter.AllRoles) {
 				roster = labels
 			}
 		}

@@ -99,6 +99,21 @@ func TestParseMeshMissingRosterFileLeavesNil(t *testing.T) {
 	}
 }
 
+func TestParseMeshShortRosterFileLeavesNil(t *testing.T) {
+	// A truncated/edited masked file with fewer than the 3 mesh labels must be
+	// treated as unreadable → roster stays nil (NOT a partial slice that would
+	// let Spec.Label backfill missing positions with dev labels). (Copilot.)
+	wd := t.TempDir()
+	if err := core.WriteRoster((&core.Store{Dir: wd}).RosterPath(),
+		[]string{"only.one.label"}); err != nil {
+		t.Fatal(err)
+	}
+	o := parse("run", []string{"--r", "a", "--mesh", "--workdir", wd})
+	if o.roster != nil {
+		t.Fatalf("short masked roster must be rejected (nil), got %v", o.roster)
+	}
+}
+
 func TestParseNonMeshDoesNotDeriveOrLoad(t *testing.T) {
 	// A plain `run` (no --mesh) is NOT a mesh role: it must keep the default
 	// workdir and must NOT read a masked roster file.

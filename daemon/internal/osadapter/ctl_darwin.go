@@ -253,7 +253,12 @@ func recoverWorkdir(bin string, argv []string) string {
 // absent/unreadable.
 func recoverRoster(workdir string, argvs [][]string) []string {
 	if workdir != "" {
-		if labels, err := core.ReadRoster((&core.Store{Dir: workdir}).RosterPath()); err == nil {
+		// Require the EXACT mesh size. core.ReadRoster validates non-empty
+		// labels but not count; a truncated/edited .roster yielding a short
+		// slice would let Spec.Label backfill missing positions with dev
+		// labels and corrupt correlation/rebuild — treat that as unreadable
+		// and fall through to the argv fallback (Copilot review).
+		if labels, err := core.ReadRoster((&core.Store{Dir: workdir}).RosterPath()); err == nil && len(labels) == len(AllRoles) {
 			return labels
 		}
 	}
