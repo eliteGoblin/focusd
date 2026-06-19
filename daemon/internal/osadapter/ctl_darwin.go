@@ -171,12 +171,16 @@ func FindCurrentInstall(m mode.Mode, verify Verifier) (CurInstall, error) {
 		return CurInstall{}, rerr
 	}
 	cur := CurInstall{Mode: m}
-	// lastArgv keeps the argv of the most recently matched plist so the
-	// post-loop workdir/roster recovery can fall back to OLD-plist argv
-	// flags (--workdir/--roster) when the masked file / Dir(bin) path
-	// isn't available. All three mesh plists carry the same values, so any
-	// one of them is a valid fallback source.
+	// lastArgv keeps the argv of the most recently matched plist; matchedArgvs
+	// keeps EVERY matched plist's argv. The post-loop workdir/roster recovery
+	// falls back to OLD-plist argv flags (--workdir/--roster) when the masked
+	// file / Dir(bin) path isn't available. In a HALF-MIGRATED install only
+	// SOME plists still carry --roster in argv (new minimized plists dropped
+	// it, FEATURE 14 / ADR-0018), so the roster fallback must scan ALL matched
+	// argvs — not just the last one, which may be a minimized plist with no
+	// --roster.
 	var lastArgv []string
+	var matchedArgvs [][]string
 	for _, e := range entries {
 		if e.IsDir() || !strings.HasSuffix(e.Name(), ".plist") {
 			continue
@@ -208,6 +212,7 @@ func FindCurrentInstall(m mode.Mode, verify Verifier) (CurInstall, error) {
 		cur.PlistPaths = append(cur.PlistPaths, pp)
 		cur.Labels = append(cur.Labels, label)
 		lastArgv = argv
+		matchedArgvs = append(matchedArgvs, argv)
 	}
 	// Recover the workdir + roster ONCE, after the binary path is known.
 	// FEATURE 14 / ADR-0018:
@@ -219,7 +224,7 @@ func FindCurrentInstall(m mode.Mode, verify Verifier) (CurInstall, error) {
 	//     the --roster argv the installer baked.
 	if cur.BinaryPath != "" {
 		cur.Workdir = recoverWorkdir(cur.BinaryPath, lastArgv)
-		cur.Roster = recoverRoster(cur.Workdir, lastArgv)
+		cur.Roster = recoverRoster(cur.Workdir, matchedArgvs)
 	}
 	return cur, nil
 }
@@ -239,13 +244,25 @@ func recoverWorkdir(bin string, argv []string) string {
 // ADR-0018). The masked workdir file is the single source of truth; an OLD
 // plist's --roster argv is the fallback for installs predating the masked
 // file (or when the file is unreadable).
-func recoverRoster(workdir string, argv []string) []string {
+//
+// argvs is EVERY matched plist's argv: in a half-migrated install only the
+// OLD plist(s) still carry --roster (new minimized plists dropped it), and
+// scan order may make a minimized plist the last one, so we scan all of them
+// and take the first that yields a non-nil roster. Returns nil (the accepted
+// degraded mode) only when no plist carries a roster AND the masked file is
+// absent/unreadable.
+func recoverRoster(workdir string, argvs [][]string) []string {
 	if workdir != "" {
 		if labels, err := core.ReadRoster((&core.Store{Dir: workdir}).RosterPath()); err == nil {
 			return labels
 		}
 	}
-	return rosterFromArgv(argv)
+	for _, argv := range argvs {
+		if labels := rosterFromArgv(argv); labels != nil {
+			return labels
+		}
+	}
+	return nil
 }
 
 // MeshStatus reports how many of the discovered mesh roles are currently

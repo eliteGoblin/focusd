@@ -327,6 +327,64 @@ func TestFindCurrentInstallMixedPlists(t *testing.T) {
 	}
 }
 
+// TestFindCurrentInstallMixedPlists_NoMaskedFile is the REAL transitional
+// state: a crash between self-update writing the new minimized plists and
+// writing the masked .roster file. Two plists are NEW (minimized argv, no
+// --roster), one is OLD (carries --roster in argv), and NO masked file exists
+// on disk. FindCurrentInstall must still correlate the install by the shared
+// verified binary path AND recover the roster by scanning ALL matched plists'
+// argv for a --roster fallback.
+//
+// CRITICAL fixture detail: the OLD (roster-carrying) plist is RoleA, which
+// sorts FIRST in ReadDir order; the rosterless RoleEnsure sorts LAST and so
+// becomes the loop's lastArgv. This is exactly the scan order that a naive
+// lastArgv-only recoverRoster would mishandle (last plist has no --roster →
+// nil roster). It pins the regression the all-argv scan fixes.
+func TestFindCurrentInstallMixedPlists_NoMaskedFile(t *testing.T) {
+	_, laDir, wd, binPath := meshFixture(t)
+	// Deliberately NO masked roster file → forces the argv fallback.
+	rosterCSV := strings.Join(migrationRoster, ",")
+	s := Spec{Mode: mode.User, SelfPath: binPath, Workdir: wd, Roster: migrationRoster}
+
+	// RoleA → OLD-style plist carrying --roster in argv. RoleA's dev-fallback
+	// label sorts FIRST, so this roster-bearing plist is NOT the last scanned.
+	oldA := filepath.Join(laDir, s.Label(RoleA)+".plist")
+	if err := os.WriteFile(oldA, []byte(oldStylePlist(s.Label(RoleA), binPath, wd, rosterCSV)), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// RoleB + RoleEnsure → NEW minimized plists (no --roster in argv). RoleEnsure
+	// sorts LAST → it is the loop's lastArgv, and it carries NO roster.
+	newPlistB := filepath.Join(laDir, s.Label(RoleB)+".plist")
+	if err := os.WriteFile(newPlistB, []byte(Plist(s, RoleB)), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	newEnsure := filepath.Join(laDir, s.Label(RoleEnsure)+".plist")
+	if err := os.WriteFile(newEnsure, []byte(Plist(s, RoleEnsure)), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	verify := Verifier(func(p string) (bool, error) { return p == binPath, nil })
+	cur, err := FindCurrentInstall(mode.User, verify)
+	if err != nil {
+		t.Fatalf("FindCurrentInstall: %v", err)
+	}
+	if cur.BinaryPath != binPath {
+		t.Errorf("BinaryPath = %q, want %q", cur.BinaryPath, binPath)
+	}
+	if cur.Workdir != wd {
+		t.Errorf("Workdir = %q, want %q (Dir(bin))", cur.Workdir, wd)
+	}
+	// The whole point: roster recovered from the OLD plist's --roster argv,
+	// even though no masked file exists and a NEW (rosterless) plist may be
+	// the last one scanned.
+	if !sameRoster(cur.Roster, migrationRoster) {
+		t.Errorf("Roster = %v, want %v (from --roster argv fallback across all plists)", cur.Roster, migrationRoster)
+	}
+	if len(cur.PlistPaths) != 3 || len(cur.Labels) != 3 {
+		t.Fatalf("want 3 plists+labels, got %d/%d", len(cur.PlistPaths), len(cur.Labels))
+	}
+}
+
 func TestFindCurrentInstallNoneInstalled(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)

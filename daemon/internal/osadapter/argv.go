@@ -67,12 +67,19 @@ func workdirFromArgv(argv []string) string {
 // INSIDE the workdir, so its parent directory IS the workdir — this lets a
 // minimized-argv mesh process find its workdir (and thus the masked roster)
 // without carrying --workdir on the command line. Returns "" for an empty
-// input so the caller can fall back to the default workdir.
+// input, a relative path, or a root-level binary so the caller can fall back
+// to the default workdir: filepath.Dir yields "." for a relative path and "/"
+// for a root path — both non-empty, which would otherwise short-circuit the
+// caller's fallback into a nonsensical workdir.
 func WorkdirFromBinary(self string) string {
 	if self == "" {
 		return ""
 	}
-	return filepath.Dir(self)
+	parent := filepath.Dir(self)
+	if !filepath.IsAbs(parent) || parent == "/" {
+		return ""
+	}
+	return parent
 }
 
 // intervalFromArgv pulls the reconcile interval following "--interval" out of
