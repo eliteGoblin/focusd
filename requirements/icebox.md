@@ -220,6 +220,51 @@ bash browser-guard's 10s poll is good enough, this may stay iceboxed.)
 
 ---
 
+## Self-update should clean up stale background-task records (Login Items cruft)
+
+**Maturity:** [raw]
+
+**The idea (distilled).** Each self-update rotates the binary path (the anti-AMFI
+defense), which mints a **fresh set of launchd labels** (one per role). macOS's background-task store
+keeps the **old** records around as inert cruft — surfacing as **stale duplicate
+entries** in System Settings → Login Items → "Allow in the Background" (the owner
+saw triple duplicates). The idea: on self-update, **deregister / boot out the
+old-generation labels and remove their orphaned plists** so the background-task
+store does not accumulate stale records — **only if macOS offers a clean,
+supported deregistration path**; otherwise document it as an accepted limitation.
+
+**Why it might matter.** The stale entries are both a **visual tell** (they hint
+at a rotating, self-protecting agent and multiply its footprint) and **clutter**.
+Removing them tightens the disguise and keeps the Login-Items surface honest.
+
+**Honest reality check (keep this).** **Live protection does not depend on the
+stale records** — their binaries are gone, so they are inert. This is hygiene and
+disguise, not a protection gap. It surfaced alongside FEATURE 14 (the `ps`
+argv-leak fix) and is explicitly **out of F14's committed scope** — F14 records it
+as a known limitation rather than solving it.
+
+**Tension with current philosophy.**
+- **KISS / friction-not-cryptography.** Worth doing only if there is a *clean*
+  supported deregistration path. Fighting an undocumented background-task store
+  to scrub records risks fragile, OS-version-specific code for a cosmetic/disguise
+  gain — weigh against the self-protection value before promoting.
+- **Self-update is delicate.** Touching the two-copy / path-rotating update flow
+  to also deregister old generations adds steps to a path that must never drop
+  protection mid-change. Any cleanup must be best-effort and never block the
+  update.
+
+**Dependencies.** Sits on the path-rotating self-update (FEATURE 1.5) and the mesh
+labels (FEATURE 10). Naturally pairs with FEATURE 14's disguise work but is
+independent of it.
+
+**Open question to resolve before promoting.** Does macOS expose a **clean,
+supported way** to deregister an old-generation label / remove its orphaned plist
+from the background-task store on self-update? If yes → a small standalone
+feature. If no → keep it documented as an accepted limitation (FEATURE 14 already
+notes it) and do **not** hand-hack the store.
+
+---
+
 ## Related ideas already captured elsewhere (do not duplicate here)
 
 These live in their own (untracked) `app_mon/` notes and should be consolidated
