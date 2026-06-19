@@ -1,6 +1,7 @@
 package osadapter
 
 import (
+	"path/filepath"
 	"strings"
 	"time"
 )
@@ -59,6 +60,19 @@ func workdirFromArgv(argv []string) string {
 		}
 	}
 	return ""
+}
+
+// WorkdirFromBinary recovers the mesh workdir from the daemon's own
+// binary path (FEATURE 14 / ADR-0018). The disguised binary is relocated
+// INSIDE the workdir, so its parent directory IS the workdir — this lets a
+// minimized-argv mesh process find its workdir (and thus the masked roster)
+// without carrying --workdir on the command line. Returns "" for an empty
+// input so the caller can fall back to the default workdir.
+func WorkdirFromBinary(self string) string {
+	if self == "" {
+		return ""
+	}
+	return filepath.Dir(self)
 }
 
 // intervalFromArgv pulls the reconcile interval following "--interval" out of

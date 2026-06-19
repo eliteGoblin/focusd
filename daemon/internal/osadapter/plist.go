@@ -7,48 +7,34 @@ import (
 )
 
 // args returns the daemon argv for a role. A/B run the supervised loop
-// (`run --r <role>` — reconcile platform + recreate siblings); ensure
-// runs the one-shot mesh repair (`ensure`).
+// (`run --r <role> --mesh` — reconcile platform + recreate siblings);
+// ensure runs the one-shot mesh repair (`ensure`).
+//
+// FEATURE 14 / ADR-0018: the PROD argv is minimized to "role + mesh
+// marker" and nothing else — none of the disguised identifiers ride on
+// the command line where `ps` exposes them to root. Specifically NOT
+// baked: the three roster labels (the `launchctl bootout` keys, the worst
+// leak), --github (a focusd-identity tell), --asset, --interval, and
+// --workdir. A relaunched survivor reconstructs everything else:
+//   - the roster from the masked workdir file (single source of truth),
+//   - the workdir from filepath.Dir(os.Executable()) — the disguised binary
+//     lives inside the workdir (argv[0] is unavoidably visible anyway),
+//   - the github channel + platform asset are derived/compiled in.
+//
+// TEST-MODE EXCEPTION: e2e installs still bake --test-mode-flag + --workdir
+// because the throwaway e2e workdir is NOT derivable from argv[0] (it is a
+// caller-provided temp dir, and the binary is not relocated inside it). No
+// prod identifiers are ever baked.
 func args(s Spec, r Role) []string {
-	common := []string{
-		"--workdir", s.Workdir,
-		"--github", s.Github,
-		"--asset", s.Asset,
-		"--interval", s.Interval.String(),
-		"--test-mode-flag", boolStr(s.isTest()),
-		// FEATURE 10 / ADR-0014: every role carries the FULL 3-label
-		// roster (comma-joined, AllRoles order) so any survivor relaunched
-		// cold reconstructs Spec.Roster from its own launch args and can
-		// rebuild every sibling plist — no shared base, no separate
-		// registry. The masked .roster workdir file is the cold-start /
-		// sibling fallback when a plist isn't to hand.
-		"--roster", rosterArg(s),
+	var tail []string
+	if s.isTest() {
+		tail = []string{"--test-mode-flag", "true", "--workdir", s.Workdir}
 	}
 	if r == RoleEnsure {
-		return append([]string{"ensure"}, common...)
+		return append([]string{"ensure"}, tail...)
 	}
 	// --mesh: only an installed worker self-heals the launchd mesh.
-	return append([]string{"run", "--r", string(r), "--mesh"}, common...)
-}
-
-func boolStr(b bool) string {
-	if b {
-		return "true"
-	}
-	return "false"
-}
-
-// rosterArg renders the comma-joined 3-label roster baked into every
-// plist's argv. It uses s.Label over AllRoles so the value reflects the
-// ACTUAL resolved labels (test-mode e2e, disguised roster, or dev
-// fallback) — whatever a survivor must rebuild. Aligned with AllRoles so
-// `--r <role>` + this roster pins each sibling's label by position.
-func rosterArg(s Spec) string {
-	labels := make([]string, len(AllRoles))
-	for i, r := range AllRoles {
-		labels[i] = s.Label(r)
-	}
-	return strings.Join(labels, ",")
+	return append([]string{"run", "--r", string(r), "--mesh"}, tail...)
 }
 
 // EnsureBackstopInterval is the default ensurer StartInterval (FEATURE 10

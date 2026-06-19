@@ -160,13 +160,74 @@ func parse(name string, args []string) opts {
 	rl := fs.String("r", "a", "mesh role: a|b")
 	tm := fs.String("test-mode-flag", "false", "use test-mode launchd labels")
 	mesh := fs.Bool("mesh", false, "self-heal the launchd mesh (set only by the installer)")
-	// --roster carries the 3 independent mesh labels (comma-joined,
-	// AllRoles order) baked into every plist by the installer, so any
-	// survivor relaunched cold reconstructs Spec.Roster from its own argv
-	// and can rebuild every sibling plist (FEATURE 10 / ADR-0014).
-	rs := fs.String("roster", "", "comma-joined 3-label mesh roster (set by the installer)")
+	// --roster is still ACCEPTED for backward-compatibility with OLD plists
+	// (their argv still bakes the comma-joined 3-label roster). When present
+	// it WINS — an old plist on a new binary keeps working unchanged. New
+	// (FEATURE 14 / ADR-0018) plists omit it entirely: the roster lives only
+	// in the masked workdir file. Keeping the flag DEFINED also stops
+	// flag.Parse from choking on an old plist's --roster and dropping the
+	// trailing --mesh/--r that follow it.
+	rs := fs.String("roster", "", "(backward-compat) comma-joined 3-label mesh roster from old plists")
+	// Track whether the caller explicitly passed --workdir so a mesh role
+	// can prefer an explicit value over the os.Executable()-derived one.
+	wdSet := false
 	_ = fs.Parse(args)
-	return opts{*wd, *iv, *gh, platformAsset(), *rd, *hd, *ud, *rl, *tm == "true", *mesh, splitRoster(*rs)}
+	fs.Visit(func(f *flag.Flag) {
+		if f.Name == "workdir" {
+			wdSet = true
+		}
+	})
+
+	testMode := *tm == "true"
+	roster := splitRoster(*rs)
+	workdir := *wd
+
+	// FEATURE 14 / ADR-0018: a mesh role (a `run … --mesh` worker or the
+	// `ensure` subcommand) launched from a NEW minimized plist carries
+	// neither --workdir nor --roster. Recover both off the command line:
+	//   - workdir: explicit --workdir wins; else the parent dir of the
+	//     daemon binary (it is relocated INSIDE the workdir); else the
+	//     default. os.Executable() failure falls back to the default.
+	//   - roster: an explicit --roster (old plist) wins; else, for a non-test
+	//     mesh role, read it from the masked workdir file. A read error leaves
+	//     the roster nil (Spec.Label's dev fallback applies; never crash).
+	// CLI subcommands that run a binary OUTSIDE the workdir (update,
+	// self-update, status, watchdog, install) do NOT call parse(), so this
+	// derivation never touches their workdir logic.
+	if isMeshRole(name, *mesh) {
+		if !wdSet {
+			workdir = deriveMeshWorkdir()
+		}
+		if roster == nil && !testMode {
+			if labels, rerr := core.ReadRoster((&core.Store{Dir: workdir}).RosterPath()); rerr == nil {
+				roster = labels
+			}
+		}
+	}
+
+	return opts{workdir, *iv, *gh, platformAsset(), *rd, *hd, *ud, *rl, testMode, *mesh, roster}
+}
+
+// isMeshRole reports whether a parsed invocation is a mesh member that
+// must self-recover workdir + roster off-argv (FEATURE 14 / ADR-0018): a
+// `run … --mesh` worker, or the `ensure` subcommand.
+func isMeshRole(name string, mesh bool) bool {
+	return name == "ensure" || mesh
+}
+
+// deriveMeshWorkdir resolves a mesh member's workdir from its own binary
+// path (the disguised binary lives inside the workdir, FEATURE 14 /
+// ADR-0018). Falls back to defaultWorkdir() when os.Executable() fails or
+// yields no usable parent — never empty.
+func deriveMeshWorkdir() string {
+	self, err := os.Executable()
+	if err != nil {
+		return defaultWorkdir()
+	}
+	if wd := osadapter.WorkdirFromBinary(self); wd != "" {
+		return wd
+	}
+	return defaultWorkdir()
 }
 
 // workerHealInterval is the fast in-process worker reconcile cadence
