@@ -225,7 +225,7 @@ bash browser-guard's 10s poll is good enough, this may stay iceboxed.)
 **Maturity:** [raw]
 
 **The idea (distilled).** Each self-update rotates the binary path (the anti-AMFI
-defense), which mints a **fresh launchd label**. macOS's background-task store
+defense), which mints a **fresh set of launchd labels** (one per role). macOS's background-task store
 keeps the **old** records around as inert cruft — surfacing as **stale duplicate
 entries** in System Settings → Login Items → "Allow in the Background" (the owner
 saw triple duplicates). The idea: on self-update, **deregister / boot out the

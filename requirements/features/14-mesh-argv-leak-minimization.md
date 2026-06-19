@@ -55,8 +55,8 @@ restores the decorrelation F10 was supposed to deliver.
 
 - **Role + mesh marker, nothing more.** A running mesh process's command line, as
   seen in `ps`, reveals only which role it is and that it belongs to the mesh.
-  Example shape only: a marker like `--mesh worker` — *not* a list of labels, a
-  channel, or a workdir flag.
+  Example shape only: a worker is `run --r <role> --mesh` and the ensurer is
+  `ensure` — *not* a list of labels, a channel, or a workdir flag.
 - **The labels live in the masked file, not on the command line.** The on-disk
   masked roster (FEATURE 10) is the single source of truth for the three labels.
   A process that needs the roster reads it from there; it does not receive the
@@ -131,7 +131,8 @@ file looks valid" failure mode raised in review.
   commitment weight remains the server-side override gate.
 - **Stale Login-Items / background-task records are a separate, unsolved tell
   (known limitation).** Each self-update rotates the binary path (the anti-AMFI
-  defense), which mints a fresh launchd label, and macOS's background-task store
+  defense), which mints a fresh set of three launchd labels (one per role), and
+  macOS's background-task store
   keeps the **old** records around as inert cruft — visible as stale duplicate
   entries in System Settings → Login Items → "Allow in the Background." This is a
   visual tell and clutter, but **live protection does not depend on the stale
@@ -145,7 +146,7 @@ file looks valid" failure mode raised in review.
   target is "role + mesh marker." Confirm in DESIGN that a relaunched survivor can
   reconstruct everything else (roster from the masked file, channel/asset built
   in) without any of the removed arguments.
-- **3-platform Go still holds.** The argv-shaping and the build-in/derive of
+- **3-platform Go still holds.** The argv-shaping and the built-in/derive of
   channel + asset should stay OS-agnostic where they can; the launchd-specific
   bits live behind the existing per-OS adapter seam. The daemon stays thin.
 - **For the architect (stale background-task records):** is there a clean,
