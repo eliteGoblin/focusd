@@ -265,6 +265,49 @@ notes it) and do **not** hand-hack the store.
 
 ---
 
+## Plugin config / policy integrity (the other half of the trust story)
+
+**Maturity:** [exploring]
+
+**The idea.** FEATURE 15 / ADR-0019 makes the plugin **programs** continuously
+authentic — verified every reconcile tick against the genuine copy carried inside
+the signed platform binary, restored on tamper, recorded as a security event. But
+a genuine plugin program is only as strong as **what it is told to do**. The
+weak-moment owner can leave the program untouched and instead gut its *inputs* —
+empty out a blocklist, drop a target app from the kill list, stretch the job
+schedule so it effectively never runs. The program passes its integrity check and
+runs faithfully — over a neutered policy. This follow-up extends the same
+signed-desired-state + tighten-only discipline from plugin **binaries** to plugin
+**config/policy**: blocklists, target-app lists, job schedules, and a "no inside
+door handle" guarantee that local config can only *tighten*, never loosen.
+
+**Why it might matter.** It closes the obvious next move after F15 lands: if you
+can't swap the program, swap its orders. Without this, "plugin integrity" is only
+half true, and the same false-green class (status reads ok over a plugin pointed
+at an empty blocklist) can reopen at the config layer. Already tracked as the
+standing regression **TC-10** in `e2e-test-history.md`.
+
+**Tension with current philosophy.**
+- **Friction, not a seal.** Same honest ceiling as F15 — root can re-tamper; this
+  is fast self-heal + detection, not an unbreakable barrier. The durable weight
+  stays the server-side override gate.
+- **Overlaps the server-managed-enforcement entry above.** The cleanest "config
+  can only tighten" story is a *server-signed* policy the client can verify but
+  never forge (that entry). A local-only tighten-only check is a weaker,
+  KISS-er interim. Decide which layer owns policy authenticity before promoting,
+  so the two ideas don't grow conflicting trust roots.
+
+**Dependencies.** Sits on FEATURE 15 (the binary-integrity reconcile + tamper-
+event plumbing) and the platform's signed-desired-state spine.
+
+**Open question to resolve before promoting.** Where does the authentic plugin
+**policy** come from — the local signed platform bundle (like the binaries, KISS,
+but only as fresh as the last release) or an off-box server-signed policy (the
+server-managed-enforcement entry, stronger but heavier)? Resolve that before
+turning TC-10 into a feature spec + ADR.
+
+---
+
 ## Related ideas already captured elsewhere (do not duplicate here)
 
 These live in their own (untracked) `app_mon/` notes and should be consolidated

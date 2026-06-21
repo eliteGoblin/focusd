@@ -18,12 +18,29 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"time"
 
 	"github.com/eliteGoblin/focusd/platform/internal/core/plugin"
 	"github.com/eliteGoblin/focusd/platform/internal/core/state"
 	"github.com/eliteGoblin/focusd/platform/internal/osadapter"
 )
+
+// integrityVerifier reconciles a single plugin's on-disk binaries against
+// the genuine embedded copy, restoring any that don't match. It is the
+// point-of-use integrity seam (ADR-0019): the runner calls it as
+// platform/root immediately before exec — before any setuid credential is
+// applied to the child — so a swapped/substitute binary is restored and
+// the genuine one runs instead. Backed in production by a bundle impl;
+// tests inject a fake to exercise restored / error paths without a real
+// embedded bundle.
+//
+// VerifyOrRestore(pluginRoot, subdir) reports restored=true if it had to
+// rewrite any file, and a non-nil error if the check itself failed (disk
+// unreadable, etc.) — in which case the runner must NOT exec.
+type integrityVerifier interface {
+	VerifyOrRestore(pluginRoot, subdir string) (restored bool, err error)
+}
 
 // Outcome is the terminal result of a (possibly retried) job execution.
 type Outcome struct {
@@ -51,6 +68,19 @@ type Runner struct {
 	// for the privilege-drop. nil => realConsoleUser. Tests inject a fake
 	// to exercise the no-console-user skip and env-reseed without root.
 	consoleUser consoleUserFn
+	// verifier reconciles the on-disk plugin binary against the genuine
+	// embedded copy at point-of-use (ADR-0019). nil => integrity check
+	// skipped (the plugin runs as-is). Production wires a bundle-backed
+	// impl in app.BuildScheduler; tests inject a fake or leave it nil.
+	verifier integrityVerifier
+}
+
+// WithVerifier returns r with the point-of-use integrity verifier set.
+// Used by the composition root to inject the bundle-backed impl. Returns
+// the same *Runner for fluent wiring.
+func (r *Runner) WithVerifier(v integrityVerifier) *Runner {
+	r.verifier = v
+	return r
 }
 
 // New builds a Runner in user mode (no privilege-drop). System-mode
@@ -145,6 +175,44 @@ func (r *Runner) runOnce(ctx context.Context, job Job, p plugin.Discovered, trig
 	if plan.action == dropToUser {
 		if err := prepareDropPaths(p.BinaryPath); err != nil {
 			return Outcome{}, err
+		}
+	}
+
+	// Point-of-use integrity check (ADR-0019). MUST run here: after the
+	// drop paths are prepared but BEFORE exec, while the runner still holds
+	// the platform's own (root, in system mode) credentials — the setuid
+	// drop is applied to the CHILD via configureProc, not to us, so the
+	// verify+restore writes the genuine binary as root and a dropped child
+	// cannot have neutered it in between. A swapped binary is restored and
+	// the genuine one runs; an errored check means we do NOT exec a
+	// possibly-tampered binary (record an error run + event, retry next
+	// tick).
+	if r.verifier != nil {
+		// p.Dir is the plugin's own directory (<pluginRoot>/<subdir>),
+		// always built via filepath.Join by discovery (no trailing slash).
+		// Clean defensively so Base can't degrade to "." and verify the
+		// whole bundle instead of this one plugin.
+		dir := filepath.Clean(p.Dir)
+		pluginRoot := filepath.Dir(dir)
+		subdir := filepath.Base(dir)
+		restored, verr := r.verifier.VerifyOrRestore(pluginRoot, subdir)
+		if verr != nil {
+			const reason = "plugin integrity check failed; refusing to run possibly-tampered binary"
+			if rerr := r.DB.Runs.RecordError(job.ID, p.Manifest.ID, reason); rerr != nil {
+				return Outcome{}, rerr
+			}
+			if rerr := r.DB.Events.RecordIntegrityCheckFailed(job.ID, p.Manifest.ID, "integrity verify errored"); rerr != nil {
+				return Outcome{}, rerr
+			}
+			return Outcome{Status: state.RunStatusError, Message: reason, Err: verr.Error()}, nil
+		}
+		if restored {
+			// Tamper detected and repaired: record the security event so
+			// status can never read this job as a plain "ok" again, then
+			// run the GENUINE binary that VerifyOrRestore just put back.
+			if rerr := r.DB.Events.RecordTamperRepaired(job.ID, p.Manifest.ID, "", ""); rerr != nil {
+				return Outcome{}, rerr
+			}
 		}
 	}
 

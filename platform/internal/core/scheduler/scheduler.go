@@ -123,6 +123,30 @@ func (s *Scheduler) Register(jobs []config.Job, plugins map[string]plugin.Discov
 	return registered, nil
 }
 
+// RegisterIntegritySweep adds one synthetic @every 1m entry that runs the
+// whole-bundle integrity reconcile (ADR-0019). This guarantees ≤1-tick
+// self-heal even for plugins that are idle or disabled — the point-of-use
+// check in the runner only fires for jobs that actually run, so a disabled
+// plugin's binary would otherwise never be re-verified. sweep is the
+// bundle ExtractTo call (idempotent / churn-free); on a non-nil error it
+// records an integrity_sweep_failed event (SeverityError) so a wedged
+// sweep can't hide behind a green status. Errors registering the cron
+// entry are returned to fail the build loudly.
+func (s *Scheduler) RegisterIntegritySweep(sweep func() error) error {
+	_, err := s.cron.AddFunc("@every 1m", func() {
+		if err := sweep(); err != nil {
+			s.event(state.SeverityError, state.EventIntegritySweepFailed,
+				"plugin integrity sweep failed", "integrity-sweep")
+			s.log.Error("integrity sweep failed", "err", err)
+		}
+	})
+	if err != nil {
+		return fmt.Errorf("register integrity sweep: %w", err)
+	}
+	s.log.Info("integrity sweep registered", "schedule", "@every 1m")
+	return nil
+}
+
 // trigger runs one job occurrence, enforcing no-overlap.
 func (s *Scheduler) trigger(j config.Job, p plugin.Discovered) {
 	s.mu.Lock()

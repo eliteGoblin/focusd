@@ -11,6 +11,7 @@ const (
 	cReset  = "\033[0m"
 	cGreen  = "\033[32m"
 	cYellow = "\033[33m"
+	cRed    = "\033[31m"
 	cGray   = "\033[90m"
 )
 
@@ -18,6 +19,8 @@ func verdictColor(v Verdict) string {
 	switch v {
 	case Healthy:
 		return cGreen
+	case Tampered:
+		return cRed // a binary swap is the loudest state — never yellow
 	case Degraded, Unavailable, Unknown:
 		return cYellow
 	default: // Disabled
@@ -54,6 +57,11 @@ func RenderText(r Report, out io.Writer, color bool) {
 
 func jobText(j JobStatus) string {
 	switch j.Verdict {
+	case Tampered:
+		if j.TamperCount > 1 {
+			return fmt.Sprintf("tampered → repaired %dx", j.TamperCount)
+		}
+		return "tampered → repaired"
 	case Disabled:
 		return "disabled"
 	case Unavailable:

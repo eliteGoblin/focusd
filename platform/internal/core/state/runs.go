@@ -56,6 +56,22 @@ VALUES (?,?,?,?,?,?,?)`,
 	return err
 }
 
+// RecordError inserts a terminal error-run row: the platform refused to
+// execute the plugin this tick (e.g. the point-of-use integrity check
+// failed and a possibly-tampered binary must not be run). Distinct from a
+// plugin's own runtime error in that the binary never ran — but it shares
+// the "error" status so status/exit-code treat it as a failed protection,
+// never a silent skip. reason must be path-free.
+func (r *JobRunRepo) RecordError(jobID, pluginID, reason string) error {
+	// message and error_text are both the reason: the binary never launched,
+	// so there is no separate plugin error string to distinguish them.
+	_, err := r.db.Exec(`
+INSERT INTO job_runs (job_id,plugin_id,started_at,ended_at,status,message,error_text,triggered_by)
+VALUES (?,?,?,?,?,?,?,?)`,
+		jobID, pluginID, now(), now(), RunStatusError, reason, reason, "scheduler")
+	return err
+}
+
 // History returns the most recent runs for a job, newest first.
 func (r *JobRunRepo) History(jobID string, limit int) ([]JobRun, error) {
 	rows, err := r.db.Query(`SELECT id,job_id,plugin_id,plugin_version,started_at,

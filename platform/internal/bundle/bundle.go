@@ -61,37 +61,103 @@ func ExtractTo(pluginRoot string) (extracted []string, err error) {
 		if err != nil {
 			return err
 		}
-		mode := os.FileMode(0o644)
-		// Heuristic: anything WITHOUT a `.json`/`.txt`/`.yaml` extension
-		// inside a plugin's own dir is the plugin binary → executable.
-		base := filepath.Base(rel)
-		if !strings.ContainsAny(base, ".") || strings.HasSuffix(base, ".sh") {
-			mode = 0o755
-		}
-		// Same-content fast path: don't rewrite, but still repair the
-		// expected mode bits — a plugin binary that lost its +x (e.g.
-		// because someone ran chmod by hand) would silently fail to
-		// exec without this. (Copilot review.)
-		if existing, err := os.ReadFile(target); err == nil {
-			if sha(existing) == sha(data) {
-				if info, statErr := os.Stat(target); statErr == nil && info.Mode().Perm() != mode {
-					if chErr := os.Chmod(target, mode); chErr != nil {
-						return chErr
-					}
-				}
-				return nil
-			}
-		}
-		if err := writeAtomic(target, data, mode); err != nil {
+		wrote, err := reconcileFile(target, rel, data)
+		if err != nil {
 			return err
 		}
-		extracted = append(extracted, rel)
+		if wrote {
+			extracted = append(extracted, rel)
+		}
 		return nil
 	})
 	if walkErr != nil {
 		return extracted, walkErr
 	}
 	return extracted, nil
+}
+
+// VerifyOrRestore reconciles a SINGLE plugin's on-disk binaries against
+// the genuine embedded copy, scoped to data/<subdir>. For each embedded
+// file under that subdir it sha256-compares the on-disk content against
+// the embedded content and, on mismatch, atomically restores the genuine
+// version via writeAtomic (temp+chmod+rename in the same dir — safe even
+// if the plugin is mid-run). Mode bits are repaired on the fast path.
+//
+// It returns restored=true if ANY file was rewritten — the signal the
+// runner records as a tamper event. This is the point-of-use integrity
+// check (ADR-0019): the on-disk plugin is confirmed genuine immediately
+// before it is run, so a swap that landed since the last reconcile sweep
+// is caught and repaired before the stale/substitute binary can execute.
+//
+// Pure Go, no build tags. An empty/unknown subdir (no embedded files)
+// returns restored=false, nil — a non-bundled plugin is simply not
+// covered, never an error.
+func VerifyOrRestore(pluginRoot, subdir string) (restored bool, err error) {
+	embedDir := "data/" + subdir
+	walkErr := fs.WalkDir(fsys, embedDir, func(path string, d fs.DirEntry, werr error) error {
+		if werr != nil {
+			// Unknown subdir (not in the bundle): nothing to verify.
+			if errors.Is(werr, fs.ErrNotExist) {
+				return fs.SkipAll
+			}
+			return werr
+		}
+		if d.IsDir() {
+			return nil
+		}
+		rel := strings.TrimPrefix(path, "data")
+		rel = strings.TrimPrefix(rel, "/")
+		data, rerr := fsys.ReadFile(path)
+		if rerr != nil {
+			return rerr
+		}
+		target := filepath.Join(pluginRoot, rel)
+		wrote, rerr := reconcileFile(target, rel, data)
+		if rerr != nil {
+			return rerr
+		}
+		if wrote {
+			restored = true
+		}
+		return nil
+	})
+	if walkErr != nil {
+		return restored, walkErr
+	}
+	return restored, nil
+}
+
+// reconcileFile writes the genuine embedded content to target when the
+// on-disk content differs, repairing the expected mode on the same-content
+// fast path. It reports wrote=true only when the file was (over)written.
+// Shared by ExtractTo (full bundle) and VerifyOrRestore (one plugin) so
+// the atomic-restore + mode-repair semantics are identical everywhere.
+func reconcileFile(target, rel string, data []byte) (wrote bool, err error) {
+	mode := os.FileMode(0o644)
+	// Heuristic: anything WITHOUT a `.json`/`.txt`/`.yaml` extension
+	// inside a plugin's own dir is the plugin binary → executable.
+	base := filepath.Base(rel)
+	if !strings.ContainsAny(base, ".") || strings.HasSuffix(base, ".sh") {
+		mode = 0o755
+	}
+	// Same-content fast path: don't rewrite, but still repair the
+	// expected mode bits — a plugin binary that lost its +x (e.g.
+	// because someone ran chmod by hand) would silently fail to
+	// exec without this. (Copilot review.)
+	if existing, rerr := os.ReadFile(target); rerr == nil {
+		if sha(existing) == sha(data) {
+			if info, statErr := os.Stat(target); statErr == nil && info.Mode().Perm() != mode {
+				if chErr := os.Chmod(target, mode); chErr != nil {
+					return false, chErr
+				}
+			}
+			return false, nil
+		}
+	}
+	if err := writeAtomic(target, data, mode); err != nil {
+		return false, err
+	}
+	return true, nil
 }
 
 // HasAny reports whether the bundle contains any plugin at all (useful

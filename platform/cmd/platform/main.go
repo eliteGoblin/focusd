@@ -248,11 +248,13 @@ func runStatus(args []string) int {
 		jobs = append(jobs, status.JobInput{ID: j.ID, Enabled: j.Enabled})
 	}
 
-	// Run history, read-only. On any open failure, degrade to "no runs"
-	// (found=false) so status still renders — the jobs just read UNKNOWN.
+	// Run history + tamper history, read-only. On any open failure, degrade
+	// to "no runs" (found=false) so status still renders — the jobs just
+	// read UNKNOWN, and tamper info is simply absent (never a crash).
 	lastRun := func(string) (string, time.Time, bool, error) {
 		return "", time.Time{}, false, nil
 	}
+	var tamperLookup status.TamperLookupFn // nil => no integrity history
 	if dbPath != "" {
 		if db, derr := state.OpenReadOnly(dbPath); derr == nil {
 			defer db.Close()
@@ -271,10 +273,20 @@ func runStatus(args []string) int {
 				}
 				return runs[0].Status, t, true, nil
 			}
+			// Tamper lookup: a tamper-repaired event newer than the last
+			// clean run flips the job to TAMPERED (false-green kill). A query
+			// error degrades to "no tamper" rather than failing status.
+			tamperLookup = func(jobID string) (time.Time, int, bool) {
+				since, count, found, terr := db.Events.TamperSince(jobID, 24*time.Hour)
+				if terr != nil {
+					return time.Time{}, 0, false
+				}
+				return since, count, found
+			}
 		}
 	}
 
-	rep := status.Collect(string(mode), jobs, lastRun, time.Now().UTC())
+	rep := status.Collect(string(mode), jobs, lastRun, tamperLookup, time.Now().UTC())
 
 	color := !*noColor && os.Getenv("NO_COLOR") == ""
 	if *jsonOut {
