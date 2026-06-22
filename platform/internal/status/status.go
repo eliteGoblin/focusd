@@ -22,11 +22,19 @@ type Verdict string
 const (
 	Healthy     Verdict = "HEALTHY"
 	Degraded    Verdict = "DEGRADED"
-	Tampered    Verdict = "TAMPERED"    // plugin binary was swapped + restored (ADR-0019)
 	Disabled    Verdict = "DISABLED"    // job present but turned off in config
 	Unavailable Verdict = "UNAVAILABLE" // job couldn't run here (reduced coverage)
 	Unknown     Verdict = "UNKNOWN"     // no run recorded yet (fresh install)
 )
+
+// NOTE: status reflects CURRENT state only. A detected-and-REPAIRED binary
+// swap is NOT a status verdict: once the genuine binary is restored and its
+// next run is "ok", the job reads Healthy. The tamper is still recorded as a
+// platform audit event + an app-log line (F16) in the reconcile/restore path —
+// status just no longer carries a persistent "tampered → repaired Nx" verdict.
+// A tamper NOT yet restored still reads not-ok via the live integrity-sweep
+// signal (SweepFailing) and/or a failing run row — that is a real CURRENT
+// problem, which status must surface.
 
 // AgeBucket is a coarse recency classification. Precise timestamps add no
 // operator value and only risk fingerprinting, so we bucket.
@@ -56,21 +64,6 @@ type JobInput struct {
 // An error is treated by Collect as "unknown" for that job, not fatal.
 type LastRunFn func(jobID string) (status string, startedAt time.Time, found bool, err error)
 
-// TamperLookupFn returns, for a job, the time of its most-recent
-// tamper-repaired event and how many fell in the lookback window;
-// found=false means none. Read-only (mirrors LastRunFn). It is the seam
-// that lets status flip a job to Tampered even over an "ok" run row, so a
-// substitute binary that exits cleanly can never buy a green light
-// (ADR-0019, AC-2). A nil TamperLookupFn (or one that errors) degrades
-// gracefully: no tamper info, never a crash.
-type TamperLookupFn func(jobID string) (since time.Time, count int, found bool)
-
-// tamperWindow is how far back a tamper-repaired event still flips a job's
-// verdict to Tampered even if a later clean run row exists. A repaired
-// tamper stays visible for a day so a transient substitute-then-restore
-// can't scroll off the status light immediately.
-const tamperWindow = 24 * time.Hour
-
 // JobStatus is one job's last-run summary. No disguised identifiers.
 type JobStatus struct {
 	ID      string    `json:"id"`
@@ -78,9 +71,6 @@ type JobStatus struct {
 	Status  string    `json:"status"` // last terminal status, or "none"
 	Age     AgeBucket `json:"age"`
 	Verdict Verdict   `json:"verdict"`
-	// TamperCount is how many tamper-repaired events fell in the lookback
-	// window when Verdict==Tampered; 0 otherwise. Renders "repaired Nx".
-	TamperCount int `json:"tamper_count,omitempty"`
 }
 
 // SweepFailingFn reports whether the periodic whole-bundle integrity sweep
@@ -102,14 +92,13 @@ type Report struct {
 	SweepFailing bool `json:"sweep_failing,omitempty"`
 }
 
-// Collect builds the report from the configured jobs, a run-history
-// lookup, and a tamper lookup. Pure and deterministic given its inputs +
-// now, so it is fully unit-testable without a real DB. tamperLookup may be
-// nil (no integrity history available) — every job then reads as before.
-func Collect(mode string, jobs []JobInput, lastRun LastRunFn, tamperLookup TamperLookupFn, sweepFailing SweepFailingFn, now time.Time) Report {
+// Collect builds the report from the configured jobs and a run-history
+// lookup. Pure and deterministic given its inputs + now, so it is fully
+// unit-testable without a real DB.
+func Collect(mode string, jobs []JobInput, lastRun LastRunFn, sweepFailing SweepFailingFn, now time.Time) Report {
 	r := Report{Mode: mode, Jobs: make([]JobStatus, 0, len(jobs))}
 	for _, j := range jobs {
-		r.Jobs = append(r.Jobs, jobStatus(j, lastRun, tamperLookup, now))
+		r.Jobs = append(r.Jobs, jobStatus(j, lastRun, now))
 	}
 	if sweepFailing != nil {
 		r.SweepFailing = sweepFailing()
@@ -124,7 +113,7 @@ func Collect(mode string, jobs []JobInput, lastRun LastRunFn, tamperLookup Tampe
 	return r
 }
 
-func jobStatus(j JobInput, lastRun LastRunFn, tamperLookup TamperLookupFn, now time.Time) JobStatus {
+func jobStatus(j JobInput, lastRun LastRunFn, now time.Time) JobStatus {
 	js := JobStatus{ID: j.ID, Enabled: j.Enabled}
 	if !j.Enabled {
 		js.Status = "disabled"
@@ -137,42 +126,11 @@ func jobStatus(j JobInput, lastRun LastRunFn, tamperLookup TamperLookupFn, now t
 		js.Status = "none"
 		js.Age = AgeNever
 		js.Verdict = Unknown // no run yet — aggregator treats as warming up
-		// A tamper with no clean run row still must surface (a swapped
-		// binary that never produced an ok row).
-		return applyTamper(js, j.ID, tamperLookup, now)
+		return js
 	}
 	js.Status = status
 	js.Age = bucketAge(now.Sub(startedAt))
 	js.Verdict = jobVerdict(status, js.Age)
-	return applyTamper(js, j.ID, tamperLookup, now)
-}
-
-// applyTamper overrides a job's verdict to Tampered when a tamper-repaired
-// event exists within tamperWindow — regardless of any later clean run row.
-// This is the false-green kill (ADR-0019, AC-2): a substitute binary that
-// exits 0 leaves an "ok" run row, but the recorded tamper makes the job read
-// Tampered, not Healthy, for tamperWindow after the last tamper. The
-// TamperCount is surfaced for "repaired Nx" rendering.
-func applyTamper(js JobStatus, jobID string, lookup TamperLookupFn, now time.Time) JobStatus {
-	if lookup == nil {
-		return js
-	}
-	since, count, found := lookup(jobID)
-	if !found || count == 0 {
-		return js
-	}
-	if now.Sub(since) > tamperWindow {
-		return js // too old to flip the light
-	}
-	// Any in-window tamper-repaired event flips the job to Tampered — even
-	// when a LATER clean run row exists. F15 restores the genuine binary and
-	// immediately re-runs it, so a clean "ok" run is ALWAYS recorded a moment
-	// AFTER the tamper event; gating on "tamper newer than last clean run"
-	// therefore masked every real repair (caught live: tamper events were
-	// recorded but status still read "ok"). The repaired tamper stays visible
-	// for tamperWindow so the weak-moment attempt is seen, then clears.
-	js.Verdict = Tampered
-	js.TamperCount = count
 	return js
 }
 
@@ -224,14 +182,10 @@ func overall(jobs []JobStatus) Verdict {
 	return worst
 }
 
-// rankOf orders verdicts by severity for "worst wins" folding. Tampered
-// ranks at/above Degraded: a detected-and-repaired binary swap is at least
-// as serious as a failed run and must dominate the report (never hidden
-// behind a clean run). An empty verdict ranks lowest.
+// rankOf orders verdicts by severity for "worst wins" folding. An empty
+// verdict ranks lowest.
 func rankOf(v Verdict) int {
 	switch v {
-	case Tampered:
-		return 4
 	case Unavailable, Degraded:
 		return 3
 	case Unknown:

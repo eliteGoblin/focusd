@@ -180,6 +180,33 @@ func TestCombine_FoldsPlatformVerdict(t *testing.T) {
 	}
 }
 
+// TestAssess_WatchdogNeverDegrades pins the guard in Assess: the out-of-band
+// watchdog bools are DELIBERATELY not folded into the verdict. A healthy
+// mesh+proc snapshot with a DEAD watchdog (cron + copy both gone) must still
+// read HEALTHY — the flaky secondary rail can never drive OVERALL down.
+func TestAssess_WatchdogNeverDegrades(t *testing.T) {
+	healthy := Snapshot{
+		Mode:       "system",
+		MeshLoaded: 3, MeshTotal: 3,
+		ProcCount: 1,
+		Desired:   "v1", Good: "v1",
+		Found:           true,
+		WatchdogChecked: true,
+		WatchdogCron:    false, // rail down
+		WatchdogCopyOK:  false, // copy gone
+	}
+	if got := Assess(healthy).Verdict; got != Healthy {
+		t.Fatalf("verdict = %s; want HEALTHY (dead watchdog must not degrade OVERALL)", got)
+	}
+	// Flipping the watchdog bools must not change the verdict either way.
+	up := healthy
+	up.WatchdogCron = true
+	up.WatchdogCopyOK = true
+	if Assess(up).Verdict != Assess(healthy).Verdict {
+		t.Fatalf("watchdog bools changed the verdict; they must be verdict-independent")
+	}
+}
+
 func TestExitCode(t *testing.T) {
 	cases := map[Verdict]int{
 		Healthy:  0,
