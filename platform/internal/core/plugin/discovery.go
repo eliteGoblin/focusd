@@ -21,6 +21,15 @@ type Discovered struct {
 	OK bool
 	// Reason explains a rejection (empty when OK).
 	Reason string
+	// Expected marks a rejection that is a NORMAL consequence of this
+	// install's environment (wrong host os/arch, or a system plugin under a
+	// user-mode platform / vice-versa) rather than a defect (corrupt
+	// manifest, unsupported protocol, security violation). The bundle ships
+	// every plugin to every install, so a mode/host-mismatched plugin is
+	// rejected on every clean startup — that is steady state, not a problem.
+	// Logging it at WARN would pollute the whitebox log; the composition
+	// root logs Expected rejections at INFO instead (FEATURE 16).
+	Expected bool
 }
 
 // Discoverer scans a plugin root and decides which plugins this platform
@@ -62,6 +71,16 @@ func reject(dir, reason string, m *Manifest) Discovered {
 	return Discovered{Manifest: m, Dir: dir, OK: false, Reason: reason}
 }
 
+// rejectExpected is reject for a NORMAL environment mismatch (wrong host,
+// or a plugin whose run mode this install can't serve). It sets Expected so
+// the composition root logs it at INFO, keeping the whitebox log quiet in
+// steady state (FEATURE 16).
+func rejectExpected(dir, reason string, m *Manifest) Discovered {
+	d := reject(dir, reason, m)
+	d.Expected = true
+	return d
+}
+
 func (d *Discoverer) evaluate(dir string) Discovered {
 	raw, err := os.ReadFile(filepath.Join(dir, "plugin.json"))
 	if err != nil {
@@ -78,16 +97,19 @@ func (d *Discoverer) evaluate(dir string) Discovered {
 			m.ProtocolVersion, SupportedProtocols), m)
 	}
 
-	// 2. Host gate — OS/arch must match.
+	// 2. Host gate — OS/arch must match. A host mismatch is an EXPECTED
+	// rejection: the cross-platform bundle ships plugins for other OSes too.
 	if !m.SupportsHost(d.GOOS, d.GOARCH) {
-		return reject(dir, fmt.Sprintf("unsupported host %s/%s (plugin supports os=%v arch=%v)",
+		return rejectExpected(dir, fmt.Sprintf("unsupported host %s/%s (plugin supports os=%v arch=%v)",
 			d.GOOS, d.GOARCH, m.SupportedOS, m.SupportedArch), m)
 	}
 
 	// 3. Privilege gate — modes are fully isolated. A user-mode platform
-	// must never run a system plugin; do not silently elevate.
+	// must never run a system plugin; do not silently elevate. This is an
+	// EXPECTED rejection: the bundle ships system plugins to user installs
+	// too; they're simply not servable here (reinstall with admin for them).
 	if d.Mode == osadapter.ModeUser && m.RequiredPrivilege == PrivSystem {
-		return reject(dir, "system plugin cannot run under user-mode platform", m)
+		return rejectExpected(dir, "system plugin cannot run under user-mode platform", m)
 	}
 
 	// 4. Security gate — a system/root platform must never execute a

@@ -7,6 +7,8 @@ package app
 import (
 	"fmt"
 	"log/slog"
+	"path/filepath"
+	"strings"
 
 	"github.com/eliteGoblin/focusd/platform/internal/bundle"
 	"github.com/eliteGoblin/focusd/platform/internal/core/config"
@@ -220,10 +222,26 @@ func (a *App) DiscoverPlugins() ([]plugin.Discovered, error) {
 		return nil, fmt.Errorf("sync inventory: %w", err)
 	}
 	for _, p := range found {
-		if p.OK {
+		switch {
+		case p.OK:
 			a.Log.Info("plugin discovered", "id", p.Manifest.ID, "dir", p.Dir)
-		} else {
-			a.Log.Warn("plugin rejected", "dir", p.Dir, "reason", p.Reason)
+		case p.Expected:
+			// A normal environment mismatch (wrong host, or a plugin this
+			// install's mode can't serve). The bundle ships every plugin to
+			// every install, so this fires on every clean startup — it is
+			// steady state, not a problem. Log at INFO so the whitebox log
+			// stays quiet (FEATURE 16). Redaction-safe: id + reason only,
+			// no path (p.Dir is the scan-relative plugin dir, but skip it
+			// here to keep the steady-state line path-free).
+			a.Log.Info("plugin not servable in this install", "reason", p.Reason)
+		default:
+			// A genuine defect (corrupt manifest, unsupported protocol,
+			// security violation). WARN so the whitebox log flags it.
+			// Redaction-safe: log the plugin id (manifest may be nil if the
+			// manifest itself failed to parse — fall back to the dir's base
+			// name, never the full disguised workdir path) + a path-scrubbed
+			// reason (some reasons embed an I/O error string with a path).
+			a.Log.Warn("plugin rejected", "plugin", rejectedID(p), "reason", redactPaths(p.Reason))
 		}
 	}
 	return found, nil
@@ -243,7 +261,9 @@ func (a *App) BuildScheduler() (*scheduler.Scheduler, int, error) {
 			byID[p.Manifest.ID] = p
 		}
 	}
-	run := runner.NewWithMode(a.State, a.Mode).WithVerifier(bundleVerifier{})
+	run := runner.NewWithMode(a.State, a.Mode).
+		WithVerifier(bundleVerifier{}).
+		WithLogger(a.Log)
 	s := scheduler.New(run, a.State, a.Log, a.Mode)
 	n, err := s.Register(a.Config.Jobs, byID)
 	if err != nil {
@@ -260,6 +280,35 @@ func (a *App) BuildScheduler() (*scheduler.Scheduler, int, error) {
 		return nil, 0, err
 	}
 	return s, n, nil
+}
+
+// rejectedID returns a redaction-safe identifier for a rejected plugin: the
+// manifest id when available, else the base name of the plugin dir (never
+// the full disguised workdir path). A nil manifest happens when the manifest
+// itself failed to parse.
+func rejectedID(p plugin.Discovered) string {
+	if p.Manifest != nil && p.Manifest.ID != "" {
+		return p.Manifest.ID
+	}
+	if p.Dir != "" {
+		return filepath.Base(p.Dir)
+	}
+	return "unknown"
+}
+
+// redactPaths scrubs path-like tokens (anything containing a "/") from a
+// rejection reason before it reaches the app log, so an I/O error string
+// that embeds the disguised workdir can't leak into the whitebox channel.
+// Path-like whitespace-delimited tokens are replaced with "<redacted>"; the
+// non-path words of the reason (the diagnostic part) are preserved.
+func redactPaths(reason string) string {
+	fields := strings.Fields(reason)
+	for i, f := range fields {
+		if strings.ContainsRune(f, '/') {
+			fields[i] = "<redacted>"
+		}
+	}
+	return strings.Join(fields, " ")
 }
 
 // Close releases the state DB and log file.
