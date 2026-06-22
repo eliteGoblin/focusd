@@ -234,17 +234,33 @@ func TestTamper_OverOkRunIsTampered(t *testing.T) {
 	}
 }
 
-// TestTamper_OlderThanCleanRunDoesNotFlip: a tamper that PREDATES the most
-// recent clean run no longer flips the light (the repair already healed and
-// a clean run followed). Verdict stays Healthy.
-func TestTamper_OlderThanCleanRunDoesNotFlip(t *testing.T) {
-	lastRun := runAt("ok", time.Minute, true) // clean run 1m ago
+// TestTamper_RepairedStaysVisibleEvenWithNewerCleanRun is the live-caught
+// regression: F15 restores the genuine binary and immediately re-runs it, so
+// the clean "ok" run is ALWAYS newer than the tamper event. The light must
+// still read Tampered for tamperWindow — gating on "tamper newer than the
+// clean run" masked every real repair (events recorded, status still "ok").
+func TestTamper_RepairedStaysVisibleEvenWithNewerCleanRun(t *testing.T) {
+	lastRun := runAt("ok", time.Minute, true) // clean run 1m ago (NEWER than the tamper)
 	tamper := func(string) (time.Time, int, bool) {
-		return now.Add(-10 * time.Minute), 1, true // tamper 10m ago (older)
+		return now.Add(-10 * time.Minute), 1, true // tamper 10m ago — still in window
 	}
 	rep := Collect("system", []JobInput{{ID: "j", Enabled: true}}, lastRun, tamper, nil, now)
-	if rep.Jobs[0].Verdict != Healthy {
-		t.Fatalf("verdict = %q, want HEALTHY (tamper older than clean run)", rep.Jobs[0].Verdict)
+	if rep.Jobs[0].Verdict != Tampered {
+		t.Fatalf("verdict = %q, want TAMPERED (in-window tamper must stay visible over a newer clean run)", rep.Jobs[0].Verdict)
+	}
+}
+
+// TestTamper_NoCleanRunInWindowFlips: an in-window tamper-repaired event with
+// NO clean run row at all still surfaces as Tampered (the job was restored but
+// hasn't run since). Covers the no-run branch of jobStatus.
+func TestTamper_NoCleanRunInWindowFlips(t *testing.T) {
+	noRun := func(string) (string, time.Time, bool, error) { return "", time.Time{}, false, nil }
+	tamper := func(string) (time.Time, int, bool) {
+		return now.Add(-2 * time.Minute), 1, true // in window, no run row
+	}
+	rep := Collect("system", []JobInput{{ID: "j", Enabled: true}}, noRun, tamper, nil, now)
+	if rep.Jobs[0].Verdict != Tampered {
+		t.Fatalf("verdict = %q, want TAMPERED (in-window tamper, no clean run)", rep.Jobs[0].Verdict)
 	}
 }
 

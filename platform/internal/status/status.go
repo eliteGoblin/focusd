@@ -139,21 +139,21 @@ func jobStatus(j JobInput, lastRun LastRunFn, tamperLookup TamperLookupFn, now t
 		js.Verdict = Unknown // no run yet — aggregator treats as warming up
 		// A tamper with no clean run row still must surface (a swapped
 		// binary that never produced an ok row).
-		return applyTamper(js, j.ID, tamperLookup, time.Time{}, false, now)
+		return applyTamper(js, j.ID, tamperLookup, now)
 	}
 	js.Status = status
 	js.Age = bucketAge(now.Sub(startedAt))
 	js.Verdict = jobVerdict(status, js.Age)
-	return applyTamper(js, j.ID, tamperLookup, startedAt, true, now)
+	return applyTamper(js, j.ID, tamperLookup, now)
 }
 
 // applyTamper overrides a job's verdict to Tampered when a tamper-repaired
-// event is newer than its last clean run (or there is no clean run) and
-// within tamperWindow. This is the false-green kill (ADR-0019, AC-2): a
-// substitute binary that exits 0 leaves an "ok" run row, but the recorded
-// tamper makes the job read Tampered, not Healthy. The TamperCount is
-// surfaced for "repaired Nx" rendering.
-func applyTamper(js JobStatus, jobID string, lookup TamperLookupFn, lastRunAt time.Time, haveRun bool, now time.Time) JobStatus {
+// event exists within tamperWindow — regardless of any later clean run row.
+// This is the false-green kill (ADR-0019, AC-2): a substitute binary that
+// exits 0 leaves an "ok" run row, but the recorded tamper makes the job read
+// Tampered, not Healthy, for tamperWindow after the last tamper. The
+// TamperCount is surfaced for "repaired Nx" rendering.
+func applyTamper(js JobStatus, jobID string, lookup TamperLookupFn, now time.Time) JobStatus {
 	if lookup == nil {
 		return js
 	}
@@ -164,13 +164,15 @@ func applyTamper(js JobStatus, jobID string, lookup TamperLookupFn, lastRunAt ti
 	if now.Sub(since) > tamperWindow {
 		return js // too old to flip the light
 	}
-	// Flip when the tamper is at least as new as the last clean run — a
-	// clean run that PREDATES the tamper must not mask it. If there is no
-	// run row at all, any in-window tamper flips.
-	if !haveRun || !since.Before(lastRunAt) {
-		js.Verdict = Tampered
-		js.TamperCount = count
-	}
+	// Any in-window tamper-repaired event flips the job to Tampered — even
+	// when a LATER clean run row exists. F15 restores the genuine binary and
+	// immediately re-runs it, so a clean "ok" run is ALWAYS recorded a moment
+	// AFTER the tamper event; gating on "tamper newer than last clean run"
+	// therefore masked every real repair (caught live: tamper events were
+	// recorded but status still read "ok"). The repaired tamper stays visible
+	// for tamperWindow so the weak-moment attempt is seen, then clears.
+	js.Verdict = Tampered
+	js.TamperCount = count
 	return js
 }
 
