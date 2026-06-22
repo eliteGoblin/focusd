@@ -106,9 +106,9 @@ exit 0`)
 }
 
 // TestLogCleanRunQuiet pins AC-2: a clean run (no verifier, healthy plugin)
-// produces NO WARN and NO ERROR lines from the runner. The runner emits the
-// per-run INFO line at the scheduler level, so the runner itself should be
-// silent on the happy path beyond any INFO.
+// produces NO WARN and NO ERROR lines from the runner. The per-run INFO
+// "job finished" line is emitted by the scheduler, not the runner, so the
+// runner itself stays silent on the happy path.
 func TestLogCleanRunQuiet(t *testing.T) {
 	r, buf := capturedLog(t)
 	p := testutil.ScriptPlugin(t, "ok-plugin", `echo '{"status":"ok"}'

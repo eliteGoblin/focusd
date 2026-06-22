@@ -90,11 +90,12 @@ type Runner struct {
 	// skipped (the plugin runs as-is). Production wires a bundle-backed
 	// impl in app.BuildScheduler; tests inject a fake or leave it nil.
 	verifier integrityVerifier
-	// log is the structured action log (FEATURE 16): the runner emits one
-	// INFO line per plugin run and WARN/ERROR lines for integrity tamper /
-	// verify failures, so the app log is an independent whitebox audit/e2e
-	// channel. nil => a discard logger (set in New/NewWithMode) so existing
-	// callers and tests are unaffected and call sites never nil-check.
+	// log is the structured action log (FEATURE 16): the runner emits
+	// WARN/ERROR lines for integrity tamper / verify failures (the per-run
+	// INFO "job finished" line is emitted by the scheduler, not here), so the
+	// app log is an independent whitebox audit/e2e channel. nil => a discard
+	// logger (set in New/NewWithMode) so existing callers and tests are
+	// unaffected and call sites never nil-check.
 	log *slog.Logger
 }
 

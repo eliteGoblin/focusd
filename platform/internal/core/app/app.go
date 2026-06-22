@@ -233,7 +233,8 @@ func (a *App) DiscoverPlugins() ([]plugin.Discovered, error) {
 			// stays quiet (FEATURE 16). Redaction-safe: id + reason only,
 			// Expected-rejection reasons are path-free, but redact anyway for
 			// consistency with the WARN sibling + future-proofing.
-			a.Log.Info("plugin not servable in this install", "reason", redactPaths(p.Reason))
+			a.Log.Info("plugin not servable in this install",
+				"plugin", rejectedID(p), "reason", redactPaths(p.Reason))
 		default:
 			// A genuine defect (corrupt manifest, unsupported protocol,
 			// security violation). WARN so the whitebox log flags it.
@@ -299,12 +300,13 @@ func rejectedID(p plugin.Discovered) string {
 // redactPaths scrubs path-like tokens (anything containing a "/") from a
 // rejection reason before it reaches the app log, so an I/O error string
 // that embeds the disguised workdir can't leak into the whitebox channel.
-// Path-like whitespace-delimited tokens are replaced with "<redacted>"; the
-// non-path words of the reason (the diagnostic part) are preserved.
+// Path-like whitespace-delimited tokens (containing a POSIX '/' or a Windows
+// '\' separator) are replaced with "<redacted>"; the non-path words of the
+// reason (the diagnostic part) are preserved.
 func redactPaths(reason string) string {
 	fields := strings.Fields(reason)
 	for i, f := range fields {
-		if strings.ContainsRune(f, '/') {
+		if strings.ContainsRune(f, '/') || strings.ContainsRune(f, '\\') {
 			fields[i] = "<redacted>"
 		}
 	}

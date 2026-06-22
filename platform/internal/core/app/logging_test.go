@@ -53,6 +53,11 @@ func TestRedactPaths(t *testing.T) {
 			want: "read plugin.json: open <redacted> no such file",
 		},
 		{
+			name: "windows path token is scrubbed",
+			in:   `open C:\disguised\work\dir\p\plugin.json: not found`,
+			want: "open <redacted> not found",
+		},
+		{
 			name: "path-free reason is untouched in meaning",
 			in:   `unsupported protocol_version "9"`,
 			want: `unsupported protocol_version "9"`,
@@ -64,7 +69,7 @@ func TestRedactPaths(t *testing.T) {
 			if got != c.want {
 				t.Errorf("redactPaths = %q, want %q", got, c.want)
 			}
-			if strings.ContainsRune(got, '/') {
+			if strings.ContainsRune(got, '/') || strings.ContainsRune(got, '\\') {
 				t.Errorf("redactPaths left a path separator in %q", got)
 			}
 		})

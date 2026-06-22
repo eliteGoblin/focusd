@@ -51,6 +51,16 @@ run is. The source of truth for cases is `requirements/e2e-test-history.md`.
    - **watchdog recovery (TC-05):** confirm `status` watchdog line; if removed, it
      must return within one tick.
    - **single platform:** count platform procs whose args match the workdir (want 1).
+   - **whitebox log hygiene (TC-12):** read the engine app log (the daemon
+     captures the platform's stderr to a `platform.log` under the workdir —
+     redact the path; read it via `sudo`). Assert a steady-state window has
+     **no `level=ERROR` and no `level=WARN`** lines; **print any that appear**
+     (redacted) and FAIL. Don't trust `status` alone — the log is the
+     independent channel.
+   - **whitebox security-event log (TC-13):** after the tamper test (TC-06),
+     grep the app log for the `plugin tamper repaired` WARN line naming the
+     plugin — it must be present (the event is logged, not only DB-recorded).
+     Redact: assert on the event text + level + plugin id, never on paths/labels.
 4. **Destructive tests on the live mesh are allowed** because the system must
    self-heal them — but only ones that recover on their own (kill-by-role,
    tamper-then-verify-restore). Never leave protection down: if a self-heal test

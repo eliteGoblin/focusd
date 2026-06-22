@@ -66,16 +66,28 @@ Severity: 🔴 enforcement bypass · 🟠 self-heal/recovery · 🟡 truthfulnes
 - **Expect:** all heal. **Status: PASS** (note: harness `<2.0s` gate is tight;
   ~2.1s worst-case is the 2s-cadence tail, not a regression — see TC-09).
 
-### TC-05 🔴 Out-of-band watchdog recovery  `[found 2026-06-20 — FAILING]`
+### TC-05 🔴 Out-of-band watchdog recovery  `[found 2026-06-20 — FAILING, deferred]`
 - **Origin:** the cron rail was deleted by hand; the running mesh ticks
-  `EnsureWatchdog` but the **launchd-spawned root daemon cannot write root's
-  crontab on macOS** (interactive sudo can), so the rail does NOT self-heal —
-  F12's "mutual re-install" claim is false on the real machine.
+  `EnsureWatchdog` but the rail does NOT self-heal — F12's "mutual re-install"
+  claim is false on the real machine.
+- **Root cause (confirmed live 2026-06-22):** modifying **root's crontab on
+  modern macOS requires Full Disk Access (TCC)**. The launchd-spawned daemon —
+  and ANY non-Terminal automated process (a Go helper run via `sudo`) — lacks
+  FDA, so its `crontab` write hangs and is killed by the 5s guard
+  (`crontab -: signal: killed`). Only a **Terminal that has been granted FDA**
+  can (re)establish the rail. So the cron rail can neither self-heal NOR be
+  scripted-restored; even the designed `RefreshWatchdog` fails.
 - **Check:** with the watchdog removed, within one mesh tick `status` shows
   `out-of-band watchdog: present`.
-- **Expect:** present again. **Status: 🔴 FAIL** — fix pending (decision: replace
-  cron with a launchd-based out-of-band rail the daemon can self-heal, or
-  document as accept-on-install-only).
+- **Expect:** present again. **Status: 🔴 FAIL (DEFERRED 2026-06-22).** The rail
+  is currently DOWN; a clean restore needs `daemon install`/self-update run from
+  a **Terminal with Full Disk Access**, OR the deferred proper fix. The in-band
+  mesh still self-heals all *partial* attacks (TC-03/04) — only the rare
+  *total atomic teardown* recovery is affected.
+- **Deferred proper fix (owner: leave watchdog for now):** replace the cron rail
+  with a **launchd-based out-of-band agent the daemon can manage without FDA**
+  (preferred), OR formally accept the rail as **interactive-FDA-establish-only**
+  and document the re-install ritual. Tracked in the register.
 
 ### TC-06 🔴 Plugin integrity / tamper-restore — *F15 (shipped v0.16.0/v0.16.1)*  `[found 2026-06-22]`
 - **Origin:** `kill-steam` plugin binary was overwritten on disk with a dummy;
@@ -126,6 +138,23 @@ Severity: 🔴 enforcement bypass · 🟠 self-heal/recovery · 🟡 truthfulnes
   verify genuine (no integrity events caused by the swap itself).
 - **Expect:** new version live + healthy. **Status: ✅ PASS** (v0.16.1 swap
   confirmed live in ~12s).
+
+### TC-12 🟡 Whitebox log hygiene — *F16*  `[added 2026-06-22]`
+- **Origin:** the F15/TC-07 false-green showed a single observability path
+  (`status`) is a single point of failure — the event was in the DB but didn't
+  render. The app log is an independent, whitebox channel.
+- **Check:** read the engine app log (`platform.log` under the workdir, via
+  `sudo`, path redacted). A steady-state window has **no `ERROR` and no `WARN`**
+  lines; print + FAIL on any (redacted).
+- **Expect:** quiet steady state. **Status:** pending first live capture (F16).
+
+### TC-13 🟡 Whitebox security-event log — *F16*  `[added 2026-06-22]`
+- **Check:** after a tamper (TC-06), the app log contains the
+  `plugin tamper repaired` WARN line naming the plugin — present **independently
+  of `status`** (logged, not only DB-recorded). Redact: assert on event text +
+  level + plugin id, never paths/labels.
+- **Expect:** tamper event appears in the log. **Status:** pending first live
+  capture (F16).
 
 ---
 
