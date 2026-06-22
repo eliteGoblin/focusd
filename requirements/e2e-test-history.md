@@ -101,15 +101,29 @@ Severity: 🔴 enforcement bypass · 🟠 self-heal/recovery · 🟡 truthfulnes
 - **Expect:** auto-restore ≤ 1 tick + tamper surfaced. **Status: ✅ PASS** (live
   v0.16.1, 2026-06-22): tampered binary restored to genuine in ~6s.
 
-### TC-07 🟡 Status truthfulness — no false-green  `[found 2026-06-22]`
+### TC-07 🟡 Status truthfulness — current-state only, no false-green  `[found 2026-06-22, refined 2026-06-22]`
 - **Origin:** a no-op plugin that exits 0 makes `status` read `ok` over dead
-  protection (the latent-failure class). A subtler form caught live: the tamper
-  event WAS recorded but `status` still read `ok` because `applyTamper` masked a
-  repair behind the newer clean run (fixed v0.16.0→v0.16.1).
-- **Check:** a tampered (even since-repaired) plugin must NOT read `ok`; the
-  tamper surfaces as `tampered → repaired Nx` for 24h.
-- **Expect:** no false-green. **Status: ✅ PASS** (live v0.16.1): status read
-  `kill-steam: tampered → repaired Nx` over an `ok` run row.
+  protection (the latent-failure class). The first fix (v0.16.1) made a
+  since-repaired tamper read `tampered → repaired Nx` for 24h — but the owner
+  found that misleading: a recovered, genuine, enforcing plugin still showed a
+  persistent tamper verdict and dragged OVERALL to TAMPERED/DEGRADED for 24h.
+  **Refined decision (KISS):** `status` reflects **current state only**; tamper
+  **history** belongs in the log/events (the audit channel), not in status — don't
+  mix the two.
+- **Check (current-state truthfulness):**
+  1. After a tamper, the plugin **auto-restores** and `status` returns to **ok** —
+     because the restored plugin IS genuine and enforcing now (current state clean).
+  2. The tamper appears in the **log + events** (the audit channel: F16 `WARN
+     plugin tamper repaired …` line + platform event), **not** as a persistent
+     status verdict.
+  3. A **currently-unrestored** tamper (genuine binary not yet restored) **or** a
+     real run-error reads **not-ok** — false-green is prevented by restore-before-run,
+     not by a status flag.
+  4. No persistent `tampered → repaired Nx` verdict remains in status; OVERALL is
+     not dragged to TAMPERED/DEGRADED by a healthy, restored plugin.
+- **Expect:** status truthful about the present; tamper history in log/events.
+  **Status: 🟡 pending re-verify** (this cleanup supersedes the prior v0.16.1 PASS,
+  which asserted the now-removed `tampered → repaired Nx` status verdict).
 
 ### TC-08 🟡 Status truthfulness — no false-degraded  `[found 2026-06-22]`
 - **Origin:** `status` reported `DEGRADED — 4/6 roles` while every *enabled*

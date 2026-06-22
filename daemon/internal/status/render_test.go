@@ -236,6 +236,87 @@ func TestPlatformDetail_Verdict(t *testing.T) {
 	}
 }
 
+// TestRender_WatchdogPresentOnly verifies the out-of-band watchdog line is
+// PRESENT-ONLY: it renders exactly when the rail is fully up (checked + cron +
+// copy) and is OMITTED in every other state (absent / recovering / unknown) —
+// no MISSING, no "degraded (recovering)". The flaky secondary rail must never
+// read as a current problem on the status.
+func TestRender_WatchdogPresentOnly(t *testing.T) {
+	base := realisticSnapshot()
+	cases := []struct {
+		name     string
+		checked  bool
+		cron     bool
+		copyOK   bool
+		wantLine bool
+	}{
+		{"fully up → present line", true, true, true, true},
+		{"copy gone → omitted", true, true, false, false},
+		{"no cron → omitted", true, false, false, false},
+		{"unchecked → omitted", false, false, false, false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			s := base
+			s.WatchdogChecked = c.checked
+			s.WatchdogCron = c.cron
+			s.WatchdogCopyOK = c.copyOK
+			var txt bytes.Buffer
+			RenderText(s, Assess(s), PlatformDetail{Available: false}, &txt, false)
+			out := txt.String()
+			hasLine := strings.Contains(out, "out-of-band watchdog")
+			if hasLine != c.wantLine {
+				t.Fatalf("watchdog line present=%v, want %v:\n%s", hasLine, c.wantLine, out)
+			}
+			if c.wantLine && !strings.Contains(out, "present") {
+				t.Errorf("watchdog line should read 'present':\n%s", out)
+			}
+			// Never the old problem-shaped phrasings.
+			for _, banned := range []string{"MISSING", "recovering"} {
+				if strings.Contains(out, banned) {
+					t.Errorf("watchdog must not render %q (present-only):\n%s", banned, out)
+				}
+			}
+		})
+	}
+}
+
+// TestCombine_DisabledAndRecoveredPluginNotDegraded verifies the cross-layer
+// agreement: when the platform reports a healthy roll-up (a recovered-tamper
+// plugin reads "ok" → Healthy, and an intentionally-disabled plugin is
+// excluded), its overall is HEALTHY, and the daemon's Combine keeps a healthy
+// mesh+proc snapshot HEALTHY. No DEGRADED leaks in from a recovered tamper or a
+// disabled plugin.
+func TestCombine_DisabledAndRecoveredPluginNotDegraded(t *testing.T) {
+	// Fully-healthy daemon snapshot: full mesh, proc up, no version drift —
+	// so the OVERALL is driven purely by the platform's plugin roll-up.
+	s := Snapshot{
+		Mode:       "system",
+		MeshLoaded: 3, MeshTotal: 3,
+		ProcCount: 1,
+		Desired:   "v1", Good: "v1",
+		Found: true,
+	}
+	daemonRes := Assess(s)
+	if daemonRes.Verdict != Healthy {
+		t.Fatalf("daemon's own verdict = %s; want HEALTHY (test setup)", daemonRes.Verdict)
+	}
+
+	// Platform roll-up: dns-block ok (recovered tamper now reads ok), net-block
+	// disabled (excluded) → platform overall HEALTHY.
+	platformJSON := json.RawMessage(`{"mode":"system","overall":"HEALTHY",` +
+		`"jobs":[{"id":"dns-block-reconcile","verdict":"HEALTHY"},` +
+		`{"id":"network-block-reconcile","verdict":"DISABLED"}]}`)
+	pv, ok := PlatformDetail{Available: true, ExitCode: 0, JSON: platformJSON}.Verdict()
+	if !ok || pv != Healthy {
+		t.Fatalf("platform verdict = (%s,%v); want (HEALTHY,true)", pv, ok)
+	}
+	combined := Combine(daemonRes, pv, ok)
+	if combined.Verdict != Healthy {
+		t.Fatalf("combined OVERALL = %s; want HEALTHY (disabled + recovered plugin must not degrade)", combined.Verdict)
+	}
+}
+
 // TestRender_UnknownLinesHonest: a system install read without sudo renders
 // honest "unknown (re-run with sudo)" lines and exits via Unknown→0, not a
 // hard failure or a DOWN.

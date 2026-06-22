@@ -50,13 +50,28 @@ security event that is repaired, never a silent fix.**
 - **Restore, atomically, then run.** On a mismatch the platform restores the
   genuine program as a single all-or-nothing swap (safe even if the plugin is
   mid-run) and runs the genuine version.
-- **Tamper is an event, not a silent repair.** A mismatch is **recorded and
-  surfaced as a security event (tamper detected → repaired).** Status can never
-  again read a found-tampered plugin as a plain "ok."
+- **Tamper is an event, not a silent repair.** A mismatch is **recorded as a
+  security event** — a log line (FEATURE 16) plus a platform event in the state DB
+  (the audit channel). The false-green is closed by the **restore mechanism**
+  (point-of-use verify restores the genuine binary before it runs), not by holding
+  a tamper flag in status.
 
 This makes plugin programs self-recovering on their own (register §5: "recovered
 must mean the system re-created what it needed on its own") and closes the
 false-green class for plugin binaries.
+
+> **Refinement (2026-06-22):** This ADR originally said the tamper is "surfaced in
+> status" and that status "can never again read a found-tampered plugin as a plain
+> ok." That has been corrected. **`status` reflects CURRENT state only (KISS):** a
+> plugin that was tampered and has since been auto-restored is genuine and
+> enforcing now, so it truthfully reads **ok** — a currently-unrestored tamper or
+> a real run error reads **not-ok**. The tamper **history** is audit, not status:
+> it lives in the app log (FEATURE 16) and as a platform event in the state DB,
+> readable by a future accountability/dashboard view (FEATURE 13 / icebox). The
+> integrity guarantee is unchanged — false-green is prevented by restore-before-run,
+> not by a persistent status verdict. Owner intent: "status means current state…
+> the history can go into the log/events — don't mix things up." See FEATURE 15
+> "How it behaves" and TC-07.
 
 ## Alternatives considered
 

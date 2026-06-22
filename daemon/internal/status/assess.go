@@ -93,6 +93,14 @@ type Result struct {
 //	HEALTHY  — warming up, or everything that should be up is up.
 //	UNKNOWN  — we could not read enough to judge (folds to exit 0, never up).
 func Assess(s Snapshot) Result {
+	// GUARD — the watchdog bools (WatchdogChecked/WatchdogCron/WatchdogCopyOK)
+	// are DELIBERATELY NOT read here. The out-of-band watchdog is a best-effort,
+	// flaky SECONDARY rail; a missing/recovering watchdog is not a current
+	// failure of core protection (mesh + platform process). Folding it in would
+	// make OVERALL flap DEGRADED on the noisy rail while protection is fine. It
+	// is render-only + present-only (see render.go), and stays in the JSON for
+	// machine consumers. Do not add a watchdog branch to this verdict.
+
 	// No install discovered at all → clean DOWN, never internal-error. A
 	// mode-name hint ("try with/without sudo") is fine; never a path hint.
 	if !s.Found && !s.MeshUnknown {

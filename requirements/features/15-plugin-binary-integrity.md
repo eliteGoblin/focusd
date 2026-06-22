@@ -72,9 +72,29 @@ silent gap.
   single, all-or-nothing swap, so a plugin that happens to be running while it is
   being restored is never left half-written or corrupt.
 - **Tamper is an event, not a silent repair.** A detected mismatch is recorded as
-  a **security event (tamper detected → repaired)** and surfaced in status.
-  Status can **never** again report a plugin that was found tampered as a plain
-  "ok" — the tamper, and the repair, are visible.
+  a **security event (tamper detected → repaired)** — written to the app log
+  (FEATURE 16) and recorded as a platform event in the state DB. That audit
+  record is where the "was there a tamper attempt?" question is answered, never
+  silently lost.
+- **`status` reflects CURRENT state only (KISS).** `status` is a current-health
+  read, not a history view. A plugin's verdict = is it the genuine binary right
+  now AND did its last run succeed? Genuine + working → **ok**. A tamper that has
+  **not** been restored, or a real run error → **not-ok**. A disabled plugin →
+  **disabled** (excluded from OVERALL). A tamper that has since been auto-restored
+  reads **ok**, because the plugin IS genuine and enforcing again — that is the
+  honest current state. *(This refines the original F15 design, which kept a
+  persistent "tampered → repaired Nx" verdict in status for 24h; that conflated
+  audit history into current health. Owner intent, verbatim: "status means current
+  state, it has to be clean; I don't want to see any tampered message if not
+  tampered; the history can go into the log/events — don't mix things up.")*
+- **Why a recovered plugin reading `ok` is still honest.** The original
+  false-green (a no-op plugin reading ok while protection was dead) is prevented
+  by the **restore mechanism** above — point-of-use verify restores the genuine
+  binary before it runs — **not** by a persistent status flag. A
+  currently-broken / not-restored plugin still reads not-ok, and a sweep that is
+  failing **right now** is a current problem that still surfaces. So nothing is
+  weakened: status stays truthful about the present, and the tamper history lives
+  in the audit channel.
 - **No behaviour change when nothing is wrong.** On an untampered system the
   plugins run exactly as before; this feature is invisible until something on
   disk doesn't match the genuine copy.
@@ -90,10 +110,13 @@ silent gap.
    different program (e.g. a no-op stand-in) is detected and **restored to the
    genuine version within one reconcile tick**, and the genuine program — not the
    substitute — is what actually runs.
-2. **No false green, ever.** After such a tamper, status **does not** report that
-   plugin as a plain "ok": the tamper-and-repair is recorded and surfaced. A
-   substitute that exits cleanly can no longer buy a green light over dead
-   protection.
+2. **No false green, ever — via restore, not a status flag.** A substitute that
+   exits cleanly can no longer buy a green light over dead protection, because the
+   genuine binary is restored before it runs. While a tamper is **unrestored**,
+   status reads not-ok. Once auto-restored, the plugin is genuine and enforcing,
+   so status truthfully reads **ok** — and the tamper-and-repair is recorded in
+   the audit channel (log + event, criterion 4), not held as a persistent status
+   verdict.
 3. **Point-of-use safety.** A plugin swapped in **between** reconcile passes is
    still caught and restored before the stale/substitute program is run — the
    substitute never executes in place of the genuine one.

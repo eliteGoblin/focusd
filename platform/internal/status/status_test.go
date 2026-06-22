@@ -37,7 +37,7 @@ func TestCollect_VerdictMapping(t *testing.T) {
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			rep := Collect("system", []JobInput{{ID: "j", Enabled: c.enabled}}, c.lastRun, nil, nil, now)
+			rep := Collect("system", []JobInput{{ID: "j", Enabled: c.enabled}}, c.lastRun, nil, now)
 			if got := rep.Jobs[0].Verdict; got != c.want {
 				t.Fatalf("verdict = %q, want %q", got, c.want)
 			}
@@ -49,7 +49,7 @@ func TestCollect_DBErrorIsUnknownNotFatal(t *testing.T) {
 	errFn := func(string) (string, time.Time, bool, error) {
 		return "", time.Time{}, false, errFake
 	}
-	rep := Collect("system", []JobInput{{ID: "j", Enabled: true}}, errFn, nil, nil, now)
+	rep := Collect("system", []JobInput{{ID: "j", Enabled: true}}, errFn, nil, now)
 	if rep.Jobs[0].Verdict != Unknown {
 		t.Fatalf("db error should map to Unknown, got %q", rep.Jobs[0].Verdict)
 	}
@@ -70,14 +70,14 @@ func TestOverall_WorstWinsAndIgnoresDisabled(t *testing.T) {
 		}
 		return "", time.Time{}, false, nil
 	}
-	rep := Collect("system", jobs, lastRun, nil, nil, now)
+	rep := Collect("system", jobs, lastRun, nil, now)
 	if rep.Overall != Degraded {
 		t.Fatalf("overall = %q, want DEGRADED (worst of enabled)", rep.Overall)
 	}
 }
 
 func TestOverall_AllDisabledIsUnknown(t *testing.T) {
-	rep := Collect("user", []JobInput{{ID: "a", Enabled: false}}, runAt("", 0, false), nil, nil, now)
+	rep := Collect("user", []JobInput{{ID: "a", Enabled: false}}, runAt("", 0, false), nil, now)
 	if rep.Overall != Unknown {
 		t.Fatalf("overall = %q, want UNKNOWN", rep.Overall)
 	}
@@ -102,7 +102,7 @@ func TestOverall_UnavailableDegradesNotIgnored(t *testing.T) {
 		}
 		return "", time.Time{}, false, nil
 	}
-	rep := Collect("user", jobs, lastRun, nil, nil, now)
+	rep := Collect("user", jobs, lastRun, nil, now)
 	if rep.Overall != Degraded {
 		t.Fatalf("overall = %q, want DEGRADED (unavailable job must degrade, not be ignored)", rep.Overall)
 	}
@@ -114,14 +114,14 @@ func TestOverall_UnavailableDegradesNotIgnored(t *testing.T) {
 func TestOverall_DisabledVsUnavailable(t *testing.T) {
 	disabledOnly := Collect("user",
 		[]JobInput{{ID: "a", Enabled: false}, {ID: "b", Enabled: false}},
-		runAt("", 0, false), nil, nil, now)
+		runAt("", 0, false), nil, now)
 	if disabledOnly.Overall != Unknown {
 		t.Fatalf("all-disabled overall = %q, want UNKNOWN", disabledOnly.Overall)
 	}
 
 	withUnavailable := Collect("user",
 		[]JobInput{{ID: "a", Enabled: false}, {ID: "b", Enabled: true}},
-		runAt("unavailable", time.Minute, true), nil, nil, now)
+		runAt("unavailable", time.Minute, true), nil, now)
 	if withUnavailable.Overall != Degraded {
 		t.Fatalf("has-unavailable overall = %q, want DEGRADED", withUnavailable.Overall)
 	}
@@ -153,7 +153,7 @@ func TestRender_NoLeak(t *testing.T) {
 	rep := Collect("system", []JobInput{
 		{ID: "dns-block-reconcile", Enabled: true},
 		{ID: "network-block-reconcile", Enabled: true},
-	}, runAt("ok", time.Minute, true), nil, nil, now)
+	}, runAt("ok", time.Minute, true), nil, now)
 
 	for _, render := range []func() string{
 		func() string { var b bytes.Buffer; RenderText(rep, &b, false); return b.String() },
@@ -169,7 +169,7 @@ func TestRender_NoLeak(t *testing.T) {
 }
 
 func TestRenderJSON_Valid(t *testing.T) {
-	rep := Collect("user", []JobInput{{ID: "j", Enabled: true}}, runAt("ok", time.Minute, true), nil, nil, now)
+	rep := Collect("user", []JobInput{{ID: "j", Enabled: true}}, runAt("ok", time.Minute, true), nil, now)
 	var b bytes.Buffer
 	RenderJSON(rep, &b)
 	var back Report
@@ -187,9 +187,6 @@ func (fakeErr) Error() string { return "fake db error" }
 
 var errFake = fakeErr{}
 
-// noTamper is a TamperLookupFn reporting no integrity events.
-func noTamper(string) (time.Time, int, bool) { return time.Time{}, 0, false }
-
 // TestOverall_HealthyWithDisabledNoFalseDegraded is FEATURE 15 AC-6: all
 // ENABLED protections healthy + one intentionally-DISABLED job (e.g.
 // net-block off by default) must read HEALTHY overall — a disabled plugin
@@ -206,61 +203,25 @@ func TestOverall_HealthyWithDisabledNoFalseDegraded(t *testing.T) {
 		}
 		return "ok", now.Add(-30 * time.Second), true, nil
 	}
-	rep := Collect("system", jobs, lastRun, noTamper, nil, now)
+	rep := Collect("system", jobs, lastRun, nil, now)
 	if rep.Overall != Healthy {
 		t.Fatalf("overall = %q, want HEALTHY (disabled job must not degrade)", rep.Overall)
 	}
 }
 
-// TestTamper_OverOkRunIsTampered is FEATURE 15 AC-2 (false-green kill): a
-// job with a clean "ok" run row but a tamper-repaired event NEWER than that
-// run must read TAMPERED, never HEALTHY — a substitute that exits cleanly
-// can no longer buy a green light.
-func TestTamper_OverOkRunIsTampered(t *testing.T) {
-	lastRun := runAt("ok", 5*time.Minute, true) // clean run 5m ago
-	// Tamper event 1m ago (newer than the clean run), repaired twice.
-	tamper := func(string) (time.Time, int, bool) {
-		return now.Add(-time.Minute), 2, true
+// TestRecoveredTamper_ReadsOk pins the current-state rule: a job whose binary
+// was swapped and then RESTORED reports a clean "ok" run row (F15 re-runs the
+// genuine binary immediately after restore). Status reflects CURRENT state, so
+// that job — and OVERALL — must read Healthy. The tamper survives as a platform
+// audit event + an F16 app-log line; it is NOT a persistent status verdict.
+func TestRecoveredTamper_ReadsOk(t *testing.T) {
+	lastRun := runAt("ok", 30*time.Second, true) // genuine binary restored + re-ran cleanly
+	rep := Collect("system", []JobInput{{ID: "j", Enabled: true}}, lastRun, nil, now)
+	if rep.Jobs[0].Verdict != Healthy {
+		t.Fatalf("verdict = %q, want HEALTHY (recovered tamper → clean ok run)", rep.Jobs[0].Verdict)
 	}
-	rep := Collect("system", []JobInput{{ID: "j", Enabled: true}}, lastRun, tamper, nil, now)
-	if rep.Jobs[0].Verdict != Tampered {
-		t.Fatalf("verdict = %q, want TAMPERED (tamper newer than ok run)", rep.Jobs[0].Verdict)
-	}
-	if rep.Jobs[0].TamperCount != 2 {
-		t.Errorf("tamper count = %d, want 2", rep.Jobs[0].TamperCount)
-	}
-	if rep.Overall != Tampered {
-		t.Fatalf("overall = %q, want TAMPERED (must dominate)", rep.Overall)
-	}
-}
-
-// TestTamper_RepairedStaysVisibleEvenWithNewerCleanRun is the live-caught
-// regression: F15 restores the genuine binary and immediately re-runs it, so
-// the clean "ok" run is ALWAYS newer than the tamper event. The light must
-// still read Tampered for tamperWindow — gating on "tamper newer than the
-// clean run" masked every real repair (events recorded, status still "ok").
-func TestTamper_RepairedStaysVisibleEvenWithNewerCleanRun(t *testing.T) {
-	lastRun := runAt("ok", time.Minute, true) // clean run 1m ago (NEWER than the tamper)
-	tamper := func(string) (time.Time, int, bool) {
-		return now.Add(-10 * time.Minute), 1, true // tamper 10m ago — still in window
-	}
-	rep := Collect("system", []JobInput{{ID: "j", Enabled: true}}, lastRun, tamper, nil, now)
-	if rep.Jobs[0].Verdict != Tampered {
-		t.Fatalf("verdict = %q, want TAMPERED (in-window tamper must stay visible over a newer clean run)", rep.Jobs[0].Verdict)
-	}
-}
-
-// TestTamper_NoCleanRunInWindowFlips: an in-window tamper-repaired event with
-// NO clean run row at all still surfaces as Tampered (the job was restored but
-// hasn't run since). Covers the no-run branch of jobStatus.
-func TestTamper_NoCleanRunInWindowFlips(t *testing.T) {
-	noRun := func(string) (string, time.Time, bool, error) { return "", time.Time{}, false, nil }
-	tamper := func(string) (time.Time, int, bool) {
-		return now.Add(-2 * time.Minute), 1, true // in window, no run row
-	}
-	rep := Collect("system", []JobInput{{ID: "j", Enabled: true}}, noRun, tamper, nil, now)
-	if rep.Jobs[0].Verdict != Tampered {
-		t.Fatalf("verdict = %q, want TAMPERED (in-window tamper, no clean run)", rep.Jobs[0].Verdict)
+	if rep.Overall != Healthy {
+		t.Fatalf("overall = %q, want HEALTHY (recovered tamper must not degrade)", rep.Overall)
 	}
 }
 
@@ -271,7 +232,7 @@ func TestTamper_NoCleanRunInWindowFlips(t *testing.T) {
 func TestSweepFailing_DegradesAndRenders(t *testing.T) {
 	lastRun := runAt("ok", 30*time.Second, true) // every job healthy
 	failing := func() bool { return true }
-	rep := Collect("system", []JobInput{{ID: "j", Enabled: true}}, lastRun, nil, failing, now)
+	rep := Collect("system", []JobInput{{ID: "j", Enabled: true}}, lastRun, failing, now)
 
 	if !rep.SweepFailing {
 		t.Fatal("report should mark SweepFailing")
@@ -291,36 +252,11 @@ func TestSweepFailing_DegradesAndRenders(t *testing.T) {
 func TestSweepFailing_FalseIsNoSignal(t *testing.T) {
 	lastRun := runAt("ok", 30*time.Second, true)
 	ok := func() bool { return false }
-	rep := Collect("system", []JobInput{{ID: "j", Enabled: true}}, lastRun, nil, ok, now)
+	rep := Collect("system", []JobInput{{ID: "j", Enabled: true}}, lastRun, ok, now)
 	if rep.SweepFailing {
 		t.Error("a non-failing sweep must not set SweepFailing")
 	}
 	if rep.Overall != Healthy {
 		t.Fatalf("overall = %q, want HEALTHY", rep.Overall)
-	}
-}
-
-// TestSweepFailing_DoesNotMaskTampered: a failing sweep degrades, but must
-// not down-rank a more-severe Tampered verdict.
-func TestSweepFailing_DoesNotMaskTampered(t *testing.T) {
-	lastRun := runAt("ok", 5*time.Minute, true)
-	tamper := func(string) (time.Time, int, bool) { return now.Add(-time.Minute), 1, true }
-	failing := func() bool { return true }
-	rep := Collect("system", []JobInput{{ID: "j", Enabled: true}}, lastRun, tamper, failing, now)
-	if rep.Overall != Tampered {
-		t.Fatalf("overall = %q, want TAMPERED (must outrank a failing sweep)", rep.Overall)
-	}
-}
-
-// TestTamper_OutsideWindowIgnored: a tamper older than tamperWindow does
-// not flip the verdict.
-func TestTamper_OutsideWindowIgnored(t *testing.T) {
-	lastRun := runAt("ok", 30*time.Second, true)
-	tamper := func(string) (time.Time, int, bool) {
-		return now.Add(-25 * time.Hour), 1, true // >24h ago
-	}
-	rep := Collect("system", []JobInput{{ID: "j", Enabled: true}}, lastRun, tamper, nil, now)
-	if rep.Jobs[0].Verdict != Healthy {
-		t.Fatalf("verdict = %q, want HEALTHY (tamper outside window)", rep.Jobs[0].Verdict)
 	}
 }

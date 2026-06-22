@@ -107,10 +107,15 @@ func RenderText(s Snapshot, res Result, pd PlatformDetail, out io.Writer, color 
 	fmt.Fprintf(out, "  %-22s %s\n", "platform process", procLine(s))
 	fmt.Fprintf(out, "  %-22s %s\n", "platform version", versionLine(s))
 
-	// Out-of-band watchdog rail liveness (FEATURE 12 / ADR-0016). Only shown
-	// where the rail applies (darwin); bools only, no paths.
-	if s.WatchdogChecked {
-		fmt.Fprintf(out, "  %-22s %s\n", "out-of-band watchdog", watchdogLine(s))
+	// Out-of-band watchdog rail liveness (FEATURE 12 / ADR-0016). PRESENT-ONLY:
+	// the watchdog is a best-effort, flaky secondary rail — it must never read
+	// as a problem on the CURRENT-state status. We print the line ONLY when the
+	// rail is fully up; when it is absent/unknown/recovering we OMIT it entirely
+	// (no MISSING / "degraded (recovering)" noise), and it NEVER drives OVERALL
+	// (see the guard in assess.go). The JSON bools are still emitted for machine
+	// consumers that want the raw signal.
+	if watchdogPresent(s) {
+		fmt.Fprintf(out, "  %-22s %s\n", "out-of-band watchdog", "present")
 	}
 
 	// Platform passthrough section.
@@ -156,22 +161,14 @@ func procLine(s Snapshot) string {
 	}
 }
 
-// watchdogLine describes the out-of-band watchdog rail in bools-only terms,
-// WITHOUT naming the underlying mechanism (the rail's implementation is a
-// disguised identifier — naming it tells a weak-moment user exactly where to
-// look). "present" (rail + copy both there), "MISSING" (no rail), or
-// "degraded (recovering)" — the rail exists but its binary copy is gone, the
-// silently-broken state ADR-0016 says must be visible. Self-heals on the next
-// in-band reconcile.
-func watchdogLine(s Snapshot) string {
-	switch {
-	case s.WatchdogCron && s.WatchdogCopyOK:
-		return "present"
-	case s.WatchdogCron && !s.WatchdogCopyOK:
-		return "degraded (recovering)"
-	default:
-		return "MISSING"
-	}
+// watchdogPresent reports whether the out-of-band watchdog rail is fully up
+// (checked, cron line present, AND its binary copy on disk). It is the single
+// gate for whether the watchdog line renders at all (present-only): absent /
+// unknown / recovering states are OMITTED rather than shown as a problem, and
+// they never affect OVERALL (see assess.go). The mechanism is never named (a
+// disguised identifier — naming it tells a weak-moment user where to look).
+func watchdogPresent(s Snapshot) bool {
+	return s.WatchdogChecked && s.WatchdogCron && s.WatchdogCopyOK
 }
 
 func versionLine(s Snapshot) string {
