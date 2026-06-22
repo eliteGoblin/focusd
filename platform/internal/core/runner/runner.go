@@ -16,6 +16,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
+	"log/slog"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -25,6 +27,13 @@ import (
 	"github.com/eliteGoblin/focusd/platform/internal/core/state"
 	"github.com/eliteGoblin/focusd/platform/internal/osadapter"
 )
+
+// discardLogger is a no-op slog.Logger used when no logger is injected, so
+// existing callers/tests that build a Runner without WithLogger are
+// unaffected (no nil checks at the call sites).
+func discardLogger() *slog.Logger {
+	return slog.New(slog.NewTextHandler(io.Discard, nil))
+}
 
 // integrityVerifier reconciles a single plugin's on-disk binaries against
 // the genuine embedded copy, restoring any that don't match. It is the
@@ -81,6 +90,13 @@ type Runner struct {
 	// skipped (the plugin runs as-is). Production wires a bundle-backed
 	// impl in app.BuildScheduler; tests inject a fake or leave it nil.
 	verifier integrityVerifier
+	// log is the structured action log (FEATURE 16): the runner emits
+	// WARN/ERROR lines for integrity tamper / verify failures (the per-run
+	// INFO "job finished" line is emitted by the scheduler, not here), so the
+	// app log is an independent whitebox audit/e2e channel. nil => a discard
+	// logger (set in New/NewWithMode) so existing callers and tests are
+	// unaffected and call sites never nil-check.
+	log *slog.Logger
 }
 
 // WithVerifier returns r with the point-of-use integrity verifier set.
@@ -91,16 +107,29 @@ func (r *Runner) WithVerifier(v integrityVerifier) *Runner {
 	return r
 }
 
+// WithLogger returns r with the structured action logger set (FEATURE 16).
+// A nil logger is ignored (the discard default stays in place). Used by the
+// composition root to inject the platform's app logger. Returns the same
+// *Runner for fluent wiring.
+func (r *Runner) WithLogger(log *slog.Logger) *Runner {
+	if log != nil {
+		r.log = log
+	}
+	return r
+}
+
 // New builds a Runner in user mode (no privilege-drop). System-mode
 // platforms use NewWithMode so the runner can step down for current_user
 // plugins.
-func New(db *state.DB) *Runner { return &Runner{DB: db, Mode: osadapter.ModeUser} }
+func New(db *state.DB) *Runner {
+	return &Runner{DB: db, Mode: osadapter.ModeUser, log: discardLogger()}
+}
 
 // NewWithMode builds a Runner for the given platform run mode. A system
 // (root) runner will fork→setuid to the console user for current_user
 // plugins (see privdrop.go).
 func NewWithMode(db *state.DB, mode osadapter.RunMode) *Runner {
-	return &Runner{DB: db, Mode: mode}
+	return &Runner{DB: db, Mode: mode, log: discardLogger()}
 }
 
 // resolveConsoleUser returns the discovery seam, defaulting to the real
@@ -209,6 +238,11 @@ func (r *Runner) runOnce(ctx context.Context, job Job, p plugin.Discovered, trig
 		restored, wantPrefix, gotPrefix, verr := r.verifier.VerifyOrRestore(pluginRoot, subdir)
 		if verr != nil {
 			const reason = "plugin integrity check failed; refusing to run possibly-tampered binary"
+			// Whitebox audit line (FEATURE 16): redaction-safe — plugin id +
+			// error CLASS only. verr may embed a disguised path; log its type,
+			// never its raw string, so the app log can't leak the workdir.
+			r.log.Error("plugin integrity check failed",
+				"plugin", p.Manifest.ID, "err_type", fmt.Sprintf("%T", verr))
 			if rerr := r.DB.Runs.RecordError(job.ID, p.Manifest.ID, reason); rerr != nil {
 				return Outcome{}, rerr
 			}
@@ -226,6 +260,10 @@ func (r *Runner) runOnce(ctx context.Context, job Job, p plugin.Discovered, trig
 			// status can never read this job as a plain "ok" again, then
 			// run the GENUINE binary that VerifyOrRestore just put back. The
 			// want/got sha prefixes (never a path) make the event diagnostic.
+			// Whitebox audit line (FEATURE 16): redaction-safe — plugin id +
+			// sha PREFIXES only, never a path/label.
+			r.log.Warn("plugin tamper repaired",
+				"plugin", p.Manifest.ID, "want_sha", wantPrefix, "got_sha", gotPrefix)
 			if rerr := r.DB.Events.RecordTamperRepaired(job.ID, p.Manifest.ID, wantPrefix, gotPrefix); rerr != nil {
 				return Outcome{}, rerr
 			}
