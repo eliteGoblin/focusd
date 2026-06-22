@@ -146,15 +146,16 @@ Severity: 🔴 enforcement bypass · 🟠 self-heal/recovery · 🟡 truthfulnes
 - **Check:** read the engine app log (`platform.log` under the workdir, via
   `sudo`, path redacted). A steady-state window has **no `ERROR` and no `WARN`**
   lines; print + FAIL on any (redacted).
-- **Expect:** quiet steady state. **Status:** pending first live capture (F16).
+- **Expect:** quiet steady state. **Status: ✅ PASS** (live v0.16.2, 2026-06-22): 0 ERROR/WARN in the steady-state window.
 
 ### TC-13 🟡 Whitebox security-event log — *F16*  `[added 2026-06-22]`
 - **Check:** after a tamper (TC-06), the app log contains the
   `plugin tamper repaired` WARN line naming the plugin — present **independently
   of `status`** (logged, not only DB-recorded). Redact: assert on event text +
   level + plugin id, never paths/labels.
-- **Expect:** tamper event appears in the log. **Status:** pending first live
-  capture (F16).
+- **Expect:** tamper event appears in the log. **Status: ✅ PASS** (live v0.16.2,
+  2026-06-22): `level=WARN msg="plugin tamper repaired" plugin=kill-steam
+  want_sha=… got_sha=…` — plugin id + sha prefixes only, no paths/labels.
 
 ---
 
@@ -164,3 +165,4 @@ Severity: 🔴 enforcement bypass · 🟠 self-heal/recovery · 🟡 truthfulnes
 | 2026-06-20 | daemon-v0.5.5 (F14) | TC-02, TC-03 | TC-05 | argv leak fixed live; watchdog recovery found broken |
 | 2026-06-22 | (live restore) | TC-01 | TC-05, TC-06, TC-07, TC-08 | kill-steam tamper found + hand-restored; F15 fix pending |
 | 2026-06-22 | platform v0.16.0→v0.16.1 (F15) | TC-01, TC-02, TC-03, TC-06, TC-07, TC-08, TC-11 | TC-05 | F15 plugin-integrity live-verified: tamper auto-restored (~6s) + surfaced in status (`tampered → repaired Nx`); deploy verified; watchdog recovery (TC-05) still open |
+| 2026-06-22 | platform v0.16.2 (F16) | TC-11, TC-12, TC-13 | TC-05 (deferred) | F16 whitebox logging live-verified: steady-state log clean (TC-12) + tamper logged as `WARN plugin tamper repaired` independent of status (TC-13); watchdog (TC-05) deferred per owner |
