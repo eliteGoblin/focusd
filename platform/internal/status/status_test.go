@@ -250,16 +250,17 @@ func TestTamper_RepairedStaysVisibleEvenWithNewerCleanRun(t *testing.T) {
 	}
 }
 
-// TestTamper_OutsideWindowClears: a tamper older than tamperWindow no longer
-// flips the light (the weak-moment attempt has aged out).
-func TestTamper_OutsideWindowClears(t *testing.T) {
-	lastRun := runAt("ok", time.Minute, true)
+// TestTamper_NoCleanRunInWindowFlips: an in-window tamper-repaired event with
+// NO clean run row at all still surfaces as Tampered (the job was restored but
+// hasn't run since). Covers the no-run branch of jobStatus.
+func TestTamper_NoCleanRunInWindowFlips(t *testing.T) {
+	noRun := func(string) (string, time.Time, bool, error) { return "", time.Time{}, false, nil }
 	tamper := func(string) (time.Time, int, bool) {
-		return now.Add(-25 * time.Hour), 1, true // > 24h tamperWindow
+		return now.Add(-2 * time.Minute), 1, true // in window, no run row
 	}
-	rep := Collect("system", []JobInput{{ID: "j", Enabled: true}}, lastRun, tamper, nil, now)
-	if rep.Jobs[0].Verdict != Healthy {
-		t.Fatalf("verdict = %q, want HEALTHY (tamper aged out of window)", rep.Jobs[0].Verdict)
+	rep := Collect("system", []JobInput{{ID: "j", Enabled: true}}, noRun, tamper, nil, now)
+	if rep.Jobs[0].Verdict != Tampered {
+		t.Fatalf("verdict = %q, want TAMPERED (in-window tamper, no clean run)", rep.Jobs[0].Verdict)
 	}
 }
 
