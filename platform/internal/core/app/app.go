@@ -231,9 +231,9 @@ func (a *App) DiscoverPlugins() ([]plugin.Discovered, error) {
 			// every install, so this fires on every clean startup — it is
 			// steady state, not a problem. Log at INFO so the whitebox log
 			// stays quiet (FEATURE 16). Redaction-safe: id + reason only,
-			// no path (p.Dir is the scan-relative plugin dir, but skip it
-			// here to keep the steady-state line path-free).
-			a.Log.Info("plugin not servable in this install", "reason", p.Reason)
+			// Expected-rejection reasons are path-free, but redact anyway for
+			// consistency with the WARN sibling + future-proofing.
+			a.Log.Info("plugin not servable in this install", "reason", redactPaths(p.Reason))
 		default:
 			// A genuine defect (corrupt manifest, unsupported protocol,
 			// security violation). WARN so the whitebox log flags it.
