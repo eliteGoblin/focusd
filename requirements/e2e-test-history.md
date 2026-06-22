@@ -122,8 +122,10 @@ Severity: 🔴 enforcement bypass · 🟠 self-heal/recovery · 🟡 truthfulnes
   4. No persistent `tampered → repaired Nx` verdict remains in status; OVERALL is
      not dragged to TAMPERED/DEGRADED by a healthy, restored plugin.
 - **Expect:** status truthful about the present; tamper history in log/events.
-  **Status: 🟡 pending re-verify** (this cleanup supersedes the prior v0.16.1 PASS,
-  which asserted the now-removed `tampered → repaired Nx` status verdict).
+  **Status: ✅ PASS** (live v0.16.3, 2026-06-22): tampered kill-steam → restored →
+  `status: kill-steam ok · OVERALL HEALTHY` (no `tampered` verdict); the tamper
+  appears only in the log (`WARN plugin tamper repaired plugin=kill-steam …`) +
+  event DB. OVERALL green for the recovered, healthy plugin.
 
 ### TC-08 🟡 Status truthfulness — no false-degraded  `[found 2026-06-22]`
 - **Origin:** `status` reported `DEGRADED — 4/6 roles` while every *enabled*
@@ -180,3 +182,4 @@ Severity: 🔴 enforcement bypass · 🟠 self-heal/recovery · 🟡 truthfulnes
 | 2026-06-22 | (live restore) | TC-01 | TC-05, TC-06, TC-07, TC-08 | kill-steam tamper found + hand-restored; F15 fix pending |
 | 2026-06-22 | platform v0.16.0→v0.16.1 (F15) | TC-01, TC-02, TC-03, TC-06, TC-07, TC-08, TC-11 | TC-05 | F15 plugin-integrity live-verified: tamper auto-restored (~6s) + surfaced in status (`tampered → repaired Nx`); deploy verified; watchdog recovery (TC-05) still open |
 | 2026-06-22 | platform v0.16.2 (F16) | TC-11, TC-12, TC-13 | TC-05 (deferred) | F16 whitebox logging live-verified: steady-state log clean (TC-12) + tamper logged as `WARN plugin tamper repaired` independent of status (TC-13); watchdog (TC-05) deferred per owner |
+| 2026-06-22 | platform v0.16.3 (status KISS) | TC-07, TC-08, TC-11 | — | status = current-state: recovered tamper → `ok`/OVERALL HEALTHY (no `tampered` verdict); tamper only in log/events; watchdog manually restored (`present`, never degrades). TC-05 still deferred (FDA) |
