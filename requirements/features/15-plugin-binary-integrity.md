@@ -1,6 +1,6 @@
 # Feature 15 — Keep the enforcement plugins authentic, every tick, not just at startup
 
-- **Status:** 🟡 building (2026-06-22 — owner approved; proceeding to build)
+- **Status:** ✅ shipped (platform v0.16.0 + v0.16.1, 2026-06-22 — built, deployed live, e2e-verified)
 - **Decision:** [ADR-0019](../decisions/0019-embedded-bundle-is-plugin-trust-root.md)
 - **Builds on:** Ed25519 signed releases (register §4) — the signed platform
   binary is the trust root this feature leans on · the reconcile loop /

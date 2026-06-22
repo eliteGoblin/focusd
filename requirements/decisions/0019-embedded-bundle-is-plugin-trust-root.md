@@ -1,6 +1,6 @@
 # ADR-0019 — The embedded plugin copy inside the signed platform binary is the plugin trust root; plugin integrity is reconciled every loop, not placed once
 
-- **Status:** accepted (2026-06-22)
+- **Status:** accepted (2026-06-22) · shipped platform v0.16.0/v0.16.1 (PRs #62/#63), live-verified 2026-06-22
 - **Feature:** [FEATURE 15](../features/15-plugin-binary-integrity.md)
 - **Decided by:** Frank (product owner), BA review
 - **Relates to:** Ed25519 signed releases (register §4) — reuses that trust root

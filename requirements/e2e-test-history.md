@@ -77,34 +77,36 @@ Severity: 🔴 enforcement bypass · 🟠 self-heal/recovery · 🟡 truthfulnes
   cron with a launchd-based out-of-band rail the daemon can self-heal, or
   document as accept-on-install-only).
 
-### TC-06 🔴 Plugin integrity / tamper-restore — *F15 (building)*  `[found 2026-06-22 — FAILING]`
+### TC-06 🔴 Plugin integrity / tamper-restore — *F15 (shipped v0.16.0/v0.16.1)*  `[found 2026-06-22]`
 - **Origin:** `kill-steam` plugin binary was overwritten on disk with a dummy;
   the platform kept exec'ing the dummy (Steam + Dota2 ran freely) and `status`
-  showed the plugin as healthy. `bundle.ExtractTo` only runs at platform
-  **startup** (`cmd/platform/main.go:120`); reconcile never re-verifies; the
-  runner execs whatever is on disk.
+  showed the plugin as healthy. `bundle.ExtractTo` only ran at platform
+  **startup**; reconcile never re-verified; the runner exec'd whatever was on disk.
 - **Check:** overwrite a plugin binary on disk with a dummy → within one
   reconcile tick the **genuine** binary (sha256 == the `go:embed` golden copy
   inside the Ed25519-signed platform) is **restored**, the tamper is **recorded**,
   and `status` **never** reports the tampered plugin as `ok`.
-- **Expect:** auto-restore ≤ 1 tick + tamper surfaced. **Status: 🔴 FAIL** — fix
-  pending (F15: integrity reconcile every loop + point-of-use verify + atomic
-  replace + tamper event). Until then, a swap persists until platform restart.
+- **Expect:** auto-restore ≤ 1 tick + tamper surfaced. **Status: ✅ PASS** (live
+  v0.16.1, 2026-06-22): tampered binary restored to genuine in ~6s.
 
 ### TC-07 🟡 Status truthfulness — no false-green  `[found 2026-06-22]`
 - **Origin:** a no-op plugin that exits 0 makes `status` read `ok` over dead
-  protection (the latent-failure class).
-- **Check:** a tampered or non-enforcing plugin must NOT read `ok`; integrity
-  failure must surface distinctly from a genuine plugin error.
-- **Expect:** no false-green. **Status: 🔴 FAIL** — tied to F15.
+  protection (the latent-failure class). A subtler form caught live: the tamper
+  event WAS recorded but `status` still read `ok` because `applyTamper` masked a
+  repair behind the newer clean run (fixed v0.16.0→v0.16.1).
+- **Check:** a tampered (even since-repaired) plugin must NOT read `ok`; the
+  tamper surfaces as `tampered → repaired Nx` for 24h.
+- **Expect:** no false-green. **Status: ✅ PASS** (live v0.16.1): status read
+  `kill-steam: tampered → repaired Nx` over an `ok` run row.
 
 ### TC-08 🟡 Status truthfulness — no false-degraded  `[found 2026-06-22]`
-- **Origin:** `status` reports `DEGRADED — 4/6 roles` while every *enabled*
-  protection is `ok` (a *disabled* plugin like net-block + a missing watchdog
-  are counted as "not running").
-- **Check:** an intentionally-disabled plugin must not drive OVERALL to DEGRADED;
-  DEGRADED should mean an *enabled* role actually failed.
-- **Expect:** truthful overall. **Status: 🟡 FAIL** — counting fix pending.
+- **Origin:** `status` reported `DEGRADED — 4/6 roles` while every *enabled*
+  protection was `ok` (a *disabled* plugin like net-block counted as "not running").
+- **Check:** an intentionally-disabled plugin must not drive the platform OVERALL
+  to DEGRADED; DEGRADED should mean an *enabled* role actually failed.
+- **Expect:** truthful overall. **Status: ✅ PASS** (live v0.16.1): net-block
+  shown `disabled`, excluded from OVERALL. NOTE: the *daemon-level* `4/6 DEGRADED`
+  is driven by the missing watchdog (TC-05), a separate issue — not net-block.
 
 ### TC-09 🟡 Self-heal cadence is honest
 - **Check:** the test-mode harness gate is `< 2.0s`; the real bound is
@@ -116,10 +118,20 @@ Severity: 🔴 enforcement bypass · 🟠 self-heal/recovery · 🟡 truthfulnes
   reconcile to signed desired state, tighten-only ("no inside door handle"); a
   neutered on-disk config is restored. **Status:** not yet implemented.
 
+### TC-11 🟡 Deploy/update verification  `[added 2026-06-22]`
+- **Origin:** a deploy can silently no-op or half-apply; "merged" ≠ "live". Every
+  real `daemon`/`platform` update must be confirmed against the live install.
+- **Check:** after `daemon update <ver>`, `status` shows
+  `platform version good == desired == <ver>`, the mesh is healthy, and plugins
+  verify genuine (no integrity events caused by the swap itself).
+- **Expect:** new version live + healthy. **Status: ✅ PASS** (v0.16.1 swap
+  confirmed live in ~12s).
+
 ---
 
 ## Run Log
 | Date | Deploy | Pass | Fail | Notes |
 |------|--------|------|------|-------|
 | 2026-06-20 | daemon-v0.5.5 (F14) | TC-02, TC-03 | TC-05 | argv leak fixed live; watchdog recovery found broken |
-| 2026-06-22 | (live restore) | TC-01 | TC-05, TC-06, TC-07, TC-08 | kill-steam tamper found + hand-restored; F15 fix pending; false-green/degraded recorded |
+| 2026-06-22 | (live restore) | TC-01 | TC-05, TC-06, TC-07, TC-08 | kill-steam tamper found + hand-restored; F15 fix pending |
+| 2026-06-22 | platform v0.16.0→v0.16.1 (F15) | TC-01, TC-02, TC-03, TC-06, TC-07, TC-08, TC-11 | TC-05 | F15 plugin-integrity live-verified: tamper auto-restored (~6s) + surfaced in status (`tampered → repaired Nx`); deploy verified; watchdog recovery (TC-05) still open |
