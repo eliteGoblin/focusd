@@ -1,6 +1,6 @@
 # FEATURE 16 — Whitebox action logging + log-based e2e verification
 
-- **Status:** 🟡 building (2026-06-22)
+- **Status:** ✅ shipped (platform **v0.16.2**, PR #65; live-verified 2026-06-22) — steady-state log clean (TC-12) + tamper logged as `WARN plugin tamper repaired` with plugin id + sha prefixes only, independent of status (TC-13)
 - **Decision:** extends the register's "Observability is non-negotiable" principle; no new ADR (additive observability).
 - **Maps to:** e2e-test-history TC-12 (log hygiene) + TC-13 (security events appear in logs)
 
