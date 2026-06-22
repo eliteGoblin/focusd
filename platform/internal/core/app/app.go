@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"log/slog"
 
+	"github.com/eliteGoblin/focusd/platform/internal/bundle"
 	"github.com/eliteGoblin/focusd/platform/internal/core/config"
 	"github.com/eliteGoblin/focusd/platform/internal/core/logging"
 	"github.com/eliteGoblin/focusd/platform/internal/core/plugin"
@@ -16,6 +17,15 @@ import (
 	"github.com/eliteGoblin/focusd/platform/internal/core/state"
 	"github.com/eliteGoblin/focusd/platform/internal/osadapter"
 )
+
+// bundleVerifier adapts the bundle package to the runner's
+// integrityVerifier seam (ADR-0019): the genuine plugin copy embedded in
+// the signed platform binary is the trust root, reconciled at point of use.
+type bundleVerifier struct{}
+
+func (bundleVerifier) VerifyOrRestore(pluginRoot, subdir string) (bool, string, string, error) {
+	return bundle.VerifyOrRestore(pluginRoot, subdir)
+}
 
 // Options control bootstrap. Zero value is valid: adapter auto-created,
 // mode auto-detected, paths from the adapter's default layout.
@@ -233,9 +243,20 @@ func (a *App) BuildScheduler() (*scheduler.Scheduler, int, error) {
 			byID[p.Manifest.ID] = p
 		}
 	}
-	s := scheduler.New(runner.NewWithMode(a.State, a.Mode), a.State, a.Log, a.Mode)
+	run := runner.NewWithMode(a.State, a.Mode).WithVerifier(bundleVerifier{})
+	s := scheduler.New(run, a.State, a.Log, a.Mode)
 	n, err := s.Register(a.Config.Jobs, byID)
 	if err != nil {
+		return nil, 0, err
+	}
+	// @every 1m whole-bundle integrity sweep (ADR-0019): re-reconciles even
+	// idle/disabled plugin binaries the point-of-use check never reaches.
+	// ExtractTo is idempotent/churn-free, so this is a no-op when clean.
+	pluginDir := a.pluginDir
+	if err := s.RegisterIntegritySweep(func() error {
+		_, serr := bundle.ExtractTo(pluginDir)
+		return serr
+	}); err != nil {
 		return nil, 0, err
 	}
 	return s, n, nil

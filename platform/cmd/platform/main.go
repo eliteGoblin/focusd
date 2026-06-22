@@ -248,11 +248,14 @@ func runStatus(args []string) int {
 		jobs = append(jobs, status.JobInput{ID: j.ID, Enabled: j.Enabled})
 	}
 
-	// Run history, read-only. On any open failure, degrade to "no runs"
-	// (found=false) so status still renders — the jobs just read UNKNOWN.
+	// Run history + tamper history, read-only. On any open failure, degrade
+	// to "no runs" (found=false) so status still renders — the jobs just
+	// read UNKNOWN, and tamper info is simply absent (never a crash).
 	lastRun := func(string) (string, time.Time, bool, error) {
 		return "", time.Time{}, false, nil
 	}
+	var tamperLookup status.TamperLookupFn // nil => no integrity history
+	var sweepFailing status.SweepFailingFn // nil => no sweep-health signal
 	if dbPath != "" {
 		if db, derr := state.OpenReadOnly(dbPath); derr == nil {
 			defer db.Close()
@@ -271,10 +274,27 @@ func runStatus(args []string) int {
 				}
 				return runs[0].Status, t, true, nil
 			}
+			// Tamper lookup: a tamper-repaired event newer than the last
+			// clean run flips the job to TAMPERED (false-green kill). A query
+			// error degrades to "no tamper" rather than failing status.
+			tamperLookup = func(jobID string) (time.Time, int, bool) {
+				since, count, found, terr := db.Events.TamperSince(jobID, 24*time.Hour)
+				if terr != nil {
+					return time.Time{}, 0, false
+				}
+				return since, count, found
+			}
+			// Sweep-health: a sweep-failed event within the last 5m (and no
+			// recovery since) means the periodic re-verify is wedged. A query
+			// error degrades to "not failing" rather than crashing status.
+			sweepFailing = func() bool {
+				_, failing, serr := db.Events.SweepFailingSince(5 * time.Minute)
+				return serr == nil && failing
+			}
 		}
 	}
 
-	rep := status.Collect(string(mode), jobs, lastRun, time.Now().UTC())
+	rep := status.Collect(string(mode), jobs, lastRun, tamperLookup, sweepFailing, time.Now().UTC())
 
 	color := !*noColor && os.Getenv("NO_COLOR") == ""
 	if *jsonOut {
