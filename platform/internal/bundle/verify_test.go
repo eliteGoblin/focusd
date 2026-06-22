@@ -59,7 +59,7 @@ func TestVerifyOrRestore_SwapAndRestore(t *testing.T) {
 		t.Fatalf("swap binary: %v", err)
 	}
 
-	restored, err := VerifyOrRestore(root, subdir)
+	restored, wantPrefix, gotPrefix, err := VerifyOrRestore(root, subdir)
 	if err != nil {
 		t.Fatalf("VerifyOrRestore: %v", err)
 	}
@@ -72,6 +72,17 @@ func TestVerifyOrRestore_SwapAndRestore(t *testing.T) {
 	}
 	if sha(got) != sha(genuine) {
 		t.Fatal("binary not restored to genuine content")
+	}
+	// Prefixes: want is the genuine sha prefix, got is the substitute's —
+	// non-empty, distinct, and not the full digest (12 hex chars).
+	if len(wantPrefix) != 12 || len(gotPrefix) != 12 {
+		t.Fatalf("want/got prefixes should be 12 hex chars: want=%q got=%q", wantPrefix, gotPrefix)
+	}
+	if wantPrefix == gotPrefix {
+		t.Errorf("a content swap should yield differing prefixes: %q == %q", wantPrefix, gotPrefix)
+	}
+	if wantPrefix != shaPrefix(sha(genuine)) {
+		t.Errorf("wantPrefix %q != genuine prefix %q", wantPrefix, shaPrefix(sha(genuine)))
 	}
 }
 
@@ -89,12 +100,15 @@ func TestVerifyOrRestore_CleanFastPath(t *testing.T) {
 	if subdir == "" {
 		t.Skip("no extensionless plugin binary in this build; skipping")
 	}
-	restored, err := VerifyOrRestore(root, subdir)
+	restored, wantPrefix, gotPrefix, err := VerifyOrRestore(root, subdir)
 	if err != nil {
 		t.Fatalf("VerifyOrRestore: %v", err)
 	}
 	if restored {
 		t.Fatal("clean install must not report restored")
+	}
+	if wantPrefix != "" || gotPrefix != "" {
+		t.Errorf("clean install must not surface prefixes: want=%q got=%q", wantPrefix, gotPrefix)
 	}
 }
 
@@ -115,7 +129,7 @@ func TestVerifyOrRestore_RepairsMode(t *testing.T) {
 	if err := os.Chmod(binPath, 0o644); err != nil {
 		t.Fatalf("strip +x: %v", err)
 	}
-	restored, err := VerifyOrRestore(root, subdir)
+	restored, _, _, err := VerifyOrRestore(root, subdir)
 	if err != nil {
 		t.Fatalf("VerifyOrRestore: %v", err)
 	}
@@ -135,11 +149,28 @@ func TestVerifyOrRestore_RepairsMode(t *testing.T) {
 // no-op, never an error (non-bundled plugins are simply not covered).
 func TestVerifyOrRestore_UnknownSubdir(t *testing.T) {
 	root := t.TempDir()
-	restored, err := VerifyOrRestore(root, "does-not-exist")
+	restored, _, _, err := VerifyOrRestore(root, "does-not-exist")
 	if err != nil {
 		t.Fatalf("unknown subdir should not error: %v", err)
 	}
 	if restored {
 		t.Fatal("unknown subdir should not restore anything")
+	}
+}
+
+// TestVerifyOrRestore_GuardsEmptyOrDotSubdir is Fix 4: a subdir that would
+// resolve to the whole bundle ("" or "." or ".." or one containing a path
+// separator) must be rejected with an error, never silently walked — a
+// point-of-use check must scope to exactly one plugin.
+func TestVerifyOrRestore_GuardsEmptyOrDotSubdir(t *testing.T) {
+	root := t.TempDir()
+	for _, bad := range []string{"", ".", "..", "a/b", "../x"} {
+		restored, _, _, err := VerifyOrRestore(root, bad)
+		if err == nil {
+			t.Errorf("subdir %q must be rejected, got no error", bad)
+		}
+		if restored {
+			t.Errorf("subdir %q must not restore anything", bad)
+		}
 	}
 }

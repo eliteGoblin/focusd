@@ -255,6 +255,7 @@ func runStatus(args []string) int {
 		return "", time.Time{}, false, nil
 	}
 	var tamperLookup status.TamperLookupFn // nil => no integrity history
+	var sweepFailing status.SweepFailingFn // nil => no sweep-health signal
 	if dbPath != "" {
 		if db, derr := state.OpenReadOnly(dbPath); derr == nil {
 			defer db.Close()
@@ -283,10 +284,17 @@ func runStatus(args []string) int {
 				}
 				return since, count, found
 			}
+			// Sweep-health: a sweep-failed event within the last 5m (and no
+			// recovery since) means the periodic re-verify is wedged. A query
+			// error degrades to "not failing" rather than crashing status.
+			sweepFailing = func() bool {
+				_, failing, serr := db.Events.SweepFailingSince(5 * time.Minute)
+				return serr == nil && failing
+			}
 		}
 	}
 
-	rep := status.Collect(string(mode), jobs, lastRun, tamperLookup, time.Now().UTC())
+	rep := status.Collect(string(mode), jobs, lastRun, tamperLookup, sweepFailing, time.Now().UTC())
 
 	color := !*noColor && os.Getenv("NO_COLOR") == ""
 	if *jsonOut {

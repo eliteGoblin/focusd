@@ -23,7 +23,7 @@ import (
 // the signed platform binary is the trust root, reconciled at point of use.
 type bundleVerifier struct{}
 
-func (bundleVerifier) VerifyOrRestore(pluginRoot, subdir string) (bool, error) {
+func (bundleVerifier) VerifyOrRestore(pluginRoot, subdir string) (bool, string, string, error) {
 	return bundle.VerifyOrRestore(pluginRoot, subdir)
 }
 

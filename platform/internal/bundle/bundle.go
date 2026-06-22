@@ -19,6 +19,7 @@ package bundle
 import (
 	"crypto/sha256"
 	"embed"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io/fs"
@@ -84,15 +85,29 @@ func ExtractTo(pluginRoot string) (extracted []string, err error) {
 // if the plugin is mid-run). Mode bits are repaired on the fast path.
 //
 // It returns restored=true if ANY file was rewritten — the signal the
-// runner records as a tamper event. This is the point-of-use integrity
-// check (ADR-0019): the on-disk plugin is confirmed genuine immediately
-// before it is run, so a swap that landed since the last reconcile sweep
-// is caught and repaired before the stale/substitute binary can execute.
+// runner records as a tamper event. wantPrefix/gotPrefix are the first 12
+// hex chars of the genuine (embedded) vs the on-disk (pre-restore) sha256
+// of the FIRST mismatched file — enough to diagnose a tamper without ever
+// revealing a path or label. They are empty when nothing was restored.
+// This is the point-of-use integrity check (ADR-0019): the on-disk plugin
+// is confirmed genuine immediately before it is run, so a swap that landed
+// since the last reconcile sweep is caught and repaired before the
+// stale/substitute binary can execute.
 //
 // Pure Go, no build tags. An empty/unknown subdir (no embedded files)
-// returns restored=false, nil — a non-bundled plugin is simply not
+// returns restored=false, "", "", nil — a non-bundled plugin is simply not
 // covered, never an error.
-func VerifyOrRestore(pluginRoot, subdir string) (restored bool, err error) {
+func VerifyOrRestore(pluginRoot, subdir string) (restored bool, wantPrefix, gotPrefix string, err error) {
+	// Defensive guard: an empty or "."/".." subdir would make embedDir walk
+	// the whole bundle (every plugin) instead of one plugin, turning a
+	// point-of-use check into a full restore. That can only come from a bad
+	// caller (discovery always passes a real subdir); fail loudly rather
+	// than silently over-reaching.
+	clean := filepath.Clean(subdir)
+	if subdir == "" || clean == "." || clean == ".." || strings.Contains(clean, "/") {
+		return false, "", "", fmt.Errorf("invalid plugin subdir %q", subdir)
+	}
+
 	embedDir := "data/" + subdir
 	walkErr := fs.WalkDir(fsys, embedDir, func(path string, d fs.DirEntry, werr error) error {
 		if werr != nil {
@@ -112,20 +127,42 @@ func VerifyOrRestore(pluginRoot, subdir string) (restored bool, err error) {
 			return rerr
 		}
 		target := filepath.Join(pluginRoot, rel)
+		// Capture the on-disk (pre-restore) sha of THIS file before
+		// reconcileFile may overwrite it, so we can surface the mismatch
+		// prefixes for the first file that differs.
+		var diskSha [32]byte
+		var haveDisk bool
+		if existing, readErr := os.ReadFile(target); readErr == nil {
+			diskSha = sha(existing)
+			haveDisk = true
+		}
 		wrote, rerr := reconcileFile(target, rel, data)
 		if rerr != nil {
 			return rerr
 		}
 		if wrote {
 			restored = true
+			// Record prefixes for the FIRST mismatched file only — enough
+			// for diagnostics; never a path. got is "" when the file was
+			// absent on disk (a missing binary, not a content swap).
+			if wantPrefix == "" {
+				wantPrefix = shaPrefix(sha(data))
+				if haveDisk {
+					gotPrefix = shaPrefix(diskSha)
+				}
+			}
 		}
 		return nil
 	})
 	if walkErr != nil {
-		return restored, walkErr
+		return restored, wantPrefix, gotPrefix, walkErr
 	}
-	return restored, nil
+	return restored, wantPrefix, gotPrefix, nil
 }
+
+// shaPrefix renders the first 12 hex chars (6 bytes) of a sha256 digest —
+// a non-actionable fingerprint for tamper diagnostics.
+func shaPrefix(sum [32]byte) string { return hex.EncodeToString(sum[:6]) }
 
 // reconcileFile writes the genuine embedded content to target when the
 // on-disk content differs, repairing the expected mode on the same-content

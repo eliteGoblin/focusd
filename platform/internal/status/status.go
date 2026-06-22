@@ -83,23 +83,44 @@ type JobStatus struct {
 	TamperCount int `json:"tamper_count,omitempty"`
 }
 
+// SweepFailingFn reports whether the periodic whole-bundle integrity sweep
+// is currently failing (a sweep-failed event inside the lookback window with
+// no subsequent recovery). nil or false => no signal. It is the
+// anti-latent-failure seam (Fix 5): a wedged sweep that could leave a
+// tampered binary unrestored between scheduled runs must show as a degraded
+// status line, not hide behind a green report.
+type SweepFailingFn func() (failing bool)
+
 // Report is the whole platform self-report.
 type Report struct {
 	Mode    string      `json:"mode"` // "user" | "system"
 	Jobs    []JobStatus `json:"jobs"`
 	Overall Verdict     `json:"overall"`
+	// SweepFailing is true when the integrity sweep is currently failing.
+	// It degrades Overall and renders a distinct "integrity sweep: FAILING"
+	// line — defense-in-depth over the point-of-use check.
+	SweepFailing bool `json:"sweep_failing,omitempty"`
 }
 
 // Collect builds the report from the configured jobs, a run-history
 // lookup, and a tamper lookup. Pure and deterministic given its inputs +
 // now, so it is fully unit-testable without a real DB. tamperLookup may be
 // nil (no integrity history available) — every job then reads as before.
-func Collect(mode string, jobs []JobInput, lastRun LastRunFn, tamperLookup TamperLookupFn, now time.Time) Report {
+func Collect(mode string, jobs []JobInput, lastRun LastRunFn, tamperLookup TamperLookupFn, sweepFailing SweepFailingFn, now time.Time) Report {
 	r := Report{Mode: mode, Jobs: make([]JobStatus, 0, len(jobs))}
 	for _, j := range jobs {
 		r.Jobs = append(r.Jobs, jobStatus(j, lastRun, tamperLookup, now))
 	}
+	if sweepFailing != nil {
+		r.SweepFailing = sweepFailing()
+	}
 	r.Overall = overall(r.Jobs)
+	// A failing integrity sweep degrades the whole report even when every
+	// job's last run looks fine: the sweep is the only thing re-verifying
+	// idle/disabled plugins, so its failure is reduced protection coverage.
+	if r.SweepFailing && rankOf(r.Overall) < rankOf(Degraded) {
+		r.Overall = Degraded
+	}
 	return r
 }
 
@@ -182,15 +203,11 @@ func jobVerdict(status string, age AgeBucket) Verdict {
 // All-disabled/empty → Unknown.
 func overall(jobs []JobStatus) Verdict {
 	worst := Verdict("")
-	// Tampered ranks at/above Degraded: a detected-and-repaired binary swap
-	// is at least as serious as a failed run, and must dominate the report
-	// (it can never be hidden behind a clean run). Worst wins.
-	rank := map[Verdict]int{Healthy: 1, Unknown: 2, Unavailable: 3, Degraded: 3, Tampered: 4}
 	for _, j := range jobs {
 		if j.Verdict == Disabled {
 			continue
 		}
-		if rank[j.Verdict] > rank[worst] {
+		if rankOf(j.Verdict) > rankOf(worst) {
 			worst = j.Verdict
 		}
 	}
@@ -203,6 +220,25 @@ func overall(jobs []JobStatus) Verdict {
 		return Degraded
 	}
 	return worst
+}
+
+// rankOf orders verdicts by severity for "worst wins" folding. Tampered
+// ranks at/above Degraded: a detected-and-repaired binary swap is at least
+// as serious as a failed run and must dominate the report (never hidden
+// behind a clean run). An empty verdict ranks lowest.
+func rankOf(v Verdict) int {
+	switch v {
+	case Tampered:
+		return 4
+	case Unavailable, Degraded:
+		return 3
+	case Unknown:
+		return 2
+	case Healthy:
+		return 1
+	default: // "" or Disabled
+		return 0
+	}
 }
 
 // bucketAge classifies an elapsed duration into a coarse recency bucket.

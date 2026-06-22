@@ -36,10 +36,12 @@ import (
 // embedded bundle.
 //
 // VerifyOrRestore(pluginRoot, subdir) reports restored=true if it had to
-// rewrite any file, and a non-nil error if the check itself failed (disk
-// unreadable, etc.) — in which case the runner must NOT exec.
+// rewrite any file, the want/got sha prefixes of the first mismatched file
+// (for the tamper event — never a path), and a non-nil error if the check
+// itself failed (disk unreadable, etc.) — in which case the runner must
+// NOT exec.
 type integrityVerifier interface {
-	VerifyOrRestore(pluginRoot, subdir string) (restored bool, err error)
+	VerifyOrRestore(pluginRoot, subdir string) (restored bool, wantPrefix, gotPrefix string, err error)
 }
 
 // Outcome is the terminal result of a (possibly retried) job execution.
@@ -195,7 +197,7 @@ func (r *Runner) runOnce(ctx context.Context, job Job, p plugin.Discovered, trig
 		dir := filepath.Clean(p.Dir)
 		pluginRoot := filepath.Dir(dir)
 		subdir := filepath.Base(dir)
-		restored, verr := r.verifier.VerifyOrRestore(pluginRoot, subdir)
+		restored, wantPrefix, gotPrefix, verr := r.verifier.VerifyOrRestore(pluginRoot, subdir)
 		if verr != nil {
 			const reason = "plugin integrity check failed; refusing to run possibly-tampered binary"
 			if rerr := r.DB.Runs.RecordError(job.ID, p.Manifest.ID, reason); rerr != nil {
@@ -209,8 +211,9 @@ func (r *Runner) runOnce(ctx context.Context, job Job, p plugin.Discovered, trig
 		if restored {
 			// Tamper detected and repaired: record the security event so
 			// status can never read this job as a plain "ok" again, then
-			// run the GENUINE binary that VerifyOrRestore just put back.
-			if rerr := r.DB.Events.RecordTamperRepaired(job.ID, p.Manifest.ID, "", ""); rerr != nil {
+			// run the GENUINE binary that VerifyOrRestore just put back. The
+			// want/got sha prefixes (never a path) make the event diagnostic.
+			if rerr := r.DB.Events.RecordTamperRepaired(job.ID, p.Manifest.ID, wantPrefix, gotPrefix); rerr != nil {
 				return Outcome{}, rerr
 			}
 		}

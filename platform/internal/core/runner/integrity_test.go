@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/eliteGoblin/focusd/platform/internal/bundle"
@@ -15,14 +16,16 @@ import (
 
 // fakeVerifier is a test integrityVerifier with scripted behaviour.
 type fakeVerifier struct {
-	restored bool
-	err      error
-	calls    int
+	restored   bool
+	wantPrefix string
+	gotPrefix  string
+	err        error
+	calls      int
 }
 
-func (f *fakeVerifier) VerifyOrRestore(pluginRoot, subdir string) (bool, error) {
+func (f *fakeVerifier) VerifyOrRestore(pluginRoot, subdir string) (bool, string, string, error) {
 	f.calls++
-	return f.restored, f.err
+	return f.restored, f.wantPrefix, f.gotPrefix, f.err
 }
 
 // TestRunIntegrityErrorDoesNotExec pins AC: when the point-of-use
@@ -73,7 +76,7 @@ exit 0`)
 // (genuine) binary is then executed.
 func TestRunIntegrityRestoredRecordsTamperAndRuns(t *testing.T) {
 	r := newRunner(t)
-	fv := &fakeVerifier{restored: true}
+	fv := &fakeVerifier{restored: true, wantPrefix: "aabbccddeeff", gotPrefix: "112233445566"}
 	r.WithVerifier(fv)
 
 	p := testutil.ScriptPlugin(t, "ok-plugin", `echo '{"status":"ok"}'
@@ -85,12 +88,17 @@ exit 0`)
 	if out.Status != state.RunStatusOK {
 		t.Fatalf("genuine binary must run after restore, got %+v", out)
 	}
-	// A tamper-repaired event must be recorded.
+	// A tamper-repaired event must be recorded, carrying the sha prefixes
+	// the verifier reported (and never a path).
 	ev, _ := r.DB.Events.Recent(10)
 	foundTamper := false
 	for _, e := range ev {
 		if e.EventType == state.EventTamperRepaired {
 			foundTamper = true
+			if !strings.Contains(e.DetailsJSON, "aabbccddeeff") ||
+				!strings.Contains(e.DetailsJSON, "112233445566") {
+				t.Errorf("tamper event missing sha prefixes: %s", e.DetailsJSON)
+			}
 		}
 	}
 	if !foundTamper {
@@ -107,7 +115,7 @@ exit 0`)
 // fakeVerifier tests don't cover (H1).
 type realBundleVerifier struct{}
 
-func (realBundleVerifier) VerifyOrRestore(pluginRoot, subdir string) (bool, error) {
+func (realBundleVerifier) VerifyOrRestore(pluginRoot, subdir string) (bool, string, string, error) {
 	return bundle.VerifyOrRestore(pluginRoot, subdir)
 }
 

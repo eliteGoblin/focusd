@@ -37,7 +37,7 @@ func TestCollect_VerdictMapping(t *testing.T) {
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			rep := Collect("system", []JobInput{{ID: "j", Enabled: c.enabled}}, c.lastRun, nil, now)
+			rep := Collect("system", []JobInput{{ID: "j", Enabled: c.enabled}}, c.lastRun, nil, nil, now)
 			if got := rep.Jobs[0].Verdict; got != c.want {
 				t.Fatalf("verdict = %q, want %q", got, c.want)
 			}
@@ -49,7 +49,7 @@ func TestCollect_DBErrorIsUnknownNotFatal(t *testing.T) {
 	errFn := func(string) (string, time.Time, bool, error) {
 		return "", time.Time{}, false, errFake
 	}
-	rep := Collect("system", []JobInput{{ID: "j", Enabled: true}}, errFn, nil, now)
+	rep := Collect("system", []JobInput{{ID: "j", Enabled: true}}, errFn, nil, nil, now)
 	if rep.Jobs[0].Verdict != Unknown {
 		t.Fatalf("db error should map to Unknown, got %q", rep.Jobs[0].Verdict)
 	}
@@ -70,14 +70,14 @@ func TestOverall_WorstWinsAndIgnoresDisabled(t *testing.T) {
 		}
 		return "", time.Time{}, false, nil
 	}
-	rep := Collect("system", jobs, lastRun, nil, now)
+	rep := Collect("system", jobs, lastRun, nil, nil, now)
 	if rep.Overall != Degraded {
 		t.Fatalf("overall = %q, want DEGRADED (worst of enabled)", rep.Overall)
 	}
 }
 
 func TestOverall_AllDisabledIsUnknown(t *testing.T) {
-	rep := Collect("user", []JobInput{{ID: "a", Enabled: false}}, runAt("", 0, false), nil, now)
+	rep := Collect("user", []JobInput{{ID: "a", Enabled: false}}, runAt("", 0, false), nil, nil, now)
 	if rep.Overall != Unknown {
 		t.Fatalf("overall = %q, want UNKNOWN", rep.Overall)
 	}
@@ -102,7 +102,7 @@ func TestOverall_UnavailableDegradesNotIgnored(t *testing.T) {
 		}
 		return "", time.Time{}, false, nil
 	}
-	rep := Collect("user", jobs, lastRun, nil, now)
+	rep := Collect("user", jobs, lastRun, nil, nil, now)
 	if rep.Overall != Degraded {
 		t.Fatalf("overall = %q, want DEGRADED (unavailable job must degrade, not be ignored)", rep.Overall)
 	}
@@ -114,14 +114,14 @@ func TestOverall_UnavailableDegradesNotIgnored(t *testing.T) {
 func TestOverall_DisabledVsUnavailable(t *testing.T) {
 	disabledOnly := Collect("user",
 		[]JobInput{{ID: "a", Enabled: false}, {ID: "b", Enabled: false}},
-		runAt("", 0, false), nil, now)
+		runAt("", 0, false), nil, nil, now)
 	if disabledOnly.Overall != Unknown {
 		t.Fatalf("all-disabled overall = %q, want UNKNOWN", disabledOnly.Overall)
 	}
 
 	withUnavailable := Collect("user",
 		[]JobInput{{ID: "a", Enabled: false}, {ID: "b", Enabled: true}},
-		runAt("unavailable", time.Minute, true), nil, now)
+		runAt("unavailable", time.Minute, true), nil, nil, now)
 	if withUnavailable.Overall != Degraded {
 		t.Fatalf("has-unavailable overall = %q, want DEGRADED", withUnavailable.Overall)
 	}
@@ -153,7 +153,7 @@ func TestRender_NoLeak(t *testing.T) {
 	rep := Collect("system", []JobInput{
 		{ID: "dns-block-reconcile", Enabled: true},
 		{ID: "network-block-reconcile", Enabled: true},
-	}, runAt("ok", time.Minute, true), nil, now)
+	}, runAt("ok", time.Minute, true), nil, nil, now)
 
 	for _, render := range []func() string{
 		func() string { var b bytes.Buffer; RenderText(rep, &b, false); return b.String() },
@@ -169,7 +169,7 @@ func TestRender_NoLeak(t *testing.T) {
 }
 
 func TestRenderJSON_Valid(t *testing.T) {
-	rep := Collect("user", []JobInput{{ID: "j", Enabled: true}}, runAt("ok", time.Minute, true), nil, now)
+	rep := Collect("user", []JobInput{{ID: "j", Enabled: true}}, runAt("ok", time.Minute, true), nil, nil, now)
 	var b bytes.Buffer
 	RenderJSON(rep, &b)
 	var back Report
@@ -206,7 +206,7 @@ func TestOverall_HealthyWithDisabledNoFalseDegraded(t *testing.T) {
 		}
 		return "ok", now.Add(-30 * time.Second), true, nil
 	}
-	rep := Collect("system", jobs, lastRun, noTamper, now)
+	rep := Collect("system", jobs, lastRun, noTamper, nil, now)
 	if rep.Overall != Healthy {
 		t.Fatalf("overall = %q, want HEALTHY (disabled job must not degrade)", rep.Overall)
 	}
@@ -222,7 +222,7 @@ func TestTamper_OverOkRunIsTampered(t *testing.T) {
 	tamper := func(string) (time.Time, int, bool) {
 		return now.Add(-time.Minute), 2, true
 	}
-	rep := Collect("system", []JobInput{{ID: "j", Enabled: true}}, lastRun, tamper, now)
+	rep := Collect("system", []JobInput{{ID: "j", Enabled: true}}, lastRun, tamper, nil, now)
 	if rep.Jobs[0].Verdict != Tampered {
 		t.Fatalf("verdict = %q, want TAMPERED (tamper newer than ok run)", rep.Jobs[0].Verdict)
 	}
@@ -242,9 +242,57 @@ func TestTamper_OlderThanCleanRunDoesNotFlip(t *testing.T) {
 	tamper := func(string) (time.Time, int, bool) {
 		return now.Add(-10 * time.Minute), 1, true // tamper 10m ago (older)
 	}
-	rep := Collect("system", []JobInput{{ID: "j", Enabled: true}}, lastRun, tamper, now)
+	rep := Collect("system", []JobInput{{ID: "j", Enabled: true}}, lastRun, tamper, nil, now)
 	if rep.Jobs[0].Verdict != Healthy {
 		t.Fatalf("verdict = %q, want HEALTHY (tamper older than clean run)", rep.Jobs[0].Verdict)
+	}
+}
+
+// TestSweepFailing_DegradesAndRenders is Fix 5 (anti-latent-failure): when
+// the integrity sweep is failing, an otherwise all-healthy report must read
+// DEGRADED and render a distinct "integrity sweep: FAILING" line — a wedged
+// sweep can no longer hide behind a green status.
+func TestSweepFailing_DegradesAndRenders(t *testing.T) {
+	lastRun := runAt("ok", 30*time.Second, true) // every job healthy
+	failing := func() bool { return true }
+	rep := Collect("system", []JobInput{{ID: "j", Enabled: true}}, lastRun, nil, failing, now)
+
+	if !rep.SweepFailing {
+		t.Fatal("report should mark SweepFailing")
+	}
+	if rep.Overall != Degraded {
+		t.Fatalf("overall = %q, want DEGRADED (failing sweep degrades a healthy report)", rep.Overall)
+	}
+	var b bytes.Buffer
+	RenderText(rep, &b, false)
+	if !strings.Contains(b.String(), "integrity sweep") || !strings.Contains(b.String(), "FAILING") {
+		t.Errorf("rendered text missing the failing-sweep line:\n%s", b.String())
+	}
+}
+
+// TestSweepFailing_FalseIsNoSignal: a non-failing sweep leaves the report
+// untouched (no field, no degrade, no line).
+func TestSweepFailing_FalseIsNoSignal(t *testing.T) {
+	lastRun := runAt("ok", 30*time.Second, true)
+	ok := func() bool { return false }
+	rep := Collect("system", []JobInput{{ID: "j", Enabled: true}}, lastRun, nil, ok, now)
+	if rep.SweepFailing {
+		t.Error("a non-failing sweep must not set SweepFailing")
+	}
+	if rep.Overall != Healthy {
+		t.Fatalf("overall = %q, want HEALTHY", rep.Overall)
+	}
+}
+
+// TestSweepFailing_DoesNotMaskTampered: a failing sweep degrades, but must
+// not down-rank a more-severe Tampered verdict.
+func TestSweepFailing_DoesNotMaskTampered(t *testing.T) {
+	lastRun := runAt("ok", 5*time.Minute, true)
+	tamper := func(string) (time.Time, int, bool) { return now.Add(-time.Minute), 1, true }
+	failing := func() bool { return true }
+	rep := Collect("system", []JobInput{{ID: "j", Enabled: true}}, lastRun, tamper, failing, now)
+	if rep.Overall != Tampered {
+		t.Fatalf("overall = %q, want TAMPERED (must outrank a failing sweep)", rep.Overall)
 	}
 }
 
@@ -255,7 +303,7 @@ func TestTamper_OutsideWindowIgnored(t *testing.T) {
 	tamper := func(string) (time.Time, int, bool) {
 		return now.Add(-25 * time.Hour), 1, true // >24h ago
 	}
-	rep := Collect("system", []JobInput{{ID: "j", Enabled: true}}, lastRun, tamper, now)
+	rep := Collect("system", []JobInput{{ID: "j", Enabled: true}}, lastRun, tamper, nil, now)
 	if rep.Jobs[0].Verdict != Healthy {
 		t.Fatalf("verdict = %q, want HEALTHY (tamper outside window)", rep.Jobs[0].Verdict)
 	}

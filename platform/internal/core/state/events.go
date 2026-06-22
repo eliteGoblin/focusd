@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"time"
 )
 
@@ -100,6 +101,17 @@ func (r *EventRepo) RecordIntegrityCheckFailed(jobID, pluginID, reason string) e
 		"plugin integrity check failed; did not run", string(details))
 }
 
+// escapeLike escapes the SQL LIKE metacharacters (\, %, _) in s using `\`
+// as the escape character, so an arbitrary jobID is matched literally
+// rather than as a wildcard pattern. The backslash itself is escaped first
+// so it isn't doubled by the later replacements.
+func escapeLike(s string) string {
+	s = strings.ReplaceAll(s, `\`, `\\`)
+	s = strings.ReplaceAll(s, `%`, `\%`)
+	s = strings.ReplaceAll(s, `_`, `\_`)
+	return s
+}
+
 // TamperSince returns, for one job, the time of its most-recent tamper-
 // repaired event within `window` (counting back from now) and how many
 // such events fell in that window. found=false means no tamper event in
@@ -114,13 +126,17 @@ func (r *EventRepo) TamperSince(jobID string, window time.Duration) (latest time
 	// anchored by its closing quote (so "j1" never matches a "j10" event),
 	// and the key is anchored to a JSON object boundary ({ or ,) so a
 	// future key like "old_job_id" can never cross-match.
-	val := `"job_id":"` + jobID + `"`
+	//
+	// A jobID containing LIKE metacharacters (%, _, \) would otherwise be
+	// treated as a wildcard and over-match other jobs' events. Escape them
+	// and declare an ESCAPE char so the value is matched literally.
+	val := `"job_id":"` + escapeLike(jobID) + `"`
 	openPat := `%{` + val + `%`
 	commaPat := `%,` + val + `%`
 	rows, err := r.db.Query(
 		`SELECT timestamp FROM platform_events
          WHERE event_type=? AND timestamp>=?
-           AND (details_json LIKE ? OR details_json LIKE ?)
+           AND (details_json LIKE ? ESCAPE '\' OR details_json LIKE ? ESCAPE '\')
          ORDER BY timestamp DESC`,
 		EventTamperRepaired, cutoff, openPat, commaPat)
 	if err != nil {
@@ -132,14 +148,53 @@ func (r *EventRepo) TamperSince(jobID string, window time.Duration) (latest time
 		if err := rows.Scan(&ts); err != nil {
 			return time.Time{}, 0, false, err
 		}
+		// Only count a row once its timestamp parses: count and found must
+		// stay consistent. A row whose ts is unparseable is skipped entirely
+		// (it can't set latest), so it must not inflate count either —
+		// otherwise the caller could see found=false with count>0.
+		t, perr := time.Parse(time.RFC3339Nano, ts)
+		if perr != nil {
+			continue
+		}
 		count++
 		if !found {
-			t, perr := time.Parse(time.RFC3339Nano, ts)
-			if perr == nil {
-				latest = t
-				found = true
-			}
+			latest = t
+			found = true
 		}
 	}
 	return latest, count, found, rows.Err()
+}
+
+// SweepFailingSince reports whether the periodic whole-bundle integrity
+// sweep is currently FAILING: it returns the time of the most-recent
+// integrity_sweep_failed event within `window`, found=true if any.
+//
+// A healthy sweep runs @every 1m and records NO event, so a recovered
+// sweep simply stops emitting failures and the last failure ages out of
+// the window — "no subsequent success" is therefore the absence of a fresh
+// failure, with no separate success event needed. This is the
+// anti-latent-failure signal (Fix 5): a wedged sweep that leaves a tampered
+// binary unrestored between scheduled runs surfaces as a degraded status
+// line instead of hiding behind green.
+func (r *EventRepo) SweepFailingSince(window time.Duration) (latest time.Time, found bool, err error) {
+	cutoff := time.Now().UTC().Add(-window).Format(time.RFC3339Nano)
+	row := r.db.QueryRow(
+		`SELECT timestamp FROM platform_events
+         WHERE event_type=? AND timestamp>=?
+         ORDER BY timestamp DESC LIMIT 1`,
+		EventIntegritySweepFailed, cutoff)
+	var ts string
+	switch err := row.Scan(&ts); {
+	case err == sql.ErrNoRows:
+		return time.Time{}, false, nil
+	case err != nil:
+		return time.Time{}, false, fmt.Errorf("sweep failing since: %w", err)
+	}
+	t, perr := time.Parse(time.RFC3339Nano, ts)
+	if perr != nil {
+		// A row exists but its timestamp is unparseable: the sweep DID fail
+		// recently; surface it with a zero time rather than dropping it.
+		return time.Time{}, true, nil
+	}
+	return t, true, nil
 }
