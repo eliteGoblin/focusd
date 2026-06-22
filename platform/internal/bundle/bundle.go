@@ -98,17 +98,27 @@ func ExtractTo(pluginRoot string) (extracted []string, err error) {
 // returns restored=false, "", "", nil — a non-bundled plugin is simply not
 // covered, never an error.
 func VerifyOrRestore(pluginRoot, subdir string) (restored bool, wantPrefix, gotPrefix string, err error) {
-	// Defensive guard: an empty or "."/".." subdir would make embedDir walk
-	// the whole bundle (every plugin) instead of one plugin, turning a
-	// point-of-use check into a full restore. That can only come from a bad
-	// caller (discovery always passes a real subdir); fail loudly rather
-	// than silently over-reaching.
+	// Defensive guard: an empty, "."/"..", or nested/path-like subdir would
+	// make embedDir walk the whole bundle (every plugin) instead of one
+	// plugin, turning a point-of-use check into a full restore. That can only
+	// come from a bad caller (discovery always passes a real subdir); fail
+	// loudly rather than silently over-reaching.
+	//
+	// Validate the CLEANED value and require a single path element. Checking
+	// the cleaned value (not raw subdir) closes "./x" → "x" style slips and
+	// is portable: on Windows filepath.Clean("a/b") yields "a\\b" (no '/'), so
+	// a raw strings.Contains(clean, "/") would miss it — hence we test BOTH
+	// '/' and os.PathSeparator, and confirm clean == filepath.Base(clean).
 	clean := filepath.Clean(subdir)
-	if subdir == "" || clean == "." || clean == ".." || strings.Contains(clean, "/") {
+	if clean == "" || clean == "." || clean == ".." ||
+		strings.ContainsRune(clean, '/') || strings.ContainsRune(clean, os.PathSeparator) ||
+		clean != filepath.Base(clean) {
 		return false, "", "", fmt.Errorf("invalid plugin subdir %q", subdir)
 	}
 
-	embedDir := "data/" + subdir
+	// Build the embed path from the validated single-element name. The embed
+	// FS always uses forward slashes regardless of host OS.
+	embedDir := "data/" + clean
 	walkErr := fs.WalkDir(fsys, embedDir, func(path string, d fs.DirEntry, werr error) error {
 		if werr != nil {
 			// Unknown subdir (not in the bundle): nothing to verify.

@@ -159,9 +159,12 @@ func TestVerifyOrRestore_UnknownSubdir(t *testing.T) {
 }
 
 // TestVerifyOrRestore_GuardsEmptyOrDotSubdir is Fix 4: a subdir that would
-// resolve to the whole bundle ("" or "." or ".." or one containing a path
-// separator) must be rejected with an error, never silently walked — a
-// point-of-use check must scope to exactly one plugin.
+// resolve to the whole bundle ("" or "." or ".." or one that is not a single
+// path element) must be rejected with an error, never silently walked — a
+// point-of-use check must scope to exactly one plugin. The guard validates
+// the CLEANED value (so "./x" → "x" is handled, see below) and checks both
+// '/' and the host os.PathSeparator. A backslash is a path separator only on
+// Windows, so "a\\b" is asserted host-conditionally further down.
 func TestVerifyOrRestore_GuardsEmptyOrDotSubdir(t *testing.T) {
 	root := t.TempDir()
 	for _, bad := range []string{"", ".", "..", "a/b", "../x"} {
@@ -172,5 +175,33 @@ func TestVerifyOrRestore_GuardsEmptyOrDotSubdir(t *testing.T) {
 		if restored {
 			t.Errorf("subdir %q must not restore anything", bad)
 		}
+	}
+	// A literal backslash is a path separator (nested path) ONLY on Windows;
+	// on Unix it is a legal single-element filename. Assert the platform's
+	// actual behaviour via filepath: if Base() differs from the input, the
+	// guard must reject it.
+	const backslash = `a\b`
+	wantReject := backslash != filepath.Base(backslash)
+	_, _, _, berr := VerifyOrRestore(root, backslash)
+	if wantReject && berr == nil {
+		t.Errorf("subdir %q must be rejected on this OS, got no error", backslash)
+	}
+	if !wantReject && berr != nil {
+		t.Errorf("subdir %q is a valid single element on this OS, got error: %v", backslash, berr)
+	}
+	// "./x" cleans to a single element "x" but, being a non-existent plugin,
+	// must be treated as an unknown (no-op) subdir — i.e. it passes the guard
+	// (no error) yet restores nothing. This proves the guard uses the cleaned
+	// value rather than rejecting on the raw "./" prefix.
+	restored, _, _, err := VerifyOrRestore(root, "./x")
+	if err != nil {
+		t.Errorf(`"./x" should clean to a valid single element, got error: %v`, err)
+	}
+	if restored {
+		t.Error(`"./x" is not a real plugin; nothing should be restored`)
+	}
+	// A valid single-element name passes the guard (unknown bundle ⇒ no-op).
+	if _, _, _, err := VerifyOrRestore(root, "kill-steam"); err != nil {
+		t.Errorf("a valid single-element subdir must be accepted, got: %v", err)
 	}
 }

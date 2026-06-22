@@ -71,6 +71,63 @@ exit 0`)
 	}
 }
 
+// TestRunIntegrityErrorTerminalNoInTickRetry pins Fix 2: a verify error on a
+// job with Retry>0 must record EXACTLY ONE error run + ONE check-failed event
+// and NOT exec — the integrity-verify error is terminal for this tick (retry
+// is the NEXT scheduled tick). Without the terminal marker the retry loop
+// would re-run the verifier Retry+1 times, spamming runs/events on a
+// transient FS fault.
+func TestRunIntegrityErrorTerminalNoInTickRetry(t *testing.T) {
+	r := newRunner(t)
+	fv := &fakeVerifier{err: errors.New("disk read failed")}
+	r.WithVerifier(fv)
+
+	p := testutil.ScriptPlugin(t, "ok-plugin", `echo '{"status":"ok"}'
+exit 0`)
+	const retry = 3
+	out, err := r.Run(context.Background(), Job{ID: "j1", Retry: retry}, p, "scheduler")
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if out.Status != state.RunStatusError {
+		t.Fatalf("verify error must yield error status, got %+v", out)
+	}
+	// The verifier must have been consulted EXACTLY once — no in-tick retries.
+	if fv.calls != 1 {
+		t.Errorf("verifier called %d times, want exactly 1 (no in-tick retry)", fv.calls)
+	}
+	// Exactly ONE error run recorded (not Retry+1).
+	hist, herr := r.DB.Runs.History("j1", 10)
+	if herr != nil {
+		t.Fatalf("History: %v", herr)
+	}
+	if len(hist) != 1 {
+		t.Errorf("expected exactly 1 recorded run, got %d", len(hist))
+	}
+	for _, h := range hist {
+		if h.Status != state.RunStatusError {
+			t.Errorf("recorded run status = %q, want error", h.Status)
+		}
+		if h.StdoutJSON != "" {
+			t.Error("binary must not have run (no stdout)")
+		}
+	}
+	// Exactly ONE plugin_integrity_check_failed event (not Retry+1).
+	ev, eerr := r.DB.Events.Recent(50)
+	if eerr != nil {
+		t.Fatalf("Recent: %v", eerr)
+	}
+	failedEvents := 0
+	for _, e := range ev {
+		if e.EventType == state.EventIntegrityCheckFailed {
+			failedEvents++
+		}
+	}
+	if failedEvents != 1 {
+		t.Errorf("expected exactly 1 plugin_integrity_check_failed event, got %d", failedEvents)
+	}
+}
+
 // TestRunIntegrityRestoredRecordsTamperAndRuns pins AC-1/AC-2: when the
 // verify restores a tampered binary, a tamper event is recorded AND the
 // (genuine) binary is then executed.

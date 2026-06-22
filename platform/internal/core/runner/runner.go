@@ -56,6 +56,12 @@ type Outcome struct {
 	Attempts   int
 	DurationMS int64
 	Result     plugin.Result
+	// terminal marks an outcome that must NOT be retried within the current
+	// tick even though its Status (e.g. RunStatusError) would normally be
+	// retryable. Set by the point-of-use integrity-verify-error path so a
+	// transient FS error records exactly one error run + one event and defers
+	// to the NEXT scheduled tick — never spamming in-tick retries (ADR-0019).
+	terminal bool
 }
 
 // Runner executes plugins and persists run history.
@@ -140,10 +146,13 @@ func (r *Runner) Run(ctx context.Context, job Job, p plugin.Discovered, triggere
 		out.Attempts = attempt
 		last = out
 		// Terminal: success, a controlled failure (exit 1 is a real job
-		// answer), or unavailable (no console user — retrying inside this
-		// tick won't help; the next scheduled tick retries). Only
-		// error/timeout retry.
-		if out.Status == state.RunStatusOK ||
+		// answer), unavailable (no console user — retrying inside this tick
+		// won't help; the next scheduled tick retries), or an outcome the
+		// callee explicitly marked terminal (integrity-verify error — one
+		// error run + one event per tick, retry NEXT tick). Only
+		// error/timeout otherwise retry.
+		if out.terminal ||
+			out.Status == state.RunStatusOK ||
 			out.Status == state.RunStatusFailed ||
 			out.Status == state.RunStatusUnavailable {
 			break
@@ -206,7 +215,11 @@ func (r *Runner) runOnce(ctx context.Context, job Job, p plugin.Discovered, trig
 			if rerr := r.DB.Events.RecordIntegrityCheckFailed(job.ID, p.Manifest.ID, "integrity verify errored"); rerr != nil {
 				return Outcome{}, rerr
 			}
-			return Outcome{Status: state.RunStatusError, Message: reason, Err: verr.Error()}, nil
+			// terminal=true: a verify error already recorded exactly one error
+			// run + one event for this tick. Mark it terminal so Run does NOT
+			// loop and re-record on a job with Retry>0 — the retry is the NEXT
+			// scheduled tick, not an in-tick re-check of a transient FS fault.
+			return Outcome{Status: state.RunStatusError, Message: reason, Err: verr.Error(), terminal: true}, nil
 		}
 		if restored {
 			// Tamper detected and repaired: record the security event so
