@@ -14,7 +14,8 @@
 > Current FEATURE 15 ↔ TC-06 (tamper→restore), TC-07 (no false-green),
 > TC-08 (no false-degraded); the F15 config-integrity follow-up ↔ TC-10;
 > **FEATURE 17 ↔ TC-14 (workdir delete), TC-18 (combinations), TC-19 (no
-> generation pileup); FEATURE 18 ↔ TC-16 (Login-Item off), TC-17 (offline
+> generation pileup), TC-21 (post-recovery convergence — open follow-up);
+> FEATURE 18 ↔ TC-16 (Login-Item off), TC-17 (offline
 > total-teardown, supersedes TC-05), TC-18; FEATURE 19 ↔ TC-20 (no tells).**
 >
 > **Redaction (non-negotiable).** Verify as a developer, but NEVER print the
@@ -171,7 +172,18 @@ mesh; macOS gives no API to re-enable), (d) **kill all processes**, plus their
 - **Check:** delete the workdir → daemon falls back to the **baked platform
   version**, re-fetches, and brings protection back within a bounded time; **no
   permanent BLOCK**.
-- **Expect:** auto-recovers, no permanent BLOCK. **Status: ⏳ pending (F17).**
+- **Expect:** auto-recovers, no permanent BLOCK. **Status: ✅ PASS** (live +
+  peer-reviewed, daemon-v0.5.6 / platform v0.16.4, 2026-06-29): deleting the
+  live workdir took the platform down with `desired=none` (~28s), then the baked
+  fallback version was adopted (`desired=v0.16.3`), re-fetched + verified, and the
+  platform was back up (~56s) — no permanent BLOCK. go-reviewer confirmed via code
+  that the fallback-adopt + workdir-recreate path is genuine (not a surface green).
+- **Methodology lesson — gate destructive e2e steps on a positive existence check
+  of the EXACT target.** The FIRST attempt was a **false-pass**: a split-on-space
+  bug truncated the target path so the delete missed entirely and "recovery"
+  proved nothing. It was caught by a `test -d` existence gate on the exact target
+  before the real run. Any destructive teardown step must first assert the precise
+  thing it intends to destroy actually exists, or a no-op masquerades as a pass.
 
 ### TC-15 🟠 Recover from binary delete (single vector — kept honest)  `[reframed 2026-06-29]`
 - **Note:** this is the OLD recovery test. It passes because workdir state
@@ -212,7 +224,13 @@ mesh; macOS gives no API to re-enable), (d) **kill all processes**, plus their
 - **Check:** after repeated installs/recoveries there is **exactly one** platform
   process and **one** live supervisor generation; superseded generations
   (workdirs / disguised entries) are **cleaned up**, count does not grow.
-- **Expect:** one generation, one platform, no pileup. **Status: ⏳ pending (F17).**
+- **Expect:** one generation, one platform, no pileup. **Status: ✅ PASS** (live,
+  daemon-v0.5.6 / platform v0.16.4, 2026-06-29): a fresh F17 install logged
+  "retired 4 prior generation(s)" and converged to exactly **1** platform process.
+  Install-time generation cleanup (signature-gated bootout + kill + remove) works.
+- **Scope limit (see TC-21):** install-time cleanup only retires generations whose
+  binary still verifies. A generation whose **workdir was wiped** (binary deleted)
+  is NOT retired by install cleanup — that residual gap is tracked as **TC-21**.
 
 ### TC-20 🟡 Disguise — no obvious tells — *F19*  `[found 2026-06-29]`
 - **Origin:** the owner spotted the install at a glance: `ps aux | grep mesh`
@@ -224,6 +242,35 @@ mesh; macOS gives no API to re-enable), (d) **kill all processes**, plus their
   entries are **not** three near-identical hex-suffixed names (varied/plausible,
   don't cluster); stale records from prior generations are cleaned.
 - **Expect:** no at-a-glance tells. **Status: ⏳ pending (F19).**
+
+### TC-21 🟡 Post-recovery generation convergence — no invisible zombies / orphan platforms — *F17 follow-up*  `[found 2026-06-29 — FAILING]`
+- **Origin (peer-reviewed, confirmed real):** after **workdir-delete/recovery
+  cycles**, orphan generations accumulate that F17's install-time cleanup **cannot
+  retire**. Two reinforcing mechanisms (go-reviewer, with code evidence): (1) the
+  generation discovery step requires each supervisor entry's binary to pass
+  signature verification, but a generation whose workdir was wiped has a **deleted
+  binary** → the read fails → that generation is **silently skipped** and its
+  supervisor entry + supervised platform persist **invisibly**; (2) deleting a
+  workdir does **not** kill the already-running platform process (binary unlinked
+  but process alive), and the daemon intentionally leaves the platform running on
+  shutdown (protection continuity) — so each singleton-lock handover starts a
+  **new** platform and leaves the old one → unbounded accumulation. **Observed
+  live:** cleanup logged "retired 1" while **2 live generations / 3 supervised
+  platforms** remained; only a manual clean-slate reached 1.
+- **Honest impact:** protection stays **HEALTHY** (more enforcers, not fewer) — this
+  is a **hygiene/observability** gap (multi-platform, multi-generation clutter and a
+  visible tell), **not** a protection bypass. Manifests **only** after
+  teardown/recovery cycles, not in steady state.
+- **Check:** after workdir-delete/recovery cycles, there is **exactly one** platform
+  process and **one** live generation; generations whose binary was deleted are
+  retired (entry removed + their platform process ended), not left as invisible
+  zombies.
+- **Fix direction (actionable):** treat supervisor entries pointing at **deleted**
+  binaries as **dead generations** (don't require signature verification when the
+  binary is absent) and have the retire step boot them out + remove their entry +
+  end their orphaned platform process, gated by the existing safe-to-remove check.
+- **Expect:** converges to one generation / one platform after recovery cycles.
+  **Status: 🟡 FAIL (open until the F17 follow-up ships).**
 
 ### TC-10 🟠 Plugin **config**/policy integrity  (follow-up / icebox)
 - **Check (future):** plugin configs (blocklists, target apps, job schedule)
@@ -267,3 +314,4 @@ mesh; macOS gives no API to re-enable), (d) **kill all processes**, plus their
 | 2026-06-22 | platform v0.16.0→v0.16.1 (F15) | TC-01, TC-02, TC-03, TC-06, TC-07, TC-08, TC-11 | TC-05 | F15 plugin-integrity live-verified: tamper auto-restored (~6s) + surfaced in status (`tampered → repaired Nx`); deploy verified; watchdog recovery (TC-05) still open |
 | 2026-06-22 | platform v0.16.2 (F16) | TC-11, TC-12, TC-13 | TC-05 (deferred) | F16 whitebox logging live-verified: steady-state log clean (TC-12) + tamper logged as `WARN plugin tamper repaired` independent of status (TC-13); watchdog (TC-05) deferred per owner |
 | 2026-06-22 | platform v0.16.3 (status KISS) | TC-07, TC-08, TC-11 | — | status = current-state: recovered tamper → `ok`/OVERALL HEALTHY (no `tampered` verdict); tamper only in log/events; watchdog manually restored (`present`, never degrades). TC-05 still deferred (FDA) |
+| 2026-06-29 | daemon-v0.5.6 (F17) + platform v0.16.4 (kill-steam Dota2 fix, #71) | TC-14, TC-19 | TC-21 (new) | F17 live-verified: workdir-delete recovered via baked fallback (down ~28s `desired=none` → adopt v0.16.3 → up ~56s, no permanent BLOCK; TC-14, go-reviewer-confirmed); fresh install "retired 4 prior generation(s)" → 1 platform (TC-19). Final: single generation, 1 platform, desired=good=v0.16.4, OVERALL HEALTHY. First TC-14 attempt was a false-pass (split-on-space path truncation → `rm` missed) — caught by a `test -d` gate; methodology lesson recorded on TC-14. NEW peer-reviewed bug → TC-21 (FAIL): post-recovery generations with deleted binaries are invisible to install cleanup + orphan platforms accumulate (hygiene gap, protection stays HEALTHY) |
