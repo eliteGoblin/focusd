@@ -128,7 +128,10 @@ works **without Full Disk Access**, and can rebuild the daemon **offline**.
   visible command line again (the rebuild/watchdog path does not yet use FEATURE 19's
   env-carried hiding) — so a `grep`-for-mesh briefly works again until the next clean
   install clears it. Hygiene/friction grade, not a bypass; tracked as the open
-  follow-up in [FEATURE 19](19-deeper-disguise.md) (e2e TC-23).
+  follow-up in [FEATURE 19](19-deeper-disguise.md) (e2e TC-23, **bug #83**).
+  **Confirmed with decisive evidence** (daemon-v0.5.10, 2026-06-29): a direct read
+  of the rebuilt plists shows the pre-F19 (visible-role) format, not test-mode and
+  not a stale backup — **root cause not yet pinned**.
 - **Reverses an accepted decision.** This deliberately reverses ADR-0016's choice
   of cron — recorded in ADR-0020, with the live FDA evidence as the rationale. It
   also refines the earlier "same daemon binary / second copy" framing: the

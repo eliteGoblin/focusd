@@ -5,9 +5,11 @@
   the supervisor labels were given distinct non-clustering naming styles.
   **Live-verified (TC-20):** e2e-verifier confirmed `ps` for the mesh marker + role
   flags returns **0** hits and the labels do not cluster as a near-identical
-  triplet. **Residual:** the stale-records cleanup overlaps FEATURE 17's generation
-  cleanup, which still leaves stale on-disk workdir/state files after recovery
-  cycles (e2e TC-21, open).
+  triplet. **Residual CLOSED:** the stale-records cleanup overlap with FEATURE 17's
+  generation cleanup is resolved by the orphan-sweep (daemon-v0.5.8) — e2e TC-21
+  PASS (1 state.db + 1 platform after churn, re-confirmed daemon-v0.5.10).
+  **One open follow-up remains** — the watchdog/rebuild path re-leaks the mesh role
+  on argv (e2e TC-23, bug #83; see below).
 - **Builds on:** [FEATURE 10](10-mesh-label-decorrelation.md) (decorrelated mesh
   labels) · [FEATURE 14](14-mesh-argv-leak-minimization.md) (argv leak
   minimization — this extends that work). Picks up the **iceboxed stale-records
@@ -89,7 +91,14 @@ env-based setup — so after an out-of-band recovery the rebuilt mesh shows
   FEATURE 19 env-carried plist path that `daemon install` already uses, so every
   rebuild path is leak-free by construction.
 - **Maps to:** e2e **TC-23** (after companion/watchdog rebuild, `ps | grep mesh`
-  returns 0 — FAIL until fixed).
+  returns 0 — FAIL until fixed), **bug #83**.
+- **Confirmed with decisive evidence** `[daemon-v0.5.10, 2026-06-29]`: a direct
+  read of the rebuilt plists shows mesh plists with the visible `--mesh` role
+  (count = 2) and **zero** carrying the F19 env marker — the rebuild emits
+  **pre-F19-format** plists. Two theories were **refuted**: it is **not** test-mode
+  (the prod daemon rejects the test flag; the release was built without the e2e tag)
+  and **not** a stale backup (the backup already carries F19). **Root cause not yet
+  pinned** — tracked under #83.
 
 ## Honest limitations
 
