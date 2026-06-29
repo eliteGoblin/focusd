@@ -23,14 +23,17 @@ import (
 )
 
 // StaleThreshold is how long the daemon heartbeat may go untouched before the
-// companion treats the daemon as DOWN and restores it. Deliberately generous
-// (minutes, not seconds): the daemon touches the heartbeat every reconcile tick
-// (~2s), so a brief self-update bounce — where the mesh restarts and the
-// heartbeat pauses for a few seconds — must NEVER trip a false recovery. A false
-// positive is harmless anyway: recovery routes through the idempotent
-// `daemon watchdog`, which no-ops on a complete mesh, so it costs at most one
-// harmless run. We bias toward NOT fighting a healthy install.
-const StaleThreshold = 3 * time.Minute
+// companion treats the daemon as DOWN and restores it. 30s gives a ~1-minute
+// worst-case recovery (this threshold + one ~30s companion StartInterval pass)
+// instead of the old ~3-4 minutes. It stays well above the daemon's ~2s
+// heartbeat cadence, so a brief self-update bounce — where the mesh restarts and
+// the heartbeat pauses for a few seconds — still does NOT trip a false recovery.
+// A false positive is harmless regardless: recovery routes through the
+// idempotent `daemon watchdog`, which no-ops on a complete mesh (its meshComplete
+// check is the authority), so even during a slow self-update a false trigger
+// costs at most one harmless run. We still bias toward NOT fighting a healthy
+// install.
+const StaleThreshold = 30 * time.Second
 
 // DecideStale reports whether the heartbeat (last touched at mtime) is stale as
 // of now — the daemon has not checked in within StaleThreshold. A zero/old mtime

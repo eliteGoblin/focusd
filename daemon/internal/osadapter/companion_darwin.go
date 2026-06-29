@@ -27,12 +27,15 @@ import (
 // NOT mesh-signed, so it is invisible to FindCurrentInstall + DiscoverAllGenerations
 // and can never be retired/swept by FEATURE 17/19 cleanup (see CompanionPlist).
 
-// companionInterval is the companion launchd StartInterval (seconds). ~60s: the
-// companion is a slow BACKSTOP, not a fast self-heal — the daemon's in-mesh
+// companionInterval is the companion launchd StartInterval (seconds). ~30s: the
+// companion is still a BACKSTOP, not a fast self-heal — the daemon's in-mesh
 // reconcile already heals fast; the companion only matters once the whole daemon
-// mesh is DOWN, where minutes-scale recovery is acceptable. RunAtLoad +
-// StartInterval (a one-shot pass per interval), NOT KeepAlive.
-const companionInterval = 60
+// mesh is DOWN. Paired with the 30s StaleThreshold this gives a ~1-minute
+// worst-case recovery (was ~3-4 min). Restore routes through the idempotent
+// `daemon watchdog`, which no-ops a healthy mesh, so the tighter cadence cannot
+// fight a slow self-update. RunAtLoad + StartInterval (a one-shot pass per
+// interval), NOT KeepAlive.
+const companionInterval = 30
 
 // companionMinBytes is the floor on the embedded companion binary before it is
 // written + loaded. The in-repo embed is a tiny PLACEHOLDER (see
