@@ -78,15 +78,15 @@ func (r *Reconciler) Detect() bool {
 	return err == nil
 }
 
-// Reconcile is the full pass: detect, then if found, sweep every known
-// Steam artifact (system + per-user). Idempotent — noop when Steam is
-// not installed; total removal when it is.
+// Reconcile is the full pass: sweep every known Steam artifact (system +
+// per-user) EVERY run, regardless of whether Steam.app is present. Gating on
+// Steam.app let the game data survive — e.g. Steam.app removed but the library
+// `~/Library/Application Support/Steam/steamapps/common/dota 2 beta` (Dota 2,
+// tens of GB) still on disk and re-launchable. Each removal is os.Stat-gated,
+// so a clean steady-state pass is cheap and idempotent; a pass with leftover
+// Dota 2 / Steam data removes it. (Detected is kept as informational only.)
 func (r *Reconciler) Reconcile() Outcome {
 	o := Outcome{Detected: r.Detect()}
-	if !o.Detected {
-		o.Reason = "noop (no Steam.app)"
-		return o
-	}
 
 	for _, t := range r.systemTargets() {
 		r.tryRemove(t.Path, t.What, &o)
@@ -111,7 +111,7 @@ func (r *Reconciler) Reconcile() Outcome {
 
 	switch len(o.Removed) {
 	case 0:
-		o.Reason = "detected but nothing to remove (likely already partial)"
+		o.Reason = "clean (no Steam/Dota artifacts present)"
 	default:
 		o.Reason = fmt.Sprintf("removed %d artifact(s)", len(o.Removed))
 	}
@@ -179,6 +179,9 @@ func (r *Reconciler) perUserTargets() []perUserTarget {
 func (r *Reconciler) findUserHomes() ([]string, error) {
 	entries, err := os.ReadDir(r.usersDir())
 	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, nil // no users dir (e.g. non-macOS / CI) → nothing to sweep
+		}
 		return nil, err
 	}
 	var homes []string
