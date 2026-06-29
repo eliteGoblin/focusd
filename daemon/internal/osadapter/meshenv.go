@@ -50,6 +50,9 @@ func decodeMeshEnv(val string) []string {
 		return []string{"ensure"}
 	}
 	if role := strings.TrimPrefix(val, meshEnvRunPrefix); role != val && role != "" {
+		if role != string(RoleA) && role != string(RoleB) {
+			return nil
+		}
 		return []string{"run", "--r", role, "--mesh"}
 	}
 	return nil

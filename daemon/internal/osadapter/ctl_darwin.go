@@ -517,6 +517,12 @@ func RetireOtherGenerations(m mode.Mode, keepBinaryPath string) (int, error) {
 		c.bootout, os.Remove, pkillBinary, os.RemoveAll), nil
 }
 
+// minBinPathLen is the floor on a binary path before retirement will pkill -f
+// it. Any real disguised install path is far longer; a short value like "/"
+// (a corrupt/dead-gen ProgramArguments[0]) must never expand into a broad
+// `pkill -f /` that reaps unrelated processes.
+const minBinPathLen = 20 // shorter than any real disguised install path
+
 // retireGenerations is the seam-injected core of RetireOtherGenerations, split
 // out so the teardown ordering + the os.RemoveAll path-sanity gating are unit-
 // tested with fakes (no real launchd / FS deletion). bootout/removePlist/
@@ -548,7 +554,11 @@ func retireGenerations(
 				_ = removePlist(plistPaths[i])
 			}
 		}
-		if bin != "" {
+		// GUARD: never pkill -f a short path. A dead-generation plist whose
+		// ProgramArguments[0] is "/" (or any short root-ish path) must NOT
+		// expand into `pkill -f /` and reap unrelated processes. Real disguised
+		// install paths are far longer than minBinPathLen.
+		if len(bin) > minBinPathLen {
 			killBin(bin) // best-effort; no surviving daemon shares this path
 		}
 		// GUARD: only RemoveAll a workdir that is strictly under the mode's

@@ -449,6 +449,45 @@ func TestRetireGenerationsRetiresDeadZombies(t *testing.T) {
 	}
 }
 
+// TestRetireGenerationsSkipsPkillOnShortPath: a dead-generation plist whose
+// ProgramArguments[0] is a short root-ish path (e.g. "/") must NOT expand into
+// a broad `pkill -f /` that reaps unrelated processes. The generation is still
+// booted out + plists removed, but killBin is never called for the short path.
+func TestRetireGenerationsSkipsPkillOnShortPath(t *testing.T) {
+	root := t.TempDir()
+	keepWorkdir := filepath.Join(root, ".keep")
+	if err := os.MkdirAll(keepWorkdir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	keepBin := filepath.Join(keepWorkdir, "keep.bin")
+
+	dead := []DeadGeneration{{
+		BinaryPath: "/", // corrupt/dangling short path — must NOT be pkill'd
+		Workdir:    "/", // unsafe by construction → no RemoveAll either
+		Labels:     []string{"shortd"},
+		PlistPaths: []string{"/p/shortd"},
+	}}
+
+	f := &fakeRetire{}
+	n := retireGenerations(nil, dead, keepBin, root,
+		func(l string) error { f.bootedOut = append(f.bootedOut, l); return nil },
+		func(p string) error { f.removedPlist = append(f.removedPlist, p); return nil },
+		func(b string) { f.killed = append(f.killed, b) },
+		func(d string) error { f.removedAll = append(f.removedAll, d); return nil },
+	)
+
+	if n != 1 {
+		t.Fatalf("retired count = %d, want 1", n)
+	}
+	// Booted out + plist removed, but the short path was never pkill'd.
+	if !contains(f.bootedOut, "shortd") {
+		t.Fatalf("short-path dead gen must still be booted out, got %v", f.bootedOut)
+	}
+	if len(f.killed) != 0 {
+		t.Fatalf("short path %q must NOT be pkill'd, got killed=%v", "/", f.killed)
+	}
+}
+
 func contains(xs []string, want string) bool {
 	for _, x := range xs {
 		if x == want {

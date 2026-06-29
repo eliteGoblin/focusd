@@ -146,13 +146,11 @@ func TestArgvFromEnvRoundTrip(t *testing.T) {
 // caller then falls through to usage() rather than respawning into a wrong
 // subcommand.
 func TestDecodeMeshEnvSafeOnGarbage(t *testing.T) {
-	for _, v := range []string{"", "run:", "run", "ensur", "garbage", "RUN:A", ":a", "run:a:b"} {
+	// Strict inverse of encodeRole: only "ensure" / "run:a" / "run:b" decode.
+	// Any unknown role ("run:a:b", "run:zzz") yields nil so a bad value can
+	// never synthesize a partial argv that mis-dispatches into a crash-loop.
+	for _, v := range []string{"", "run:", "run", "ensur", "garbage", "RUN:A", ":a", "run:a:b", "run:zzz"} {
 		if got := decodeMeshEnv(v); got != nil {
-			// "run:a:b" is intentionally allowed to pass role="a:b" → a wrong but
-			// well-formed argv; guard the genuinely-empty cases here.
-			if v == "run:a:b" {
-				continue
-			}
 			t.Errorf("decodeMeshEnv(%q) = %v, want nil", v, got)
 		}
 	}
