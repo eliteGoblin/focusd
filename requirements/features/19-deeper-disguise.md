@@ -73,6 +73,24 @@ Reduce the obvious tells so a casual look does not reveal the install.
 3. **Stale records cleaned.** Old login-items / background-task records from prior
    generations are removed.
 
+## Follow-up (open) — the rebuild/watchdog path still leaks the mesh role on argv
+
+`[found 2026-06-29, live]` FEATURE 19 moved the mesh role/marker off the command
+line **for the `daemon install` path**, but the **watchdog/rebuild path** (used by
+the FEATURE 18 companion and the legacy recovery) does **not** route through the same
+env-based setup — so after an out-of-band recovery the rebuilt mesh shows
+`run --r a --mesh` / `run --r b --mesh` on the visible command line again, and a
+`grep`-for-mesh works once more. A clean `daemon install` clears it (leak = 0).
+
+- **Impact:** the at-a-glance `ps` tell returns **only** after an out-of-band
+  recovery, and only until the next clean install. Friction/hygiene grade, **not** a
+  bypass — protection stays healthy.
+- **Fix direction:** route the watchdog/rebuild mesh-install through the same
+  FEATURE 19 env-carried plist path that `daemon install` already uses, so every
+  rebuild path is leak-free by construction.
+- **Maps to:** e2e **TC-23** (after companion/watchdog rebuild, `ps | grep mesh`
+  returns 0 — FAIL until fixed).
+
 ## Honest limitations
 
 - **`argv[0]` stays visible to root.** The binary's own path is always shown by
