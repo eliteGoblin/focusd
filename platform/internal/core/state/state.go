@@ -35,9 +35,17 @@ func Open(path string) (*DB, error) {
 		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 			return nil, fmt.Errorf("create state dir: %w", err)
 		}
-		// _busy_timeout avoids spurious "database is locked" under the
-		// scheduler; foreign_keys on for integrity.
-		dsn = "file:" + path + "?_pragma=busy_timeout(5000)&_pragma=foreign_keys(1)"
+		// WAL mode is the fix for the `status` flip: in the default
+		// rollback-journal mode a writer holds an EXCLUSIVE lock during
+		// commit, so the separate read-only `status` process contends with
+		// the scheduler and its History query can hit SQLITE_BUSY. The status
+		// reader maps that error to found=false → "no runs yet" → the OVERALL
+		// verdict flips HEALTHY↔UNKNOWN. WAL lets a reader take a consistent
+		// committed snapshot without ever blocking (or being blocked by) the
+		// writer, so a job with >=1 recorded run is always read back as such.
+		// busy_timeout still backs the rare writer-vs-checkpointer contention;
+		// foreign_keys on for integrity.
+		dsn = "file:" + path + "?_pragma=busy_timeout(5000)&_pragma=journal_mode(WAL)&_pragma=foreign_keys(1)"
 	}
 
 	sqldb, err := sql.Open("sqlite", dsn)
