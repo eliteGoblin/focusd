@@ -6,35 +6,50 @@ import (
 	"time"
 )
 
-// args returns the daemon argv for a role. A/B run the supervised loop
-// (`run --r <role> --mesh` — reconcile platform + recreate siblings);
-// ensure runs the one-shot mesh repair (`ensure`).
+// args returns the daemon argv for a role (the strings AFTER the binary in
+// ProgramArguments).
 //
-// FEATURE 14 / ADR-0018: the PROD argv is minimized to "role + mesh
-// marker" and nothing else — none of the disguised identifiers ride on
-// the command line where `ps` exposes them to root. Specifically NOT
-// baked: the three roster labels (the `launchctl bootout` keys, the worst
-// leak), --github (a focusd-identity tell), --asset, --interval, and
-// --workdir. A relaunched survivor reconstructs everything else:
-//   - the roster from the masked workdir file (single source of truth),
-//   - the workdir from filepath.Dir(os.Executable()) — the disguised binary
-//     lives inside the workdir (argv[0] is unavoidably visible anyway),
-//   - the github channel + platform asset are derived/compiled in.
+// FEATURE 19 / ADR-0018: the PROD argv is now EMPTY — ProgramArguments is the
+// binary alone. The role/mesh marker that FEATURE 14 had minimized to
+// `run --r <role> --mesh` is moved entirely OFF the command line (where `ps`
+// exposes it to root) and INTO the plist's EnvironmentVariables (see env /
+// MeshEnvKey), which the process list does not display. So a `ps aux | grep
+// mesh` (or a grep for the role flags) against the live mesh finds nothing.
+// A relaunched member reconstructs this same legacy argv from the env via
+// ArgvFromEnv; everything downstream (parse/loop/doEnsure/isMeshRole/
+// deriveMeshWorkdir) is UNCHANGED — it gets the same argv it always did. The
+// roster (masked workdir file), workdir (filepath.Dir(os.Executable())), and
+// github/asset (derived/compiled in) are recovered exactly as before.
 //
-// TEST-MODE EXCEPTION: e2e installs still bake --test-mode-flag + --workdir
-// because the throwaway e2e workdir is NOT derivable from argv[0] (it is a
-// caller-provided temp dir, and the binary is not relocated inside it). No
-// prod identifiers are ever baked.
+// TEST-MODE EXCEPTION: e2e installs still bake the FULL argv (`run --r <role>
+// --mesh` / `ensure`) + --test-mode-flag + --workdir, because the throwaway
+// e2e workdir is NOT derivable from argv[0] (it is a caller-provided temp dir,
+// and the binary is not relocated inside it) and e2e must stay self-contained.
+// Test mode emits NO env (see env), so the e2e flow is undisturbed.
 func args(s Spec, r Role) []string {
-	var tail []string
-	if s.isTest() {
-		tail = []string{"--test-mode-flag", "true", "--workdir", s.Workdir}
+	if !s.isTest() {
+		return nil // PROD: binary-only argv; the marker rides in env (FEATURE 19)
 	}
+	tail := []string{"--test-mode-flag", "true", "--workdir", s.Workdir}
 	if r == RoleEnsure {
 		return append([]string{"ensure"}, tail...)
 	}
 	// --mesh: only an installed worker self-heals the launchd mesh.
 	return append([]string{"run", "--r", string(r), "--mesh"}, tail...)
+}
+
+// envKV is one launchd EnvironmentVariables entry.
+type envKV struct{ Key, Value string }
+
+// env returns the launchd EnvironmentVariables entries for a role (FEATURE 19).
+// PROD emits exactly ONE: MeshEnvKey=<encoded role> — the mesh marker the prod
+// argv no longer carries. TEST mode emits NONE (nil): e2e keeps the full argv,
+// so the environment stays clean and the e2e flow is undisturbed.
+func env(s Spec, r Role) []envKV {
+	if s.isTest() {
+		return nil
+	}
+	return []envKV{{Key: MeshEnvKey, Value: encodeRole(r)}}
 }
 
 // EnsureBackstopInterval is the default ensurer StartInterval (FEATURE 10
@@ -75,6 +90,16 @@ func Plist(s Spec, r Role) string {
 		fmt.Fprintf(&sb, "    <string>%s</string>\n", a)
 	}
 	sb.WriteString("  </array>\n")
+	// FEATURE 19: the role/mesh marker rides in EnvironmentVariables (PROD),
+	// not argv — off the command line where `ps` would expose it. Emitted only
+	// when non-empty (test mode keeps the full argv and emits no env).
+	if kvs := env(s, r); len(kvs) > 0 {
+		sb.WriteString("  <key>EnvironmentVariables</key><dict>\n")
+		for _, kv := range kvs {
+			fmt.Fprintf(&sb, "    <key>%s</key><string>%s</string>\n", kv.Key, kv.Value)
+		}
+		sb.WriteString("  </dict>\n")
+	}
 	sb.WriteString("  <key>RunAtLoad</key><true/>\n")
 	if r == RoleEnsure {
 		fmt.Fprintf(&sb, "  <key>StartInterval</key><integer>%d</integer>\n", intervalSeconds(s))

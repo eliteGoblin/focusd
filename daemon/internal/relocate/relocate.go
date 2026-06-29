@@ -224,9 +224,9 @@ func pick(s []string) string {
 // family returns the org/vendor segment of a launchd-label prefix: the
 // first two dot-separated components (e.g. "com.apple", "com.google",
 // "org.mozilla", "us.zoom", "io.tailscale", "notion.id"). Entries with
-// fewer than two segments are returned whole. This is the grouping key
-// FEATURE 10 uses to draw the three mesh labels from DISTINCT vendors so
-// they don't visually cluster under one developer to a casual reader.
+// fewer than two segments are returned whole. Used to assert the prefixes
+// pool spans enough distinct vendors (see relocate tests); the FEATURE 19
+// roster styles draw from their own pools (roster_styles.go).
 func family(prefix string) string {
 	i := strings.IndexByte(prefix, '.')
 	if i < 0 {
@@ -255,63 +255,19 @@ func RandomBase() string {
 	return fmt.Sprintf("%s.%s.%s", pick(prefixes), pick(suffixes), randHex(randomTailBytes))
 }
 
-// GenerateRoster produces the three independent mesh labels (FEATURE 10 /
-// ADR-0014). Each label is a fully random "<prefix>.<suffix>.<10-hex>"
-// drawn from the existing disguise pool, with NO shared base, NO
-// role-revealing token (.a/.b/.ensure), and — critically — each from a
-// DISTINCT vendor family so the three read as unrelated third-party
-// agents (acceptance #1). The returned slice is positional, aligned with
-// osadapter.AllRoles (index 0 → RoleA, 1 → RoleB, 2 → RoleEnsure).
-//
-// Families are sampled WITHOUT replacement so no two labels share a
-// prefix/stem; the suffix and 10-hex tail are then drawn independently
-// per label. All randomness uses crypto/rand (via pick/randHex).
+// GenerateRoster produces the three mesh labels (FEATURE 10 → FEATURE 19). Each
+// role gets a STRUCTURALLY DISTINCT naming style from its own pools, so the
+// three entries never read as a matching set (the owner's "3 look very similar"
+// tell): role A is a dotted reverse-DNS bundle id (no hex tail), role B is a
+// CamelCase agent (no dots), the ensurer is a lowercase unix-daemon name. None
+// carry a role-revealing token (.a/.b/.ensure) or the "focusd" string. The
+// returned slice is positional, aligned with osadapter.AllRoles (index 0 →
+// RoleA, 1 → RoleB, 2 → RoleEnsure). All randomness uses crypto/rand (pick).
 func GenerateRoster() []string {
-	const meshSize = 3
-	// Group the prefix pool by vendor family.
-	byFamily := map[string][]string{}
-	var fams []string
-	for _, p := range prefixes {
-		f := family(p)
-		if _, ok := byFamily[f]; !ok {
-			fams = append(fams, f)
-		}
-		byFamily[f] = append(byFamily[f], p)
-	}
-	// Sample meshSize DISTINCT families without replacement (Fisher–Yates
-	// partial shuffle over the family list, crypto/rand driven).
-	for i := 0; i < meshSize && i < len(fams); i++ {
-		j := i + randIntn(len(fams)-i)
-		fams[i], fams[j] = fams[j], fams[i]
-	}
-	out := make([]string, 0, meshSize)
-	for i := 0; i < meshSize; i++ {
-		f := fams[i]
-		prefix := pickFrom(byFamily[f])
-		out = append(out, fmt.Sprintf("%s.%s.%s", prefix, pick(suffixes), randHex(randomTailBytes)))
-	}
-	return out
-}
-
-// pickFrom returns a crypto/rand-chosen element of s (s must be
-// non-empty; every family bucket has at least one prefix).
-func pickFrom(s []string) string { return s[randIntn(len(s))] }
-
-// randIntn returns a crypto/rand integer in [0,n) for n>0 (0 for n<=0).
-// Uses rejection sampling over a single byte's range to avoid the modulo
-// bias pick() tolerates — the family pool is small enough that one byte
-// always suffices.
-func randIntn(n int) int {
-	if n <= 0 {
-		return 0
-	}
-	limit := 256 - (256 % n) // largest multiple of n that fits in a byte
-	b := make([]byte, 1)
-	for {
-		_, _ = rand.Read(b)
-		if int(b[0]) < limit {
-			return int(b[0]) % n
-		}
+	return []string{
+		styleReverseDNS(), // RoleA
+		styleCamelCase(),  // RoleB
+		styleDaemon(),     // RoleEnsure
 	}
 }
 
@@ -323,16 +279,18 @@ func HiddenWorkdir(supportRoot string) string {
 	return filepath.Join(supportRoot, "."+pick(prefixes)+"."+randHex(6))
 }
 
-// RandomBinaryName is the disguised basename pattern used for the
-// daemon binary inside its hidden workdir, e.g.
-// "com.apple.metadata.helper.7f3a2c4d11" (5 random bytes → 10 hex
-// chars). Extracted as its own primitive so the self-update path can
-// rotate the binary path on every update (macOS AMFI caches the
-// CDHash per executable path, so re-using the same path defeats
-// adhoc-resign + restart for the swap; see
+// RandomBinaryName is the disguised basename for the daemon binary inside its
+// hidden workdir, e.g. "bundle.payload.archive.7f3a2c4d11" (three generic data
+// nouns + 5 random bytes → 10 hex chars). FEATURE 19: it draws from its OWN pool
+// (binWords) — deliberately disjoint from every mesh-label pool — so the binary
+// (visible as argv[0] to root, the honest limitation) shares no stem with any
+// launchd label, defeating a "find one, grep for the rest" pivot. The 10-hex
+// tail keeps the path per-call unique so the self-update path can rotate the
+// binary path on every update (macOS AMFI caches the CDHash per executable path,
+// so re-using a path defeats adhoc-resign + restart; see
 // internal/osadapter/selfupdate.go).
 func RandomBinaryName() string {
-	return pick(prefixes) + "." + pick(suffixes) + "." + randHex(randomTailBytes)
+	return pick(binWords) + "." + pick(binWords) + "." + pick(binWords) + "." + randHex(randomTailBytes)
 }
 
 // RelocateInto copies src into dir under a random disguised basename,

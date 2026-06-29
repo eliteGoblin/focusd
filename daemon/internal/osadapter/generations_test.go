@@ -276,7 +276,8 @@ func contains(xs []string, want string) bool {
 
 // TestParsePlistBinaryFormat: a BINARY-format plist (the real-world hardening
 // case) is converted via plutil and parsed correctly — label, binary path, and
-// argv (including --mesh) are all recovered.
+// the FEATURE 19 EnvironmentVariables mesh marker are all recovered (the prod
+// worker plist carries the marker in env, not argv).
 func TestParsePlistBinaryFormat(t *testing.T) {
 	dir := t.TempDir()
 	binPath := filepath.Join(dir, "com.apple.metadata.helper.bbbb")
@@ -296,14 +297,20 @@ func TestParsePlistBinaryFormat(t *testing.T) {
 		t.Fatal("expected a binary plist, but it still looks like XML")
 	}
 
-	label, bin, argv := parsePlist(plistPath)
+	label, bin, argv, env := parsePlist(plistPath)
 	if label != s.Label(RoleA) {
 		t.Errorf("label = %q, want %q", label, s.Label(RoleA))
 	}
 	if bin != binPath {
 		t.Errorf("bin = %q, want %q", bin, binPath)
 	}
-	if !hasMeshFlag(argv) {
-		t.Errorf("argv must carry --mesh, got %v", argv)
+	// FEATURE 19: a prod worker carries the mesh marker in EnvironmentVariables,
+	// not argv. The binary-format parse must recover it so the union predicate
+	// still corroborates the generation.
+	if env[MeshEnvKey] != "run:a" {
+		t.Errorf("env[%s] = %q, want run:a (got env %v)", MeshEnvKey, env[MeshEnvKey], env)
+	}
+	if !isFocusdMeshWorkerPlist(env, argv) {
+		t.Errorf("binary-format worker plist must corroborate the mesh, env=%v argv=%v", env, argv)
 	}
 }
