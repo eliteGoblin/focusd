@@ -1,7 +1,7 @@
 # ADR-0016 — Out-of-band watchdog rail: cron + same-binary second copy, local recovery
 
-- **Status:** accepted (2026-06-16)
-- **Feature:** [FEATURE 12](../features/12-out-of-band-watchdog.md)
+- **Status:** **SUPERSEDED by [ADR-0020](0020-launchd-out-of-band-rail-no-fda.md) on 2026-06-29** (cron → launchd out-of-band rail). Originally accepted 2026-06-16. The rail *concept* stands; the **cron mechanism** is retired because modifying cron on modern macOS requires Full Disk Access the daemon lacks — confirmed live (see ADR-0020 + register §6).
+- **Feature:** [FEATURE 12](../features/12-out-of-band-watchdog.md) (rail concept) → [FEATURE 18](../features/18-resilient-out-of-band-watchdog.md) (mechanism fix)
 - **Decided by:** Frank (product owner), user-locked + BA review
 
 ## Context

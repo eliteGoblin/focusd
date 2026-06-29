@@ -12,7 +12,10 @@
 > one `TC-*`, and every recorded flaw (register §6) maps to a `TC-*`.** When a
 > feature ships or a flaw is recorded, ba-curator confirms the mapping exists.
 > Current FEATURE 15 ↔ TC-06 (tamper→restore), TC-07 (no false-green),
-> TC-08 (no false-degraded); the F15 config-integrity follow-up ↔ TC-10.
+> TC-08 (no false-degraded); the F15 config-integrity follow-up ↔ TC-10;
+> **FEATURE 17 ↔ TC-14 (workdir delete), TC-18 (combinations), TC-19 (no
+> generation pileup); FEATURE 18 ↔ TC-16 (Login-Item off), TC-17 (offline
+> total-teardown, supersedes TC-05), TC-18; FEATURE 19 ↔ TC-20 (no tells).**
 >
 > **Redaction (non-negotiable).** Verify as a developer, but NEVER print the
 > disguised workdir, labels, rotated binary paths, or plugin paths. Report
@@ -84,10 +87,12 @@ Severity: 🔴 enforcement bypass · 🟠 self-heal/recovery · 🟡 truthfulnes
   a **Terminal with Full Disk Access**, OR the deferred proper fix. The in-band
   mesh still self-heals all *partial* attacks (TC-03/04) — only the rare
   *total atomic teardown* recovery is affected.
-- **Deferred proper fix (owner: leave watchdog for now):** replace the cron rail
-  with a **launchd-based out-of-band agent the daemon can manage without FDA**
-  (preferred), OR formally accept the rail as **interactive-FDA-establish-only**
-  and document the re-install ritual. Tracked in the register.
+- **Deferred proper fix → NOW SPEC'D as [FEATURE 18](features/18-resilient-out-of-band-watchdog.md) (ADR-0020, approved-building 2026-06-29):**
+  replace the cron rail with a **launchd-based out-of-band agent the daemon can
+  manage without FDA**, plus a **signed offline engine backup** so the companion
+  recovers offline. **TC-05 is superseded by TC-17 / TC-18** below (offline
+  total-teardown recovery without FDA). Keep TC-05 here as the historical origin;
+  verify the fix against TC-17/TC-18.
 
 ### TC-06 🔴 Plugin integrity / tamper-restore — *F15 (shipped v0.16.0/v0.16.1)*  `[found 2026-06-22]`
 - **Origin:** `kill-steam` plugin binary was overwritten on disk with a dummy;
@@ -140,6 +145,85 @@ Severity: 🔴 enforcement bypass · 🟠 self-heal/recovery · 🟡 truthfulnes
 - **Check:** the test-mode harness gate is `< 2.0s`; the real bound is
   `interval + detection overhead ≈ 2.1s`. The gate should reflect the cadence,
   not cry wolf. **Status:** note/needs-tune (master also trips it).
+
+### Live teardown matrix — *F17 / F18 / F19*  `[added 2026-06-29 — incident]`
+
+> **NEVER claim "the daemon recovers the platform" from a single attack vector
+> again.** The 2026-06-29 incident exposed a **latent failure**: the only
+> recovery test ever run deleted the platform **binary** — and the desired-version
+> state survived that delete, so recovery worked. The **workdir-delete** path
+> (where the desired version is wiped too) was **never tested**, and on the real
+> machine it caused a permanent `BLOCKED: no desired version` while games ran.
+> Recovery must be proven against the **full matrix of teardown vectors AND their
+> combinations** — each must auto-recover within a bounded time OR be a documented
+> gap. A green from one vector is not recovery.
+
+**Teardown vectors:** (a) delete platform **binary**, (b) delete the **workdir**
+(wipes desired-version state), (c) **toggle off the Login Item** (unloads the
+mesh; macOS gives no API to re-enable), (d) **kill all processes**, plus their
+**combinations** (the worst is b+c+d = total atomic teardown).
+
+### TC-14 🟠 Recover from workdir delete — *F17*  `[found 2026-06-29 — FAILING until F17]`
+- **Origin:** the owner deleted the platform **workdir**; the desired version
+  lived only in the workdir state, so the daemon logged `BLOCKED: no desired
+  version` and **never re-fetched** — protection down, games ran. The latent gap
+  the binary-only test missed.
+- **Check:** delete the workdir → daemon falls back to the **baked platform
+  version**, re-fetches, and brings protection back within a bounded time; **no
+  permanent BLOCK**.
+- **Expect:** auto-recovers, no permanent BLOCK. **Status: ⏳ pending (F17).**
+
+### TC-15 🟠 Recover from binary delete (single vector — kept honest)  `[reframed 2026-06-29]`
+- **Note:** this is the OLD recovery test. It passes because workdir state
+  survives a binary delete. **It must never again be cited as proof that "the
+  daemon recovers the platform"** — that claim requires the whole matrix (TC-14,
+  TC-16, TC-17, TC-18).
+- **Check:** delete only the platform binary → re-fetched + running within a
+  bounded time.
+- **Expect:** recovers. **Status: ✅ historically PASS (single-vector only).**
+
+### TC-16 🔴 Recover from Login Item toggled off — *F17 / F18*  `[found 2026-06-29]`
+- **Origin:** the owner toggled the Login Item **off**; this unloads the mesh and
+  macOS provides **no API to re-enable it**, so protection stayed down.
+- **Check:** with the Login Item toggled off, a surviving rail (the out-of-band
+  companion, F18) re-establishes a working mesh within a bounded time.
+- **Expect:** mesh back within bounded time. **Status: ⏳ pending (F18).**
+
+### TC-17 🔴 Offline total-teardown recovery, no FDA — *F18 (supersedes TC-05)*  `[added 2026-06-29]`
+- **Origin:** the deferred TC-05 — cron companion needed Full Disk Access, so it
+  could neither self-heal nor be scripted-restored; it sat DOWN.
+- **Check:** tear down the main mesh **+** the platform **binary** **+** the
+  **workdir** all at once (total atomic teardown), with **no network**; the
+  launchd-based companion (no FDA required) rebuilds them **offline** from its
+  signed engine backup within a bounded time.
+- **Expect:** rebuilt offline, no FDA, bounded time. **Status: ⏳ pending (F18).**
+
+### TC-18 🟠 Teardown combinations matrix — *F17 / F18*  `[added 2026-06-29]`
+- **Check:** exercise the combinations of {binary, workdir, Login Item, all
+  processes} — not just one at a time — and confirm each combination either
+  auto-recovers within a bounded time OR is recorded here as a documented gap.
+- **Expect:** every combination recovers or is a named gap. **Status: ⏳ pending
+  (F17/F18).**
+
+### TC-19 🟠 No stale-generation pileup — single live generation — *F17*  `[found 2026-06-29]`
+- **Origin:** repeated installs/recoveries stacked generations on disk (live
+  count: 6 workdirs + 14 disguised supervisor entries), breaking the per-workdir
+  singleton — **2 platform processes** ran at once — and piling up garbage.
+- **Check:** after repeated installs/recoveries there is **exactly one** platform
+  process and **one** live supervisor generation; superseded generations
+  (workdirs / disguised entries) are **cleaned up**, count does not grow.
+- **Expect:** one generation, one platform, no pileup. **Status: ⏳ pending (F17).**
+
+### TC-20 🟡 Disguise — no obvious tells — *F19*  `[found 2026-06-29]`
+- **Origin:** the owner spotted the install at a glance: `ps aux | grep mesh`
+  found the role/marker; the Login-Items entries read as **three near-identical**
+  `com.vendor.X.<hex>` siblings; and **many** stale records from old generations
+  were visible.
+- **Check (redaction-safe, counts only):** searching the live process list for the
+  mesh marker **and** the role flags returns **nothing**; the login/background
+  entries are **not** three near-identical hex-suffixed names (varied/plausible,
+  don't cluster); stale records from prior generations are cleaned.
+- **Expect:** no at-a-glance tells. **Status: ⏳ pending (F19).**
 
 ### TC-10 🟠 Plugin **config**/policy integrity  (follow-up / icebox)
 - **Check (future):** plugin configs (blocklists, target apps, job schedule)
