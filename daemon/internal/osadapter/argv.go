@@ -82,6 +82,88 @@ func WorkdirFromBinary(self string) string {
 	return parent
 }
 
+// hasMeshFlag reports whether a parsed argv carries the "--mesh" marker —
+// the corroborating signal (alongside Ed25519 verification of argv[0]) that a
+// plist belongs to a focusd self-healing mesh worker (FEATURE 17, generation
+// cleanup). The ensure role's argv (`ensure`) does NOT carry --mesh; a
+// generation is recognised when its VERIFIED binary has at least one --mesh
+// plist, and all plists sharing that binary are then grouped into it.
+func hasMeshFlag(argv []string) bool {
+	for _, a := range argv {
+		if a == "--mesh" {
+			return true
+		}
+	}
+	return false
+}
+
+// safeToRemoveWorkdir reports whether dir is a safe os.RemoveAll target during
+// generation cleanup (FEATURE 17, Item 3). The teardown deletes an OLD
+// generation's workdir, so a malformed/disguised value must never widen the
+// blast radius. A dir is safe ONLY when ALL hold:
+//   - it is a non-empty, absolute path;
+//   - it is STRICTLY nested under supportRoot (never the root itself, never
+//     outside it) — so a bug can't delete "/Library/Application Support" or a
+//     sibling tree;
+//   - it is NOT the keep generation's workdir; and
+//   - it is NOT an ancestor of the keep workdir (deleting an ancestor would
+//     take the surviving install — and the out-of-band watchdog dir, which is
+//     a sibling under the same root — down with it).
+//
+// Pure → unit-tested on Linux CI.
+func safeToRemoveWorkdir(dir, supportRoot, keepWorkdir string) bool {
+	// BOTH must be absolute up front: a relative supportRoot would make the
+	// containment check meaningless (filepath.Rel against a relative base can
+	// spuriously "contain" almost anything), so refuse before resolving.
+	if dir == "" || supportRoot == "" || !filepath.IsAbs(dir) || !filepath.IsAbs(supportRoot) {
+		return false
+	}
+
+	// Resolve symlinks on BOTH before the containment check so RemoveAll and
+	// this guard agree on the REAL paths. Without this, a symlinked intermediate
+	// component of dir (e.g. <root>/link -> /outside) passes a lexical
+	// under-root check yet RemoveAll would follow the link and delete OUTSIDE
+	// root. EvalSymlinks also fails for a non-existent path → we refuse, which
+	// is correct: a workdir we cannot stat is not a workdir we should rm -rf.
+	rdir, err := filepath.EvalSymlinks(dir)
+	if err != nil {
+		return false
+	}
+	rroot, err := filepath.EvalSymlinks(supportRoot)
+	if err != nil {
+		return false
+	}
+	dir = filepath.Clean(rdir)
+	root := filepath.Clean(rroot)
+
+	// Must be strictly under root: a valid relative path that is neither "."
+	// (== root) nor an escape ("..").
+	rel, err := filepath.Rel(root, dir)
+	if err != nil || rel == "." || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return false
+	}
+
+	if keepWorkdir != "" {
+		// Resolve keep too so the comparison is against real paths (matching the
+		// resolved dir). Best-effort: a not-yet-existing keep falls back to its
+		// cleaned form rather than refusing — the keep guard only ever ADDS
+		// safety, so a cleaned compare is acceptable when it can't be resolved.
+		keep := filepath.Clean(keepWorkdir)
+		if rk, kerr := filepath.EvalSymlinks(keepWorkdir); kerr == nil {
+			keep = filepath.Clean(rk)
+		}
+		if dir == keep {
+			return false // never delete the surviving generation's workdir
+		}
+		// Reject dir being an ancestor of keep (would delete keep too).
+		if kr, kerr := filepath.Rel(dir, keep); kerr == nil &&
+			kr != ".." && !strings.HasPrefix(kr, ".."+string(filepath.Separator)) {
+			return false
+		}
+	}
+	return true
+}
+
 // intervalFromArgv pulls the reconcile interval following "--interval" out of
 // a parsed argv. Returns 0 when the flag is absent or unparseable — caller
 // substitutes a default.

@@ -26,6 +26,24 @@ type Verifier func(path string) (bool, error)
 func FindCurrentInstall(mode.Mode, Verifier) (CurInstall, error) {
 	return CurInstall{}, ErrUnsupported
 }
+
+// Generation mirrors the darwin definition so cross-platform code that
+// references it compiles on non-darwin (where discovery is unsupported).
+type Generation struct {
+	BinaryPath string
+	Workdir    string
+	Labels     []string
+	PlistPaths []string
+}
+
+func DiscoverAllGenerations(mode.Mode, Verifier) ([]Generation, error) {
+	return nil, ErrUnsupported
+}
+
+// RetireOtherGenerations is a no-op on non-darwin (no launchd mesh to retire).
+// It returns (0, nil) so the cross-platform install path treats it as "nothing
+// to do" rather than surfacing ErrUnsupported on every install.
+func RetireOtherGenerations(mode.Mode, string) (int, error) { return 0, nil }
 func MeshStatus(mode.Mode) (loaded, total int, found bool, err error) {
 	return 0, 0, false, ErrUnsupported
 }
