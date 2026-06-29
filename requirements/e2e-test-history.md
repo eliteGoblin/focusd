@@ -15,10 +15,12 @@
 > TC-08 (no false-degraded); the F15 config-integrity follow-up ↔ TC-10;
 > **FEATURE 17 ↔ TC-14 (workdir delete), TC-18 (combinations), TC-19 (no
 > generation pileup), TC-21 (post-recovery convergence — open follow-up);
-> FEATURE 18 ↔ TC-16 (Login-Item off), TC-17 (offline
-> total-teardown, supersedes TC-05), TC-18; FEATURE 19 ↔ TC-20 (no tells);
+> FEATURE 18 ↔ TC-16 (Login-Item off — PASS), TC-17 (offline
+> total-teardown, supersedes TC-05 — PASS), TC-18; FEATURE 19 ↔ TC-20 (no tells),
+> TC-23 (rebuild/watchdog path still leaks mesh role on argv — open follow-up);
 > the F17/F19 convergence + status-flip follow-ups ↔ TC-21 (post-recovery
-> convergence) + TC-22 (status never false-UNKNOWN — DB run-history concurrency).**
+> convergence — PASS) + TC-22 (status never false-UNKNOWN — DB run-history
+> concurrency — PASS).**
 >
 > **Redaction (non-negotiable).** Verify as a developer, but NEVER print the
 > disguised workdir, labels, rotated binary paths, or plugin paths. Report
@@ -201,7 +203,10 @@ mesh; macOS gives no API to re-enable), (d) **kill all processes**, plus their
   macOS provides **no API to re-enable it**, so protection stayed down.
 - **Check:** with the Login Item toggled off, a surviving rail (the out-of-band
   companion, F18) re-establishes a working mesh within a bounded time.
-- **Expect:** mesh back within bounded time. **Status: ⏳ pending (F18).**
+- **Expect:** mesh back within bounded time. **Status: ✅ PASS** (live,
+  daemon-v0.5.9, 2026-06-29): the separate launchd companion (own folder, no FDA)
+  detected the stale daemon heartbeat and rebuilt the daemon → mesh + platform back
+  from its signed offline backup, no manual action.
 
 ### TC-17 🔴 Offline total-teardown recovery, no FDA — *F18 (supersedes TC-05)*  `[added 2026-06-29]`
 - **Origin:** the deferred TC-05 — cron companion needed Full Disk Access, so it
@@ -210,7 +215,15 @@ mesh; macOS gives no API to re-enable), (d) **kill all processes**, plus their
   **workdir** all at once (total atomic teardown), with **no network**; the
   launchd-based companion (no FDA required) rebuilds them **offline** from its
   signed engine backup within a bounded time.
-- **Expect:** rebuilt offline, no FDA, bounded time. **Status: ⏳ pending (F18).**
+- **Expect:** rebuilt offline, no FDA, bounded time. **Status: ✅ PASS (Phase 1)**
+  (live, daemon-v0.5.9, 2026-06-29): the entire in-band rail was removed (daemon
+  down, 0 platforms, 0 mesh plists); the separate launchd companion detected the
+  stale heartbeat and **rebuilt the daemon from its signed offline backup (7.9MB,
+  signature-checked) → mesh + platform back**, no FDA. The companion is excluded
+  from mesh discovery/cleanup by construction (verified). **Phase 2 (offline
+  *platform* restore) deferred:** the companion carries the daemon backup only; the
+  daemon re-fetches the platform over the network — a fully offline platform restore
+  is a later phase.
 
 ### TC-18 🟠 Teardown combinations matrix — *F17 / F18*  `[added 2026-06-29]`
 - **Check:** exercise the combinations of {binary, workdir, Login Item, all
@@ -277,22 +290,12 @@ mesh; macOS gives no API to re-enable), (d) **kill all processes**, plus their
   binary is absent) and have the retire step boot them out + remove their entry +
   end their orphaned platform process, gated by the existing safe-to-remove check.
 - **Expect:** converges to one generation / one platform after recovery cycles.
-  **Status: 🟡 PARTIAL — convergence logic shipped (#73, daemon-v0.5.7), NOT yet
-  clean live.** The dead-binary/zombie-generation retire + orphan-platform end
-  shipped and the **convergence logic works live** (install "retired 2 → 1
-  platform"). But live testing found **three residual sub-gaps** that keep this
-  FAIL until clean:
-  - (a) **Stale on-disk files left behind.** Retiring a generation boots out its
-    entries + ends its platform, but leaves the superseded **workdir / state.db
-    files on disk** — convergence to one *live* generation is reached, but disk
-    clutter from prior generations is not swept.
-  - (b) **Status-flip / OVERALL UNKNOWN during convergence** — root-caused to a
-    state-DB run-history read/write concurrency bug (NOT multi-generation). Tracked
-    as **TC-22**; fix in progress.
-  - (c) **Manual cleanup helper isn't F19-env-aware** — the manual clean-slate path
-    still keys on the old `--mesh` argv tell, not the new env-carried marker
-    (F19), so it can miss F19-style generations.
-  Re-verify to PASS once (a)/(c) are cleaned and TC-22 is fixed.
+  **Status: ✅ PASS** (live, daemon-v0.5.8 orphan-sweep #76, 2026-06-29): after
+  recovery/install churn there is **exactly 1 state.db + 1 platform** — the
+  orphan-sweep retires dead-binary/zombie generations and sweeps their superseded
+  on-disk workdir/state files (closing prior sub-gap (a)). The status-flip sub-gap
+  (b) is closed separately under **TC-22** (status snapshot, platform v0.16.7). The
+  manual cleanup helper (c) is now F19-env-aware. Convergence is clean live.
 
 ### TC-22 🟡 Status never falsely reads OVERALL UNKNOWN — run-history DB concurrency  *F17/F19 follow-up*  `[found 2026-06-29 — FAILING]`
 - **Origin:** during install/convergence churn `status` intermittently flipped to a
@@ -307,8 +310,30 @@ mesh; macOS gives no API to re-enable), (d) **kill all processes**, plus their
   **UNKNOWN**; concurrent `status` reads during a reconcile write return a complete,
   consistent run-history.
 - **Expect:** no false UNKNOWN; status read is consistent under concurrency.
-  **Status: 🟡 FAIL (fix in progress, not yet verified live).** Dev agent is fixing
-  the run-history read/write concurrency root cause.
+  **Status: ✅ PASS** (live, platform v0.16.7 #79, 2026-06-29): 8 rapid `status`
+  reads were stable (kill-steam ok, OVERALL HEALTHY, 0 changes) with no false
+  UNKNOWN. **Root cause:** the `status` command's cross-process read contended with
+  the reconcile writer; **fix:** `status` now reads an **atomic snapshot**, not the
+  live DB. (Three earlier attempts — orphan-sweep, WAL, rollback-journal — are
+  documented dead-ends; the snapshot is what closed it.)
+
+### TC-23 🟡 Rebuild/watchdog path leaks the mesh role on argv — *F19 follow-up*  `[found 2026-06-29 — FAILING]`
+- **Origin:** FEATURE 19 moved the mesh role/marker off the command line for the
+  `daemon install` path, but the **watchdog/rebuild path** (used by the FEATURE 18
+  companion + legacy recovery) does **not** route through the same env-based setup.
+  After the companion rebuilt the daemon, `ps` showed `run --r a --mesh` /
+  `run --r b --mesh` again — so the at-a-glance `grep`-for-mesh tell returns. A clean
+  `daemon install` clears it (leak = 0).
+- **Honest impact:** the tell returns **only** after an out-of-band recovery, and
+  only until the next clean install. Hygiene/friction grade, **not** a bypass —
+  protection stays healthy.
+- **Check (redaction-safe, counts only):** after a companion/watchdog rebuild,
+  `ps -axww -o args | grep -- --mesh` (or a grep for the role flags) returns **0**.
+- **Fix direction:** route the watchdog/rebuild mesh-install through the same F19
+  env-carried plist path that `daemon install` uses, so every rebuild path is
+  leak-free by construction.
+- **Expect:** 0 mesh hits after rebuild. **Status: 🟡 FAIL** (live, daemon-v0.5.9,
+  2026-06-29) until the rebuild path adopts the F19 env path.
 
 ### TC-10 🟠 Plugin **config**/policy integrity  (follow-up / icebox)
 - **Check (future):** plugin configs (blocklists, target apps, job schedule)
@@ -354,3 +379,4 @@ mesh; macOS gives no API to re-enable), (d) **kill all processes**, plus their
 | 2026-06-22 | platform v0.16.3 (status KISS) | TC-07, TC-08, TC-11 | — | status = current-state: recovered tamper → `ok`/OVERALL HEALTHY (no `tampered` verdict); tamper only in log/events; watchdog manually restored (`present`, never degrades). TC-05 still deferred (FDA) |
 | 2026-06-29 | daemon-v0.5.6 (F17) + platform v0.16.4 (kill-steam Dota2 fix, #71) | TC-14, TC-19 | TC-21 (new) | F17 live-verified: workdir-delete recovered via baked fallback (down ~28s `desired=none` → adopt v0.16.3 → up ~56s, no permanent BLOCK; TC-14, go-reviewer-confirmed); fresh install "retired 4 prior generation(s)" → 1 platform (TC-19). Final: single generation, 1 platform, desired=good=v0.16.4, OVERALL HEALTHY. First TC-14 attempt was a false-pass (split-on-space path truncation → `rm` missed) — caught by a `test -d` gate; methodology lesson recorded on TC-14. NEW peer-reviewed bug → TC-21 (FAIL): post-recovery generations with deleted binaries are invisible to install cleanup + orphan platforms accumulate (hygiene gap, protection stays HEALTHY) |
 | 2026-06-29 | daemon-v0.5.7 (F19 + F17 convergence fix, #73) + platform v0.16.4 | TC-14 (re-confirmed under F19), TC-20 | TC-21 (still partial), TC-22 (new) | F19 live-verified: `ps` for the mesh marker + role flags returns **0** (role moved off argv into plist env); supervisor labels varied/non-clustering (TC-20 PASS). TC-14 re-confirmed under daemon-v0.5.7. F17 convergence fix (#73) retires dead-binary/zombie generations + ends orphan platforms — **convergence logic works live** (install "retired 2 → 1 platform"), but TC-21 stays PARTIAL: (a) stale workdir/state.db files left on disk, (b) status-flip → **TC-22 NEW** (run-history DB read/write concurrency → false OVERALL UNKNOWN; fix in progress), (c) manual cleanup helper not F19-env-aware |
+| 2026-06-29 | daemon-v0.5.9 (F18 + orphan-sweep, #76/#78/#80) + platform v0.16.7 (status snapshot, #79) | TC-16, TC-17, TC-21, TC-22 | TC-23 (new) | **F18 shipped + live-verified (Phase 1):** removed the entire in-band rail (daemon down, 0 platforms, 0 mesh plists) → the separate launchd companion (own folder, no FDA) detected the stale heartbeat and rebuilt the daemon from its signed offline backup (7.9MB, signature-checked) → mesh + platform back; companion excluded from mesh discovery/cleanup by construction (TC-16/TC-17 PASS; Phase 2 offline-platform restore deferred). **TC-21 PASS** — orphan-sweep (daemon-v0.5.8) verified live: after recovery/install churn exactly 1 state.db + 1 platform. **TC-22 PASS** — status snapshot (platform v0.16.7): 8 rapid reads stable, no false UNKNOWN; root cause was the status read contending with the reconcile writer, fixed by reading an atomic snapshot (3 prior attempts — orphan-sweep, WAL, rollback-journal — were dead-ends). **NEW TC-23 (FAIL):** the companion/watchdog rebuild path re-introduces the `--mesh` argv leak (F19 hides it only on the `daemon install` path) — `ps` shows `run --r a/b --mesh` after an out-of-band recovery until the next clean install; hygiene/friction, not a bypass |

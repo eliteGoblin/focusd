@@ -1,6 +1,16 @@
 # FEATURE 18 — Resilient out-of-band watchdog (companion that works without Full Disk Access + recovers offline)
 
-- **Status:** 🔨 defining / approved-building (product owner approved 2026-06-29)
+- **Status:** ✅ **shipped + live-verified** (daemon-v0.5.9, PRs #78/#80, 2026-06-29).
+  **Phase 1 (daemon-offline recovery) shipped:** a separate launchd companion in its
+  own folder carries a signed offline backup of the daemon; on a stale heartbeat it
+  rebuilds the daemon (and thus the mesh + platform) from that backup with **no
+  network and no Full Disk Access**. **Live-verified:** the entire in-band rail was
+  removed (daemon down, 0 platforms, 0 mesh plists) and the companion detected the
+  stale heartbeat and **rebuilt the daemon from its signed offline backup → mesh +
+  platform back**. Maps to **TC-16 / TC-17 (PASS)**. **Phase 2 (platform-offline
+  backup) deferred:** the companion currently carries the daemon backup only; the
+  daemon re-fetches the platform (network) — an offline *platform* restore is a
+  later phase.
 - **Decision:** [ADR-0020](../decisions/0020-launchd-out-of-band-rail-no-fda.md)
   — **reverses ADR-0016's cron choice** (cron → launchd out-of-band rail).
 - **Supersedes:** the deferred **TC-05** (the cron rail that could neither
@@ -113,6 +123,12 @@ works **without Full Disk Access**, and can rebuild the daemon **offline**.
   copy of the daemon may be older than the latest desired version; it restores
   protection first, then the normal update path rolls forward when a network is
   available.
+- **The companion's rebuild path re-introduces an at-a-glance tell.** After the
+  companion rebuilds the daemon, the rebuilt mesh shows its role marker on the
+  visible command line again (the rebuild/watchdog path does not yet use FEATURE 19's
+  env-carried hiding) — so a `grep`-for-mesh briefly works again until the next clean
+  install clears it. Hygiene/friction grade, not a bypass; tracked as the open
+  follow-up in [FEATURE 19](19-deeper-disguise.md) (e2e TC-23).
 - **Reverses an accepted decision.** This deliberately reverses ADR-0016's choice
   of cron — recorded in ADR-0020, with the live FDA evidence as the rationale. It
   also refines the earlier "same daemon binary / second copy" framing: the
