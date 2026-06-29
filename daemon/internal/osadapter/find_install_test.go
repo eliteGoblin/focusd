@@ -35,7 +35,7 @@ func TestParsePlistReturnsArgv(t *testing.T) {
 	}
 
 	wantLabel := s.Label(RoleA)
-	label, bin, argv := parsePlist(plistPath)
+	label, bin, argv, _ := parsePlist(plistPath)
 	if label != wantLabel {
 		t.Fatalf("label = %q, want %q", label, wantLabel)
 	}

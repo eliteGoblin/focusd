@@ -35,6 +35,23 @@ func writeGeneration(t *testing.T, home, laDir, tag string, roster []string) (bi
 	return binPath, wd
 }
 
+// writeDeadGeneration writes the given roles' mesh plists for a generation
+// whose binary is DELETED (never created) — the zombie left by a workdir-delete
+// recovery cycle. Returns the dangling binary path + workdir.
+func writeDeadGeneration(t *testing.T, home, laDir, tag string, roster []string, roles ...Role) (binPath, wd string) {
+	t.Helper()
+	wd = filepath.Join(home, "Library", "Application Support", "."+tag)
+	binPath = filepath.Join(wd, tag+".bin")
+	s := Spec{Mode: mode.User, SelfPath: binPath, Workdir: wd, Roster: roster}
+	for _, r := range roles {
+		pp := filepath.Join(laDir, s.Label(r)+".plist")
+		if err := os.WriteFile(pp, []byte(Plist(s, r)), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return binPath, wd
+}
+
 func laDirUnderHome(t *testing.T) (home, laDir string) {
 	t.Helper()
 	home = t.TempDir()
@@ -77,9 +94,12 @@ func TestDiscoverAllGenerationsGroupsByVerifiedBinary(t *testing.T) {
 	// Verifier accepts ONLY the two real generation binaries.
 	verify := Verifier(func(p string) (bool, error) { return p == bin1 || p == bin2, nil })
 
-	gens, err := DiscoverAllGenerations(mode.User, verify)
+	gens, dead, err := DiscoverAllGenerations(mode.User, verify)
 	if err != nil {
 		t.Fatalf("DiscoverAllGenerations: %v", err)
+	}
+	if len(dead) != 0 {
+		t.Fatalf("present binaries must not be dead generations, got %+v", dead)
 	}
 	if len(gens) != 2 {
 		t.Fatalf("want 2 generations, got %d: %+v", len(gens), gens)
@@ -125,12 +145,15 @@ func TestDiscoverAllGenerationsExcludesNonMesh(t *testing.T) {
 	}
 
 	verify := Verifier(func(p string) (bool, error) { return p == binPath, nil })
-	gens, err := DiscoverAllGenerations(mode.User, verify)
+	gens, dead, err := DiscoverAllGenerations(mode.User, verify)
 	if err != nil {
 		t.Fatalf("DiscoverAllGenerations: %v", err)
 	}
 	if len(gens) != 0 {
 		t.Fatalf("a verified-but-non-mesh generation must be excluded, got %+v", gens)
+	}
+	if len(dead) != 0 {
+		t.Fatalf("a present-binary generation must never be dead, got %+v", dead)
 	}
 }
 
@@ -139,12 +162,94 @@ func TestDiscoverAllGenerationsExcludesNonMesh(t *testing.T) {
 func TestDiscoverAllGenerationsNoLaunchDir(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
-	gens, err := DiscoverAllGenerations(mode.User, Verifier(func(string) (bool, error) { return false, nil }))
+	gens, dead, err := DiscoverAllGenerations(mode.User, Verifier(func(string) (bool, error) { return false, nil }))
 	if err != nil {
 		t.Fatalf("err = %v", err)
 	}
 	if len(gens) != 0 {
 		t.Fatalf("want zero generations, got %+v", gens)
+	}
+	if len(dead) != 0 {
+		t.Fatalf("want zero dead generations, got %+v", dead)
+	}
+}
+
+// readFileVerifier mimics sig.VerifyFile's classification for tests: a deleted
+// binary yields a wrapped ENOENT error (the "dead generation" path), a present
+// "VENDOR" file fails the signature (ok=false), and any other present file is
+// accepted. errors.Is(err, fs.ErrNotExist) holds because os.ReadFile wraps the
+// real syscall error.
+func readFileVerifier(p string) (bool, error) {
+	data, err := os.ReadFile(p)
+	if err != nil {
+		return false, err // deleted binary → ENOENT → dead generation
+	}
+	return string(data) != "VENDOR", nil
+}
+
+// TestDiscoverAllGenerationsRecordsDeadBinary: a generation whose binary was
+// DELETED but whose plists carry the mesh worker marker is returned as a DEAD
+// generation (not silently dropped). A vendor plist (binary present, fails sig)
+// is excluded. A non-mesh dead plist (deleted binary, ensure-only, no marker)
+// is NOT treated as ours.
+func TestDiscoverAllGenerationsRecordsDeadBinary(t *testing.T) {
+	home, laDir := laDirUnderHome(t)
+
+	// A live, present generation (control: must stay live, never dead).
+	liveRoster := []string{"com.apple.metadata.helper.1", "com.google.keystone.daemon.2", "org.mozilla.updater.agent.3"}
+	liveBin, _ := writeGeneration(t, home, laDir, "live", liveRoster)
+
+	// A DEAD full-mesh generation: binary deleted, all three plists present
+	// (workers carry the mesh marker → meshSeen true). The ensure plist has no
+	// marker but shares the dangling bin path, so it is swept in.
+	deadRoster := []string{"com.docker.helper.4", "us.zoom.ZoomDaemon.svc.5", "io.tailscale.ipnextension.relay.6"}
+	deadBin, deadWd := writeDeadGeneration(t, home, laDir, "dead", deadRoster, AllRoles...)
+
+	// A non-mesh DEAD plist: binary deleted, ONLY the ensure role (no marker)
+	// under a distinct dangling bin → must NOT be treated as ours.
+	ensRoster := []string{"com.vendor.x.7", "com.vendor.y.8", "com.vendor.z.9"}
+	writeDeadGeneration(t, home, laDir, "ensonly", ensRoster, RoleEnsure)
+
+	// A vendor plist whose binary EXISTS but fails the signature.
+	vendorWd := filepath.Join(home, "Library", "Application Support", ".vendor")
+	vendorBin := filepath.Join(vendorWd, "vendor.bin")
+	if err := os.MkdirAll(vendorWd, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(vendorBin, []byte("VENDOR"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	vs := Spec{Mode: mode.User, SelfPath: vendorBin, Workdir: vendorWd,
+		Roster: []string{"com.v.a.a", "com.v.b.b", "com.v.c.c"}}
+	for _, r := range AllRoles {
+		pp := filepath.Join(laDir, vs.Label(r)+".plist")
+		if err := os.WriteFile(pp, []byte(Plist(vs, r)), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	gens, dead, err := DiscoverAllGenerations(mode.User, Verifier(readFileVerifier))
+	if err != nil {
+		t.Fatalf("DiscoverAllGenerations: %v", err)
+	}
+
+	// Only the live generation is live.
+	if len(gens) != 1 || gens[0].BinaryPath != liveBin {
+		t.Fatalf("want exactly the live generation, got %+v", gens)
+	}
+	// Exactly one dead generation: the full-mesh zombie (ensure-only + vendor excluded).
+	if len(dead) != 1 {
+		t.Fatalf("want exactly 1 dead generation, got %d: %+v", len(dead), dead)
+	}
+	d := dead[0]
+	if d.BinaryPath != deadBin {
+		t.Errorf("dead binary = %q, want %q", d.BinaryPath, deadBin)
+	}
+	if d.Workdir != deadWd {
+		t.Errorf("dead workdir = %q, want %q", d.Workdir, deadWd)
+	}
+	if len(d.Labels) != 3 || len(d.PlistPaths) != 3 {
+		t.Errorf("dead generation: want 3 labels/plists (incl. swept-in ensure), got %d/%d", len(d.Labels), len(d.PlistPaths))
 	}
 }
 
@@ -196,7 +301,7 @@ func TestRetireGenerationsKeepsKeepRetiresOthers(t *testing.T) {
 	}
 
 	f := &fakeRetire{}
-	n := retireGenerations(gens, keepBin, root,
+	n := retireGenerations(gens, nil, keepBin, root,
 		func(l string) error { f.bootedOut = append(f.bootedOut, l); return nil },
 		func(p string) error { f.removedPlist = append(f.removedPlist, p); return nil },
 		func(b string) { f.killed = append(f.killed, b) },
@@ -247,7 +352,7 @@ func TestRetireGenerationsNoopOnEmptyKeep(t *testing.T) {
 		},
 	}
 	f := &fakeRetire{}
-	n := retireGenerations(gens, "", root,
+	n := retireGenerations(gens, nil, "", root,
 		func(l string) error { f.bootedOut = append(f.bootedOut, l); return nil },
 		func(p string) error { f.removedPlist = append(f.removedPlist, p); return nil },
 		func(b string) { f.killed = append(f.killed, b) },
@@ -265,6 +370,124 @@ func TestRetireGenerationsNoopOnEmptyKeep(t *testing.T) {
 	}
 }
 
+// TestRetireGenerationsRetiresDeadZombies: dead generations are booted out,
+// their plists removed, the dangling binary pkill'd, and their workdir
+// RemoveAll'd ONLY when path-sanity allows — counted in the retired total. The
+// keep generation is never touched.
+func TestRetireGenerationsRetiresDeadZombies(t *testing.T) {
+	mkdir := func(p string) string {
+		t.Helper()
+		if err := os.MkdirAll(p, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		return p
+	}
+	root := t.TempDir()
+	keepWorkdir := mkdir(filepath.Join(root, ".keep"))
+	keepBin := filepath.Join(keepWorkdir, "keep.bin")
+
+	// Dead zombie with a SAFE workdir (still on disk, under root) → full retire
+	// including RemoveAll. A real zombie's workdir is often already gone, in
+	// which case safeToRemoveWorkdir refuses (EvalSymlinks fails) — but the
+	// bootout/rm/pkill still run; we keep it present here to exercise RemoveAll.
+	deadSafeWd := mkdir(filepath.Join(root, ".deadsafe"))
+	// Dead zombie with an UNSAFE workdir (outside root) → no RemoveAll, still torn down.
+	deadUnsafeWd := t.TempDir()
+
+	gens := []Generation{{
+		BinaryPath: keepBin, Workdir: keepWorkdir,
+		Labels:     []string{"k1", "k2", "k3"},
+		PlistPaths: []string{"/p/k1", "/p/k2", "/p/k3"},
+	}}
+	dead := []DeadGeneration{
+		{
+			BinaryPath: filepath.Join(deadSafeWd, "deadsafe.bin"),
+			Workdir:    deadSafeWd,
+			Labels:     []string{"d1a", "d1b", "d1c"},
+			PlistPaths: []string{"/p/d1a", "/p/d1b", "/p/d1c"},
+		},
+		{
+			BinaryPath: filepath.Join(deadUnsafeWd, "deadunsafe.bin"),
+			Workdir:    deadUnsafeWd,
+			Labels:     []string{"d2a"},
+			PlistPaths: []string{"/p/d2a"},
+		},
+	}
+
+	f := &fakeRetire{}
+	n := retireGenerations(gens, dead, keepBin, root,
+		func(l string) error { f.bootedOut = append(f.bootedOut, l); return nil },
+		func(p string) error { f.removedPlist = append(f.removedPlist, p); return nil },
+		func(b string) { f.killed = append(f.killed, b) },
+		func(d string) error { f.removedAll = append(f.removedAll, d); return nil },
+	)
+
+	// Only keep is live (skipped); both dead zombies retired.
+	if n != 2 {
+		t.Fatalf("retired count = %d, want 2 (both dead zombies)", n)
+	}
+	// Keep generation untouched.
+	if contains(f.bootedOut, "k1") || contains(f.removedAll, keepWorkdir) {
+		t.Fatalf("keep generation must never be retired, bootedOut=%v removedAll=%v", f.bootedOut, f.removedAll)
+	}
+	// Both dead zombies booted out + binaries killed.
+	for _, lbl := range []string{"d1a", "d1b", "d1c", "d2a"} {
+		if !contains(f.bootedOut, lbl) {
+			t.Fatalf("dead label %q must be booted out, got %v", lbl, f.bootedOut)
+		}
+	}
+	if !contains(f.killed, filepath.Join(deadSafeWd, "deadsafe.bin")) ||
+		!contains(f.killed, filepath.Join(deadUnsafeWd, "deadunsafe.bin")) {
+		t.Fatalf("dead binaries must be pkill'd, got %v", f.killed)
+	}
+	// Safe dead workdir removed; unsafe one NOT.
+	if !contains(f.removedAll, deadSafeWd) {
+		t.Fatalf("safe dead workdir must be RemoveAll'd, got %v", f.removedAll)
+	}
+	if contains(f.removedAll, deadUnsafeWd) {
+		t.Fatalf("unsafe dead workdir must NOT be RemoveAll'd, got %v", f.removedAll)
+	}
+}
+
+// TestRetireGenerationsSkipsPkillOnShortPath: a dead-generation plist whose
+// ProgramArguments[0] is a short root-ish path (e.g. "/") must NOT expand into
+// a broad `pkill -f /` that reaps unrelated processes. The generation is still
+// booted out + plists removed, but killBin is never called for the short path.
+func TestRetireGenerationsSkipsPkillOnShortPath(t *testing.T) {
+	root := t.TempDir()
+	keepWorkdir := filepath.Join(root, ".keep")
+	if err := os.MkdirAll(keepWorkdir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	keepBin := filepath.Join(keepWorkdir, "keep.bin")
+
+	dead := []DeadGeneration{{
+		BinaryPath: "/", // corrupt/dangling short path — must NOT be pkill'd
+		Workdir:    "/", // unsafe by construction → no RemoveAll either
+		Labels:     []string{"shortd"},
+		PlistPaths: []string{"/p/shortd"},
+	}}
+
+	f := &fakeRetire{}
+	n := retireGenerations(nil, dead, keepBin, root,
+		func(l string) error { f.bootedOut = append(f.bootedOut, l); return nil },
+		func(p string) error { f.removedPlist = append(f.removedPlist, p); return nil },
+		func(b string) { f.killed = append(f.killed, b) },
+		func(d string) error { f.removedAll = append(f.removedAll, d); return nil },
+	)
+
+	if n != 1 {
+		t.Fatalf("retired count = %d, want 1", n)
+	}
+	// Booted out + plist removed, but the short path was never pkill'd.
+	if !contains(f.bootedOut, "shortd") {
+		t.Fatalf("short-path dead gen must still be booted out, got %v", f.bootedOut)
+	}
+	if len(f.killed) != 0 {
+		t.Fatalf("short path %q must NOT be pkill'd, got killed=%v", "/", f.killed)
+	}
+}
+
 func contains(xs []string, want string) bool {
 	for _, x := range xs {
 		if x == want {
@@ -276,7 +499,8 @@ func contains(xs []string, want string) bool {
 
 // TestParsePlistBinaryFormat: a BINARY-format plist (the real-world hardening
 // case) is converted via plutil and parsed correctly — label, binary path, and
-// argv (including --mesh) are all recovered.
+// the FEATURE 19 EnvironmentVariables mesh marker are all recovered (the prod
+// worker plist carries the marker in env, not argv).
 func TestParsePlistBinaryFormat(t *testing.T) {
 	dir := t.TempDir()
 	binPath := filepath.Join(dir, "com.apple.metadata.helper.bbbb")
@@ -296,14 +520,20 @@ func TestParsePlistBinaryFormat(t *testing.T) {
 		t.Fatal("expected a binary plist, but it still looks like XML")
 	}
 
-	label, bin, argv := parsePlist(plistPath)
+	label, bin, argv, env := parsePlist(plistPath)
 	if label != s.Label(RoleA) {
 		t.Errorf("label = %q, want %q", label, s.Label(RoleA))
 	}
 	if bin != binPath {
 		t.Errorf("bin = %q, want %q", bin, binPath)
 	}
-	if !hasMeshFlag(argv) {
-		t.Errorf("argv must carry --mesh, got %v", argv)
+	// FEATURE 19: a prod worker carries the mesh marker in EnvironmentVariables,
+	// not argv. The binary-format parse must recover it so the union predicate
+	// still corroborates the generation.
+	if env[MeshEnvKey] != "run:a" {
+		t.Errorf("env[%s] = %q, want run:a (got env %v)", MeshEnvKey, env[MeshEnvKey], env)
+	}
+	if !isFocusdMeshWorkerPlist(env, argv) {
+		t.Errorf("binary-format worker plist must corroborate the mesh, env=%v argv=%v", env, argv)
 	}
 }

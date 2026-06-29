@@ -41,50 +41,84 @@ func TestPrefixesPoolHasAtLeastThreeFamilies(t *testing.T) {
 	}
 }
 
-// TestGenerateRosterThreeDistinctFamilies asserts acceptance #1:
-// 3 labels, drawn from 3 DIFFERENT vendor families, no shared prefix/stem,
-// no .a/.b/.ensure (or any) role token, each well-formed.
-func TestGenerateRosterThreeDistinctFamilies(t *testing.T) {
-	shape := regexp.MustCompile(`^[a-zA-Z0-9._-]+\.[a-z]+\.[0-9a-f]{10}$`)
-	roleTokens := []string{".a", ".b", ".ensure"}
+// filenameSafe matches the label charset that is also a valid plist filename
+// stem (label == filepath.Base(plist) in bootstrap()): ASCII letters, digits,
+// dot, underscore, hyphen — no slashes, spaces, or colons.
+var filenameSafe = regexp.MustCompile(`^[A-Za-z0-9._-]+$`)
 
-	for iter := 0; iter < 200; iter++ {
+// TestGenerateRosterDistinctStyles asserts FEATURE 19 acceptance #1+#2: the
+// three labels do NOT read as a matching set. Each role gets a STRUCTURALLY
+// DISTINCT style:
+//   - role A → dotted reverse-DNS (has dots, no CamelCase, no trailing-d shape)
+//   - role B → CamelCase (no dots, starts uppercase)
+//   - role ensure → lowercase unix-daemon (no dots, lowercase, trailing 'd')
+//
+// None carry a role token (.a/.b/.ensure) or "focusd"; all are filename-safe.
+func TestGenerateRosterDistinctStyles(t *testing.T) {
+	roleTokens := []string{".a", ".b", ".ensure"}
+	for iter := 0; iter < 500; iter++ {
 		roster := GenerateRoster()
 		if len(roster) != 3 {
 			t.Fatalf("roster must have 3 labels, got %d: %v", len(roster), roster)
 		}
-		fams := map[string]struct{}{}
+		a, b, ens := roster[0], roster[1], roster[2]
+
 		for _, label := range roster {
 			if strings.Contains(label, "focusd") {
 				t.Fatalf("label leaks project string: %s", label)
 			}
-			if !shape.MatchString(label) {
-				t.Fatalf("label not well-formed: %s", label)
+			if !filenameSafe.MatchString(label) {
+				t.Fatalf("label not filename-safe: %q", label)
 			}
 			for _, tok := range roleTokens {
 				if strings.HasSuffix(label, tok) {
 					t.Fatalf("label carries role token %q: %s", tok, label)
 				}
 			}
-			fams[family(label)] = struct{}{}
 		}
-		if len(fams) != 3 {
-			t.Fatalf("roster families not distinct: %v (families %v)", roster, fams)
+
+		// role A: reverse-DNS → contains dots, all lowercase-ish (no uppercase).
+		if !strings.Contains(a, ".") {
+			t.Fatalf("role A must be dotted reverse-DNS: %q", a)
+		}
+		if a != strings.ToLower(a) {
+			t.Fatalf("role A reverse-DNS must be lowercase: %q", a)
+		}
+		// role B: CamelCase → NO dots, starts with an uppercase letter.
+		if strings.Contains(b, ".") {
+			t.Fatalf("role B CamelCase must have no dots: %q", b)
+		}
+		if b[0] < 'A' || b[0] > 'Z' {
+			t.Fatalf("role B CamelCase must start uppercase: %q", b)
+		}
+		// role ensure: daemon-ish → NO dots, lowercase, ends in 'd'.
+		if strings.Contains(ens, ".") {
+			t.Fatalf("role ensure daemon name must have no dots: %q", ens)
+		}
+		if ens != strings.ToLower(ens) || !strings.HasSuffix(ens, "d") {
+			t.Fatalf("role ensure must be a lowercase trailing-d daemon name: %q", ens)
+		}
+
+		// The three must not share a visible stem: no two are equal, and they
+		// have three different shapes (asserted above), so they can't cluster.
+		if a == b || b == ens || a == ens {
+			t.Fatalf("roster labels must be distinct: %v", roster)
 		}
 	}
 }
 
-// TestGenerateRosterNoSharedStem asserts the three labels do not all
-// share a common prefix segment (the cluster-find weakness F10 closes):
-// no two labels share the same family.
-func TestGenerateRosterNoSharedStem(t *testing.T) {
-	roster := GenerateRoster()
-	seen := map[string]struct{}{}
-	for _, label := range roster {
-		f := family(label)
-		if _, dup := seen[f]; dup {
-			t.Fatalf("two labels share family %q: %v", f, roster)
+// TestBinaryNamePoolDisjointFromLabelPools asserts FEATURE 19: the daemon binary
+// basename draws from its OWN word pool (binWords), disjoint from every mesh
+// label pool, so the binary shares no stem/word with any launchd label.
+func TestBinaryNamePoolDisjointFromLabelPools(t *testing.T) {
+	labelPools := [][]string{dnsRoots, dnsLeaves, camelVendors, camelMids, camelSuffixes, daemonRoots}
+	for _, w := range binWords {
+		for _, pool := range labelPools {
+			for _, p := range pool {
+				if strings.EqualFold(w, p) {
+					t.Fatalf("binWords token %q overlaps a label pool token %q", w, p)
+				}
+			}
 		}
-		seen[f] = struct{}{}
 	}
 }

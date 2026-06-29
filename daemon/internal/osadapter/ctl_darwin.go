@@ -4,8 +4,10 @@ package osadapter
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -187,7 +189,9 @@ func FindCurrentInstall(m mode.Mode, verify Verifier) (CurInstall, error) {
 			continue
 		}
 		pp := filepath.Join(laDir, e.Name())
-		label, bin, argv := parsePlist(pp)
+		// FindCurrentInstall correlates on the Ed25519-verified binary path
+		// (argv[0]); the env marker is not needed here (discarded).
+		label, bin, argv, _ := parsePlist(pp)
 		if label == "" || bin == "" {
 			continue
 		}
@@ -337,6 +341,21 @@ type Generation struct {
 	PlistPaths []string // aligned with Labels (same scan order)
 }
 
+// DeadGeneration is a focusd mesh generation whose binary has been DELETED —
+// the zombie left behind by a workdir-delete/recovery cycle (FEATURE 17
+// follow-up, TC-21). Its ProgramArguments[0] names a path that no longer
+// exists, so it can NOT be Ed25519-verified; the only signal that it is ours is
+// the mesh worker marker on at least one of its plists. Its launchd entries and
+// orphan platform/daemon processes still reference the (now-dangling) binary
+// path in their argv, so retirement boots out the labels, removes the plists,
+// and pkill-matches the dangling path to reap the orphans.
+type DeadGeneration struct {
+	BinaryPath string   // the DELETED ProgramArguments[0] path (still in the plist + the orphans' argv)
+	Workdir    string   // Dir(BinaryPath) — may itself be gone (then RemoveAll is a guarded no-op)
+	Labels     []string // every label whose plist points at the dead BinaryPath
+	PlistPaths []string // aligned with Labels (same scan order)
+}
+
 // genAccum accumulates one generation's plists during the scan.
 type genAccum struct {
 	binaryPath string
@@ -350,15 +369,27 @@ type genAccum struct {
 // genuine focusd plist by its DISTINCT Ed25519-verified binary path. The
 // signature check on ProgramArguments[0] is the authoritative safety belt — a
 // real third-party/vendor binary never verifies against our embedded key, so
-// no unrelated launchd job can ever be grouped (let alone retired). The
-// --mesh marker is a corroborating signal: a binary is treated as a real mesh
-// generation only when at least one of its plists carries --mesh (the ensure
-// role's `ensure` argv has none, but it is grouped in via the shared verified
-// binary). The out-of-band watchdog has NO LaunchDir plist (it is cron-driven)
+// no unrelated launchd job can ever be grouped (let alone retired). The mesh
+// WORKER marker is a corroborating signal: a binary is treated as a real mesh
+// generation only when at least one of its plists is a worker — carrying the
+// FEATURE 19 env marker (MeshEnvKey="run:<role>") OR the legacy --mesh argv
+// (isFocusdMeshWorkerPlist). The ensure role's plist has neither, but it is
+// grouped in via the shared verified binary. The out-of-band watchdog has NO
+// LaunchDir plist (it is cron-driven)
 // so it is never seen here — by construction it can never be discovered or
 // retired. verify is the signature seam (nil ⇒ sig.VerifyFile); tests inject
 // a fake. Generations are returned in first-seen order.
-func DiscoverAllGenerations(m mode.Mode, verify Verifier) ([]Generation, error) {
+//
+// FEATURE 17 follow-up (TC-21): a generation whose binary was DELETED by a
+// workdir-delete/recovery cycle can no longer be Ed25519-verified — os.ReadFile
+// returns ENOENT, so verify errors. Such a plist is NOT silently dropped (the
+// old behavior that let invisible-zombie generations + orphan platforms
+// accumulate). Instead it is grouped into the SECOND return value, the dead
+// generations, keyed by its dangling binary path and corroborated by the SAME
+// mesh worker marker — so a non-focusd vendor plist whose binary merely happens
+// to be absent is never treated as ours. A binary that EXISTS but fails the
+// signature (a genuine vendor binary) is still skipped, as before.
+func DiscoverAllGenerations(m mode.Mode, verify Verifier) (live []Generation, dead []DeadGeneration, err error) {
 	if verify == nil {
 		verify = sig.VerifyFile
 	}
@@ -367,50 +398,89 @@ func DiscoverAllGenerations(m mode.Mode, verify Verifier) ([]Generation, error) 
 	entries, rerr := os.ReadDir(laDir)
 	if rerr != nil {
 		if os.IsNotExist(rerr) {
-			return nil, nil
+			return nil, nil, nil
 		}
-		return nil, rerr
+		return nil, nil, rerr
 	}
-	var order []string // binary paths in first-seen order
+	var order []string // live binary paths in first-seen order
 	byBin := map[string]*genAccum{}
+	var deadOrder []string // dead (deleted) binary paths in first-seen order
+	deadByBin := map[string]*genAccum{}
+	// accumulate groups one plist into the given bin-keyed map, mirroring the
+	// live and dead grouping so the corroboration logic is identical.
+	accumulate := func(into map[string]*genAccum, ord *[]string, bin, label, pp string, argv []string, env map[string]string) {
+		g := into[bin]
+		if g == nil {
+			g = &genAccum{binaryPath: bin, workdir: WorkdirFromBinary(bin)}
+			into[bin] = g
+			*ord = append(*ord, bin)
+		}
+		g.labels = append(g.labels, label)
+		g.plistPaths = append(g.plistPaths, pp)
+		// FEATURE 19 union: a NEW plist corroborates via its env worker marker
+		// (MeshEnvKey="run:<role>"), an OLD plist via the legacy --mesh argv.
+		// The ensure role corroborates neither — an ensure-only generation is
+		// not a real mesh (preserved from FEATURE 17).
+		if isFocusdMeshWorkerPlist(env, argv) {
+			g.meshSeen = true
+		}
+	}
 	for _, e := range entries {
 		if e.IsDir() || !strings.HasSuffix(e.Name(), ".plist") {
 			continue
 		}
 		pp := filepath.Join(laDir, e.Name())
-		label, bin, argv := parsePlist(pp)
+		label, bin, argv, env := parsePlist(pp)
 		if label == "" || bin == "" {
 			continue
 		}
-		if ok, verr := verify(bin); verr != nil || !ok {
-			continue // not a genuine focusd binary → never a generation
-		}
-		g := byBin[bin]
-		if g == nil {
-			g = &genAccum{binaryPath: bin, workdir: WorkdirFromBinary(bin)}
-			byBin[bin] = g
-			order = append(order, bin)
-		}
-		g.labels = append(g.labels, label)
-		g.plistPaths = append(g.plistPaths, pp)
-		if hasMeshFlag(argv) {
-			g.meshSeen = true
+		ok, verr := verify(bin)
+		switch {
+		case verr == nil && ok:
+			// Live generation: a present, Ed25519-verified binary.
+			accumulate(byBin, &order, bin, label, pp, argv, env)
+		case verr != nil && errors.Is(verr, fs.ErrNotExist):
+			// Dead generation: ProgramArguments[0] names a binary that no
+			// longer exists (its workdir was deleted by a recovery cycle). A
+			// file that is gone cannot be Ed25519-verified, so the mesh worker
+			// marker is the ONLY signal this orphan plist is ours — group +
+			// corroborate it exactly like a live generation, keyed by the
+			// (now-dangling) bin path so the sibling ensure plist (no marker)
+			// is swept in via the shared path.
+			accumulate(deadByBin, &deadOrder, bin, label, pp, argv, env)
+		default:
+			// ok==false: a binary that EXISTS but fails the signature (a real
+			// vendor binary) → never ours. A non-ENOENT verify error (a present
+			// but malformed/unreadable file) → cannot classify → skip. Either
+			// way, leave it untouched.
+			continue
 		}
 	}
-	var out []Generation
 	for _, bin := range order {
 		g := byBin[bin]
 		if !g.meshSeen {
 			continue // verified binary but no --mesh plist → not a real mesh
 		}
-		out = append(out, Generation{
+		live = append(live, Generation{
 			BinaryPath: g.binaryPath,
 			Workdir:    g.workdir,
 			Labels:     g.labels,
 			PlistPaths: g.plistPaths,
 		})
 	}
-	return out, nil
+	for _, bin := range deadOrder {
+		g := deadByBin[bin]
+		if !g.meshSeen {
+			continue // deleted binary but no mesh marker → not ours (vendor)
+		}
+		dead = append(dead, DeadGeneration{
+			BinaryPath: g.binaryPath,
+			Workdir:    g.workdir,
+			Labels:     g.labels,
+			PlistPaths: g.plistPaths,
+		})
+	}
+	return live, dead, nil
 }
 
 // RetireOtherGenerations discovers every focusd generation and tears down each
@@ -422,6 +492,12 @@ func DiscoverAllGenerations(m mode.Mode, verify Verifier) ([]Generation, error) 
 // step's failure does not abort the rest. Called AFTER a successful install so
 // the new generation is already up; NEVER from the self-update path (in-place
 // rotation transiently looks like two generations).
+//
+// FEATURE 17 follow-up (TC-21): it ALSO retires DEAD generations — zombies whose
+// binary was deleted by a workdir-delete/recovery cycle. Their launchd entries
+// and orphan platform/daemon processes persist invisibly otherwise (the old
+// "retired 1 while ≥2 live generations remain" bug). pkill -f against the
+// dangling binary path matches the orphans' argv and reaps them.
 func RetireOtherGenerations(m mode.Mode, keepBinaryPath string) (int, error) {
 	// Refuse to retire ANYTHING without a surviving generation to keep: an
 	// empty keepBinaryPath would make every discovered generation "other" and
@@ -430,24 +506,31 @@ func RetireOtherGenerations(m mode.Mode, keepBinaryPath string) (int, error) {
 	if keepBinaryPath == "" {
 		return 0, fmt.Errorf("retire: keepBinaryPath must not be empty")
 	}
-	gens, err := DiscoverAllGenerations(m, sig.VerifyFile)
+	gens, dead, err := DiscoverAllGenerations(m, sig.VerifyFile)
 	if err != nil {
 		return 0, err
 	}
 	home, _ := os.UserHomeDir()
 	root := mode.SupportRoot(m, home)
 	c := launchctlCtl{m: m}
-	return retireGenerations(gens, keepBinaryPath, root,
+	return retireGenerations(gens, dead, keepBinaryPath, root,
 		c.bootout, os.Remove, pkillBinary, os.RemoveAll), nil
 }
+
+// minBinPathLen is the floor on a binary path before retirement will pkill -f
+// it. Any real disguised install path is far longer; a short value like "/"
+// (a corrupt/dead-gen ProgramArguments[0]) must never expand into a broad
+// `pkill -f /` that reaps unrelated processes.
+const minBinPathLen = 20 // shorter than any real disguised install path
 
 // retireGenerations is the seam-injected core of RetireOtherGenerations, split
 // out so the teardown ordering + the os.RemoveAll path-sanity gating are unit-
 // tested with fakes (no real launchd / FS deletion). bootout/removePlist/
 // killBin/removeAll are the side-effecting seams. Returns the number of
-// generations retired (those whose BinaryPath != keepBinaryPath).
+// generations retired (live others whose BinaryPath != keepBinaryPath, PLUS
+// every dead/zombie generation).
 func retireGenerations(
-	gens []Generation, keepBinaryPath, supportRoot string,
+	gens []Generation, dead []DeadGeneration, keepBinaryPath, supportRoot string,
 	bootout func(string) error,
 	removePlist func(string) error,
 	killBin func(string),
@@ -460,25 +543,46 @@ func retireGenerations(
 	}
 	keepWorkdir := filepath.Dir(keepBinaryPath)
 	retired := 0
+	// retire performs the common teardown — bootout every label, remove every
+	// plist, best-effort kill the binary's processes, and (GUARDED) RemoveAll
+	// the workdir. Shared by live-other and dead generations so the ordering +
+	// gating are identical.
+	retire := func(bin, workdir string, labels, plistPaths []string) {
+		for i, lbl := range labels {
+			_ = bootout(lbl)
+			if i < len(plistPaths) {
+				_ = removePlist(plistPaths[i])
+			}
+		}
+		// GUARD: never pkill -f a short path. A dead-generation plist whose
+		// ProgramArguments[0] is "/" (or any short root-ish path) must NOT
+		// expand into `pkill -f /` and reap unrelated processes. Real disguised
+		// install paths are far longer than minBinPathLen.
+		if len(bin) > minBinPathLen {
+			killBin(bin) // best-effort; no surviving daemon shares this path
+		}
+		// GUARD: only RemoveAll a workdir that is strictly under the mode's
+		// support root, is not the keep workdir, and is not an ancestor of it.
+		if safeToRemoveWorkdir(workdir, supportRoot, keepWorkdir) {
+			_ = removeAll(workdir)
+		}
+		retired++
+	}
 	for _, g := range gens {
 		if g.BinaryPath == keepBinaryPath {
 			continue // the surviving generation — never retire it
 		}
-		for i, lbl := range g.Labels {
-			_ = bootout(lbl)
-			if i < len(g.PlistPaths) {
-				_ = removePlist(g.PlistPaths[i])
-			}
+		retire(g.BinaryPath, g.Workdir, g.Labels, g.PlistPaths)
+	}
+	// Dead/zombie generations: binary already deleted, so by construction never
+	// the keep (whose binary is present + verified). pkill -f against the
+	// dangling path reaps the orphan platform/daemon procs still showing it in
+	// argv. Defensive equality guard against a pathological keep == dead bin.
+	for _, d := range dead {
+		if d.BinaryPath == keepBinaryPath {
+			continue
 		}
-		if g.BinaryPath != "" {
-			killBin(g.BinaryPath) // best-effort; no surviving daemon shares this path
-		}
-		// GUARD: only RemoveAll a workdir that is strictly under the mode's
-		// support root, is not the keep workdir, and is not an ancestor of it.
-		if safeToRemoveWorkdir(g.Workdir, supportRoot, keepWorkdir) {
-			_ = removeAll(g.Workdir)
-		}
-		retired++
+		retire(d.BinaryPath, d.Workdir, d.Labels, d.PlistPaths)
 	}
 	return retired
 }
@@ -509,14 +613,19 @@ var interTagSpaceRE = regexp.MustCompile(`>\s+<`)
 // tags, so they are untouched.
 func collapseInterTagSpace(s string) string { return interTagSpaceRE.ReplaceAllString(s, "><") }
 
-// parsePlist extracts the Label, the first ProgramArguments string
-// (the binary path) and the full argv (binary path + arguments) from
-// one of our generated plists. argv[0] == bin; len(argv) == 0 on parse
-// failure.
-func parsePlist(path string) (label, bin string, argv []string) {
+// parsePlist extracts the Label, the first ProgramArguments string (the binary
+// path), the full argv (binary path + arguments), and the plist's
+// EnvironmentVariables map from one of our generated plists. argv[0] == bin;
+// len(argv) == 0 and env == nil on parse failure.
+//
+// FEATURE 19: the env map carries the mesh role marker (MeshEnvKey) that the
+// minimized prod argv no longer holds — DiscoverAllGenerations unions it with
+// the legacy --mesh argv marker so generation cleanup recognises both new and
+// old plists (see isFocusdMeshWorkerPlist).
+func parsePlist(path string) (label, bin string, argv []string, env map[string]string) {
 	b, err := os.ReadFile(path)
 	if err != nil {
-		return "", "", nil
+		return "", "", nil, nil
 	}
 	s := string(b)
 	// Harden against BINARY-format plists (FEATURE 17): the substring scanner
@@ -531,10 +640,11 @@ func parsePlist(path string) (label, bin string, argv []string) {
 			s = collapseInterTagSpace(conv)
 		}
 	}
+	env = parseEnvDict(s)
 	label = between(s, "<key>Label</key><string>", "</string>")
 	i := strings.Index(s, "<key>ProgramArguments</key><array>")
 	if i < 0 {
-		return label, "", nil
+		return label, "", nil, env
 	}
 	// Walk the inner <string>...</string> entries up to the closing
 	// </array>; preserves order and handles the "--flag value" pair
@@ -542,7 +652,7 @@ func parsePlist(path string) (label, bin string, argv []string) {
 	tail := s[i+len("<key>ProgramArguments</key><array>"):]
 	end := strings.Index(tail, "</array>")
 	if end < 0 {
-		return label, "", nil
+		return label, "", nil, env
 	}
 	inner := tail[:end]
 	for {
@@ -561,7 +671,54 @@ func parsePlist(path string) (label, bin string, argv []string) {
 	if len(argv) > 0 {
 		bin = argv[0]
 	}
-	return label, bin, argv
+	return label, bin, argv, env
+}
+
+// parseEnvDict extracts the plist's EnvironmentVariables <dict> into a map of
+// <key>→<string> (FEATURE 19). Returns nil when there is no EnvironmentVariables
+// dict (an OLD plist, the test-mode plist, or a vendor plist). It walks the same
+// "<key>…</key><string>…</string>" adjacency the ProgramArguments scanner relies
+// on; binary plists are normalized via collapseInterTagSpace upstream so the
+// adjacency holds.
+func parseEnvDict(s string) map[string]string {
+	const head = "<key>EnvironmentVariables</key><dict>"
+	i := strings.Index(s, head)
+	if i < 0 {
+		return nil
+	}
+	tail := s[i+len(head):]
+	end := strings.Index(tail, "</dict>")
+	if end < 0 {
+		return nil
+	}
+	inner := tail[:end]
+	out := map[string]string{}
+	for {
+		ks := strings.Index(inner, "<key>")
+		if ks < 0 {
+			break
+		}
+		ke := strings.Index(inner[ks:], "</key>")
+		if ke < 0 {
+			break
+		}
+		key := strings.TrimSpace(inner[ks+len("<key>") : ks+ke])
+		rest := inner[ks+ke+len("</key>"):]
+		vs := strings.Index(rest, "<string>")
+		if vs < 0 {
+			break
+		}
+		ve := strings.Index(rest[vs:], "</string>")
+		if ve < 0 {
+			break
+		}
+		out[key] = strings.TrimSpace(rest[vs+len("<string>") : vs+ve])
+		inner = rest[vs+ve+len("</string>"):]
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
 }
 
 // launchctlProber introspects launchd for the health poll. The label

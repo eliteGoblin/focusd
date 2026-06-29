@@ -69,8 +69,20 @@ func main() { os.Exit(run(os.Args[1:])) }
 
 func run(args []string) int {
 	if len(args) == 0 {
-		usage()
-		return 2
+		// PROD launchd start (FEATURE 19): the minimized plist's
+		// ProgramArguments is the binary alone — the role/mesh marker rides in
+		// the plist's EnvironmentVariables (off-argv, hidden from `ps`).
+		// Reconstruct the legacy subcommand argv from that env var so every
+		// downstream path (parse/loop/doEnsure) sees exactly the argv it always
+		// did. A missing or malformed var yields nil → fall through to usage()
+		// unchanged (a human `daemon <cmd>` always passes non-empty argv and so
+		// never reaches this branch).
+		if synth := osadapter.ArgvFromEnv(); len(synth) > 0 {
+			args = synth
+		} else {
+			usage()
+			return 2
+		}
 	}
 	switch args[0] {
 	case "version", "-v", "--version":

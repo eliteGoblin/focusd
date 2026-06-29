@@ -36,8 +36,17 @@ type Generation struct {
 	PlistPaths []string
 }
 
-func DiscoverAllGenerations(mode.Mode, Verifier) ([]Generation, error) {
-	return nil, ErrUnsupported
+// DeadGeneration mirrors the darwin definition (FEATURE 17 follow-up) so
+// cross-platform code that references it compiles on non-darwin.
+type DeadGeneration struct {
+	BinaryPath string
+	Workdir    string
+	Labels     []string
+	PlistPaths []string
+}
+
+func DiscoverAllGenerations(mode.Mode, Verifier) ([]Generation, []DeadGeneration, error) {
+	return nil, nil, ErrUnsupported
 }
 
 // RetireOtherGenerations is a no-op on non-darwin (no launchd mesh to retire).
