@@ -17,6 +17,7 @@ import (
 	"log/slog"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"regexp"
 	"runtime"
 	"strings"
@@ -259,6 +260,40 @@ func platformAsset() string { return "platform-" + runtime.GOOS + "-" + runtime.
 // an empty repo would malform the fetch URL → 404 → no self-heal.
 const defaultGithubRepo = "eliteGoblin/focusd"
 
+// defaultPlatformVersion is the baked, compiled-in platform version the
+// reconcile loop adopts when the on-disk store carries NO desired version
+// (FEATURE 17, recovery resilience). A wiped workdir would otherwise leave
+// the daemon Blocked forever (no desired ⇒ no platform ⇒ no protection); the
+// baked fallback lets a survivor re-pin a known-good version and self-heal.
+//
+// FLOOR-not-ceiling: this is consulted ONLY when the store desired is empty.
+// `install -v` / `update` always WriteDesired and win, so the fallback can
+// never pin DOWN a newer pinned version. Bump it on each release so a
+// fresh-wiped install self-heals to a current build. Validated by
+// TestDefaultPlatformVersionValid against isValidVersionTag.
+const defaultPlatformVersion = "v0.16.3"
+
+// fixedSingletonLockName is the basename of the cross-generation platform
+// singleton lock (FEATURE 17, Item 2). It lives at a FIXED path under the
+// mode's Application Support root — NOT inside the rotating workdir — so the
+// flock elects exactly ONE platform supervisor even across path-rotating
+// self-update generations (a per-workdir lock would let each generation run
+// its own platform). Disguised as a dotted Apple-metadata-looking file so a
+// casual `ls` doesn't flag it; the durable commitment weight lives elsewhere.
+const fixedSingletonLockName = ".com.apple.metadata.plist.lck"
+
+// singletonLockPath returns the path of the cross-generation platform
+// singleton lock for a mode. user/system → the FIXED mode-keyed path under
+// SupportRoot (survives workdir rotation). test → the per-workdir path
+// (Store.LockPath()) so concurrent e2e installs stay isolated.
+func singletonLockPath(m mode.Mode, workdir string) string {
+	if m == mode.Test {
+		return (&core.Store{Dir: workdir}).LockPath()
+	}
+	home, _ := os.UserHomeDir()
+	return filepath.Join(mode.SupportRoot(m, home), fixedSingletonLockName)
+}
+
 // splitRoster parses the comma-joined --roster flag into the label set.
 // Empty → nil (the dev/test fallback in Spec.Label takes over).
 func splitRoster(s string) []string {
@@ -293,7 +328,17 @@ func build(o opts) (*core.Executor, *slog.Logger) {
 	// (loop()->Tick->apply) ever acquires it, electing one platform supervisor
 	// across the A/B mesh roles. Non-ticking callers (update/install) construct
 	// but never acquire. NewFileLock's zero value is unlocked.
-	return core.NewExecutor(st, f, p, core.NewFileLock(), log), log
+	e := core.NewExecutor(st, f, p, core.NewFileLock(), log)
+	// FEATURE 17 Item 1: bake the fallback platform version so a wiped workdir
+	// self-heals instead of blocking. Guard with the strict tag validator —
+	// an invalid baked value leaves Fallback empty (today's safe Blocked).
+	if isValidVersionTag(defaultPlatformVersion) {
+		e.Fallback = defaultPlatformVersion
+	}
+	// FEATURE 17 Item 2: elect one platform across path-rotating generations
+	// via a fixed, mode-keyed lock path (test mode stays per-workdir).
+	e.LockFilePath = singletonLockPath(o.modeVal(), o.workdir)
+	return e, log
 }
 
 func loop(args []string, once bool) int {
@@ -623,7 +668,24 @@ func installMesh(self string, spec *osadapter.Spec, desired string) error {
 	if err := st.WriteDesired(desired); err != nil {
 		return fmt.Errorf("write desired: %w", err)
 	}
-	return osadapter.Install(*spec)
+	if err := osadapter.Install(*spec); err != nil {
+		return err
+	}
+	// FEATURE 17 Item 3: the new generation is up FIRST (above); now retire any
+	// OLDER generations left behind by a wiped-state reinstall (distinct
+	// Ed25519-verified binary path ≠ the one we just installed). Best-effort —
+	// a retire failure must NOT fail an otherwise-successful install, and the
+	// retired labels/paths are never surfaced (count is logged at the call
+	// site if at all). Idempotent: with no older generation present it is a
+	// no-op. NOT called from the self-update path (in-place rotation transiently
+	// looks like two generations).
+	if n, rerr := osadapter.RetireOtherGenerations(spec.Mode, spec.SelfPath); rerr != nil {
+		// Generic message only: rerr could embed a disguised path.
+		fmt.Fprintln(os.Stderr, "install: retire prior generations (best-effort) failed")
+	} else if n > 0 {
+		fmt.Printf("retired %d prior generation(s)\n", n)
+	}
+	return nil
 }
 
 // installFailureHint returns the operator guidance printed when

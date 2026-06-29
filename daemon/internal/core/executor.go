@@ -64,6 +64,26 @@ type Executor struct {
 	fetchRetryVersion string
 	// now is the clock seam (defaults to time.Now); tests inject a fake.
 	now func() time.Time
+	// Fallback is the baked, compiled-in platform version adopted ONLY when
+	// the on-disk store has no desired version (FEATURE 17, recovery
+	// resilience). A wiped workdir (store gone) would otherwise leave Decide
+	// permanently Blocked — no desired ⇒ no platform ⇒ no protection. With a
+	// Fallback set, the first tick on an empty store re-pins it (recreating the
+	// wiped workdir via WriteDesired's MkdirAll) and self-heals.
+	//
+	// FLOOR-not-ceiling: Fallback is consulted ONLY when the store desired is
+	// empty. An explicit `install -v` / `update` WriteDesired always wins and
+	// rolls forward — the fallback can never pin DOWN a newer pinned version.
+	// Empty Fallback ⇒ today's safe Blocked behavior (no self-heal).
+	Fallback string
+	// LockFilePath is the path of the cross-generation singleton lock the
+	// winning daemon flocks to elect ONE platform supervisor (FEATURE 17,
+	// Item 2). It is a FIXED, mode-keyed path that survives workdir rotation
+	// — NOT the per-workdir Store.LockPath() (which lets two path-rotating
+	// generations each run their own platform). Empty ⇒ fall back to
+	// Store.LockPath() (preserves existing tests + the test-mode per-workdir
+	// isolation, which build() sets explicitly).
+	LockFilePath string
 }
 
 // New builds an Executor.
@@ -116,9 +136,30 @@ func (e *Executor) Tick(ctx context.Context) (Action, error) {
 		}
 	}
 
+	desired := e.Store.Desired()
+	haveConfig := e.Store.HaveConfig()
+
+	// FEATURE 17 (recovery resilience): a wiped workdir leaves no desired
+	// version on disk, which Decide treats as Blocked → no platform → no
+	// protection. If a baked Fallback is set, adopt it: re-pin it to disk
+	// (WriteDesired's MkdirAll recreates the wiped workdir) so the very next
+	// tick drives EnsureRunning instead of Blocked. FLOOR-not-ceiling — this
+	// runs ONLY when the store desired is empty; an explicit pin always wins.
+	if desired == "" && e.Fallback != "" {
+		if e.Log != nil {
+			e.Log.Warn("no desired version on disk; adopting baked fallback")
+		}
+		// Best-effort persist. Even if the write fails (e.g. store not yet
+		// writable), drive toward the fallback THIS tick so a transient FS
+		// hiccup doesn't leave protection Blocked; the next tick re-attempts.
+		_ = e.Store.WriteDesired(e.Fallback)
+		desired = e.Fallback
+		haveConfig = true
+	}
+
 	st := State{
-		HaveConfig: e.Store.HaveConfig(),
-		Desired:    e.Store.Desired(),
+		HaveConfig: haveConfig,
+		Desired:    desired,
 		Running:    running,
 		Good:       e.Store.Good(),
 		Bad:        e.Store.BadSet(),
@@ -153,7 +194,17 @@ func (e *Executor) apply(ctx context.Context, a Action) error {
 		// Acquired ONCE before any Stop/Start so a standby never tears down
 		// the holder's child; the fd stays open for the executor's lifetime.
 		if !e.holdsLock {
-			ok, err := e.Lock.TryAcquire(e.Store.LockPath())
+			// FEATURE 17 (Item 2): elect ONE platform across path-rotating
+			// generations via a FIXED, mode-keyed lock path (LockFilePath),
+			// not the per-workdir Store.LockPath() — a rotated workdir would
+			// otherwise give each generation its own lock and run two
+			// platforms. Empty LockFilePath ⇒ per-workdir path (test-mode
+			// isolation + existing tests).
+			lockPath := e.LockFilePath
+			if lockPath == "" {
+				lockPath = e.Store.LockPath()
+			}
+			ok, err := e.Lock.TryAcquire(lockPath)
 			if err != nil {
 				return fmt.Errorf("singleton lock: %w", err)
 			}

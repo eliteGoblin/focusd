@@ -82,6 +82,63 @@ func WorkdirFromBinary(self string) string {
 	return parent
 }
 
+// hasMeshFlag reports whether a parsed argv carries the "--mesh" marker —
+// the corroborating signal (alongside Ed25519 verification of argv[0]) that a
+// plist belongs to a focusd self-healing mesh worker (FEATURE 17, generation
+// cleanup). The ensure role's argv (`ensure`) does NOT carry --mesh; a
+// generation is recognised when its VERIFIED binary has at least one --mesh
+// plist, and all plists sharing that binary are then grouped into it.
+func hasMeshFlag(argv []string) bool {
+	for _, a := range argv {
+		if a == "--mesh" {
+			return true
+		}
+	}
+	return false
+}
+
+// safeToRemoveWorkdir reports whether dir is a safe os.RemoveAll target during
+// generation cleanup (FEATURE 17, Item 3). The teardown deletes an OLD
+// generation's workdir, so a malformed/disguised value must never widen the
+// blast radius. A dir is safe ONLY when ALL hold:
+//   - it is a non-empty, absolute path;
+//   - it is STRICTLY nested under supportRoot (never the root itself, never
+//     outside it) — so a bug can't delete "/Library/Application Support" or a
+//     sibling tree;
+//   - it is NOT the keep generation's workdir; and
+//   - it is NOT an ancestor of the keep workdir (deleting an ancestor would
+//     take the surviving install — and the out-of-band watchdog dir, which is
+//     a sibling under the same root — down with it).
+//
+// Pure → unit-tested on Linux CI.
+func safeToRemoveWorkdir(dir, supportRoot, keepWorkdir string) bool {
+	if dir == "" || supportRoot == "" || !filepath.IsAbs(dir) {
+		return false
+	}
+	dir = filepath.Clean(dir)
+	root := filepath.Clean(supportRoot)
+
+	// Must be strictly under root: a valid relative path that is neither "."
+	// (== root) nor an escape ("..").
+	rel, err := filepath.Rel(root, dir)
+	if err != nil || rel == "." || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return false
+	}
+
+	if keepWorkdir != "" {
+		keep := filepath.Clean(keepWorkdir)
+		if dir == keep {
+			return false // never delete the surviving generation's workdir
+		}
+		// Reject dir being an ancestor of keep (would delete keep too).
+		if kr, kerr := filepath.Rel(dir, keep); kerr == nil &&
+			kr != ".." && !strings.HasPrefix(kr, ".."+string(filepath.Separator)) {
+			return false
+		}
+	}
+	return true
+}
+
 // intervalFromArgv pulls the reconcile interval following "--interval" out of
 // a parsed argv. Returns 0 when the flag is absent or unparseable — caller
 // substitutes a default.

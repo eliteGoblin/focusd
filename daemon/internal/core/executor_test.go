@@ -143,6 +143,67 @@ func TestExecutorPinnedDesiredStarts(t *testing.T) {
 	}
 }
 
+// FEATURE 17 Item 1: with NO desired version on disk but a baked Fallback,
+// the tick adopts the fallback — re-pins it to the store (recreating a wiped
+// workdir) and drives EnsureRunning, NOT Blocked. This is the wiped-workdir
+// self-heal.
+func TestExecutorFallbackAdoptedWhenNoDesired(t *testing.T) {
+	e, st, _, p := newExec(t)
+	e.Fallback = "v9"
+
+	a, err := e.Tick(context.Background())
+	if err != nil {
+		t.Fatalf("fallback tick must not error, got %v", err)
+	}
+	if a.Kind != EnsureRunning || a.Target != "v9" {
+		t.Fatalf("no desired + fallback ⇒ EnsureRunning v9, got %+v", a)
+	}
+	if st.Desired() != "v9" {
+		t.Fatalf("fallback must be persisted to the store, got desired=%q", st.Desired())
+	}
+	if p.running != "v9" || !st.HaveBin("v9") {
+		t.Fatalf("fallback v9 must be brought up: running=%q bin=%v", p.running, st.HaveBin("v9"))
+	}
+}
+
+// Floor-not-ceiling: an explicit on-disk desired always wins; the fallback is
+// never consulted when a version is already pinned (even an older-looking one).
+func TestExecutorExplicitDesiredWinsOverFallback(t *testing.T) {
+	e, st, _, p := newExec(t)
+	e.Fallback = "v9"
+	if err := st.WriteDesired("v1"); err != nil {
+		t.Fatal(err)
+	}
+
+	a, err := e.Tick(context.Background())
+	if err != nil {
+		t.Fatalf("tick: %v", err)
+	}
+	if a.Target != "v1" || p.running != "v1" {
+		t.Fatalf("explicit desired v1 must win over fallback v9, got %+v running=%q", a, p.running)
+	}
+	if st.Desired() != "v1" {
+		t.Fatalf("fallback must not overwrite an explicit desired, got %q", st.Desired())
+	}
+}
+
+// No desired AND no fallback ⇒ still Blocked (the safe default is preserved
+// when no fallback is baked in).
+func TestExecutorNoFallbackStillBlocked(t *testing.T) {
+	e, st, _, p := newExec(t)
+	// newExec leaves Fallback == "".
+	a, err := e.Tick(context.Background())
+	if err != nil || a.Kind != Blocked {
+		t.Fatalf("no desired + no fallback ⇒ Blocked, got %+v err=%v", a, err)
+	}
+	if st.Desired() != "" {
+		t.Fatalf("Blocked tick must not write desired, got %q", st.Desired())
+	}
+	if p.running != "" {
+		t.Fatalf("Blocked tick must start nothing, got %q", p.running)
+	}
+}
+
 func TestExecutorSteadyAndPromoteGood(t *testing.T) {
 	e, st, _, p := newExec(t)
 	st.WriteDesired("v1")
