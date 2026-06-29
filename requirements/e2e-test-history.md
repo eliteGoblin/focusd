@@ -20,7 +20,8 @@
 > TC-23 (rebuild/watchdog path still leaks mesh role on argv — open follow-up);
 > the F17/F19 convergence + status-flip follow-ups ↔ TC-21 (post-recovery
 > convergence — PASS) + TC-22 (status never false-UNKNOWN — DB run-history
-> concurrency — PASS).**
+> concurrency — PASS) + TC-24 (churn-window status-vs-disk skew — WATCH).
+> TC-23 confirmed open with decisive evidence (bug #83).**
 >
 > **Redaction (non-negotiable).** Verify as a developer, but NEVER print the
 > disguised workdir, labels, rotated binary paths, or plugin paths. Report
@@ -332,8 +333,32 @@ mesh; macOS gives no API to re-enable), (d) **kill all processes**, plus their
 - **Fix direction:** route the watchdog/rebuild mesh-install through the same F19
   env-carried plist path that `daemon install` uses, so every rebuild path is
   leak-free by construction.
-- **Expect:** 0 mesh hits after rebuild. **Status: 🟡 FAIL** (live, daemon-v0.5.9,
-  2026-06-29) until the rebuild path adopts the F19 env path.
+- **Expect:** 0 mesh hits after rebuild. **Status: 🟡 FAIL (confirmed — decisive
+  evidence)** (live, daemon-v0.5.10, 2026-06-29) — bug **#83**. Direct plist read
+  after a companion rebuild: rebuilt mesh plists with `--mesh` in ProgramArguments
+  = **2**, plists carrying the F19 env marker = **0** → the rebuild writes
+  **pre-F19-format** plists. Two prior theories **refuted**: NOT test-mode (the prod
+  daemon rejects `--test-mode`; the release was built without the e2e tag; mode
+  resolves to System, never Test) and NOT a stale backup (the backup is
+  daemon-v0.5.9, which already carries F19). **Root cause not yet pinned.**
+  Hygiene/friction (protection stayed HEALTHY; a clean install clears the leak → 0).
+  Fix direction unchanged: route the rebuild mesh-install through the F19 env path
+  — see #83.
+
+### TC-24 🟡 Status never reads green while the disk is empty — churn-window status-vs-disk skew — *F17/F18 observability*  `[found 2026-06-29 — WATCH]`
+- **Origin:** during teardown/install churn windows, `status` printed
+  **"3/3 roles running"** while the on-disk live-generation count = **0** for one
+  sample; it **self-corrected on the next sample**. This is the **latent-failure
+  class** (status green while the disk is empty) — the same shape as TC-22, but in
+  the generation/disk dimension rather than the run-history DB. Observed bounded to
+  the churn window, not steady state.
+- **Check:** during teardown/install churn (and in steady state), `status` never
+  reports roles running while the on-disk live-generation count is 0 — a green
+  status always corresponds to a real on-disk generation.
+- **Expect:** no green-over-empty-disk skew. **Status: 🟡 WATCH** (noted live,
+  daemon-v0.5.10, 2026-06-29): observed once during a churn window, self-corrected
+  the next sample → recorded so the observation isn't lost; **FAIL if reproduced or
+  sustained**.
 
 ### TC-10 🟠 Plugin **config**/policy integrity  (follow-up / icebox)
 - **Check (future):** plugin configs (blocklists, target apps, job schedule)
@@ -380,3 +405,4 @@ mesh; macOS gives no API to re-enable), (d) **kill all processes**, plus their
 | 2026-06-29 | daemon-v0.5.6 (F17) + platform v0.16.4 (kill-steam Dota2 fix, #71) | TC-14, TC-19 | TC-21 (new) | F17 live-verified: workdir-delete recovered via baked fallback (down ~28s `desired=none` → adopt v0.16.3 → up ~56s, no permanent BLOCK; TC-14, go-reviewer-confirmed); fresh install "retired 4 prior generation(s)" → 1 platform (TC-19). Final: single generation, 1 platform, desired=good=v0.16.4, OVERALL HEALTHY. First TC-14 attempt was a false-pass (split-on-space path truncation → `rm` missed) — caught by a `test -d` gate; methodology lesson recorded on TC-14. NEW peer-reviewed bug → TC-21 (FAIL): post-recovery generations with deleted binaries are invisible to install cleanup + orphan platforms accumulate (hygiene gap, protection stays HEALTHY) |
 | 2026-06-29 | daemon-v0.5.7 (F19 + F17 convergence fix, #73) + platform v0.16.4 | TC-14 (re-confirmed under F19), TC-20 | TC-21 (still partial), TC-22 (new) | F19 live-verified: `ps` for the mesh marker + role flags returns **0** (role moved off argv into plist env); supervisor labels varied/non-clustering (TC-20 PASS). TC-14 re-confirmed under daemon-v0.5.7. F17 convergence fix (#73) retires dead-binary/zombie generations + ends orphan platforms — **convergence logic works live** (install "retired 2 → 1 platform"), but TC-21 stays PARTIAL: (a) stale workdir/state.db files left on disk, (b) status-flip → **TC-22 NEW** (run-history DB read/write concurrency → false OVERALL UNKNOWN; fix in progress), (c) manual cleanup helper not F19-env-aware |
 | 2026-06-29 | daemon-v0.5.9 (F18 + orphan-sweep, #76/#78/#80) + platform v0.16.7 (status snapshot, #79) | TC-16, TC-17, TC-21, TC-22 | TC-23 (new) | **F18 shipped + live-verified (Phase 1):** removed the entire in-band rail (daemon down, 0 platforms, 0 mesh plists) → the separate launchd companion (own folder, no FDA) detected the stale heartbeat and rebuilt the daemon from its signed offline backup (7.9MB, signature-checked) → mesh + platform back; companion excluded from mesh discovery/cleanup by construction (TC-16/TC-17 PASS; Phase 2 offline-platform restore deferred). **TC-21 PASS** — orphan-sweep (daemon-v0.5.8) verified live: after recovery/install churn exactly 1 state.db + 1 platform. **TC-22 PASS** — status snapshot (platform v0.16.7): 8 rapid reads stable, no false UNKNOWN; root cause was the status read contending with the reconcile writer, fixed by reading an atomic snapshot (3 prior attempts — orphan-sweep, WAL, rollback-journal — were dead-ends). **NEW TC-23 (FAIL):** the companion/watchdog rebuild path re-introduces the `--mesh` argv leak (F19 hides it only on the `daemon install` path) — `ps` shows `run --r a/b --mesh` after an out-of-band recovery until the next clean install; hygiene/friction, not a bypass |
+| 2026-06-29 | daemon-v0.5.10 + platform v0.16.7 (independent e2e re-verification) | TC-14, TC-16, TC-17, TC-20, TC-21, TC-22 | TC-23 (confirmed, #83); TC-24 (WATCH, noted) | **Independent e2e-verifier re-ran the suite on daemon-v0.5.10.** **TC-14 PASS** — status `desired=none` (platform down, no BLOCK) → `desired=v0.16.3` (baked fallback) → `platform running` (old platform pid dead, fresh state.db); held stable on the fallback ~12 min, no permanent BLOCK. **TC-16/17 PASS** — entire in-band rail removed (0 mesh plists, 0 platforms, gen-roots deleted) → the preserved companion rebuilt the daemon **UNATTENDED** into a fresh single generation (3 plists, 1 state.db, 3/3 roles, platform back). **TC-20 PASS** — `ps … grep 'run --r\| --mesh'` = 0; 3/3 roles. **TC-21 PASS** — 1 state.db, 1 pid, no zombies. **TC-22 PASS** — 10/10 rapid reads identical, 0 changes. **TC-23 stays FAIL — now confirmed with DECISIVE evidence (#83):** direct plist read after the companion rebuild → mesh plists with `--mesh` = **2**, F19 env marker = **0** (rebuild writes pre-F19-format plists); ruled out test-mode **and** stale backup; root cause not yet pinned (both prior theories refuted); hygiene/friction, clean install clears it. **NEW TC-24 (WATCH):** churn-window status-vs-disk skew — `status` printed "3/3 roles running" while on-disk generations = 0 for one sample, self-corrected next sample (latent-failure class; FAIL if reproduced). |
