@@ -22,6 +22,7 @@ import (
 
 	"github.com/eliteGoblin/focusd/platform/internal/bundle"
 	"github.com/eliteGoblin/focusd/platform/internal/core/app"
+	"github.com/eliteGoblin/focusd/platform/internal/core/snapshot"
 	"github.com/eliteGoblin/focusd/platform/internal/core/state"
 	"github.com/eliteGoblin/focusd/platform/internal/defaultconfig"
 	"github.com/eliteGoblin/focusd/platform/internal/osadapter"
@@ -248,49 +249,54 @@ func runStatus(args []string) int {
 		jobs = append(jobs, status.JobInput{ID: j.ID, Enabled: j.Enabled})
 	}
 
-	// Run history, read-only. On any open failure, degrade to "no runs"
-	// (found=false) so status still renders — the jobs just read UNKNOWN
-	// (never a crash).
-	lastRun := func(string) (string, time.Time, bool, error) {
-		return "", time.Time{}, false, nil
+	// Run-state fast path: read each job's LAST run from the status SNAPSHOT,
+	// NOT the live DB. The running platform writes job_runs on every reconcile
+	// tick for every plugin; a separate read-only status query against that hot
+	// DB kept colliding with the writer's commit lock, and an intermittently
+	// failed read surfaced as "no runs yet" → UNKNOWN → the HEALTHY↔UNKNOWN
+	// flip. Journal-mode tweaks (WAL, rollback-journal) couldn't survive it —
+	// the contention itself was the bug. The reconcile loop mirrors every run
+	// into status-snapshot.json (atomic temp+rename), so this read never
+	// touches the contended DB. (See internal/core/snapshot.)
+	//
+	// The snapshot is read ONCE here; the closure just looks jobs up in the
+	// already-loaded map. We must NOT repeat the conflation bug:
+	//   - snapErr != nil → a transient read/parse failure: every job returns
+	//     that error → UNKNOWN for THIS status call only, never a persistent
+	//     "never ran" claim.
+	//   - missing file (snap == nil, snapErr == nil) → a GENUINE fresh install
+	//     with no runs: jobs read UNKNOWN ("warming up").
+	//   - present + parsed → the job's recorded last run.
+	var snap map[string]snapshot.Entry
+	var snapErr error
+	if dbPath != "" {
+		snap, snapErr = snapshot.Read(filepath.Dir(dbPath))
 	}
+	lastRun := func(jobID string) (string, time.Time, bool, error) {
+		if snapErr != nil {
+			return "", time.Time{}, false, snapErr
+		}
+		e, ok := snap[jobID]
+		if !ok {
+			return "", time.Time{}, false, nil
+		}
+		// A zero StartedAt would mis-bucket age as ">1h" and lie about
+		// staleness (false DEGRADED). Treat it as "no run found" → UNKNOWN.
+		if e.StartedAt.IsZero() {
+			return "", time.Time{}, false, nil
+		}
+		return e.Status, e.StartedAt, true, nil
+	}
+
+	// Sweep-health stays on the DB read-only: the integrity-sweep-failed event
+	// is written RARELY (only on a wedged sweep), so this query does not
+	// contend the way the constant job_runs writes did. A query error or an
+	// unopenable DB degrades to "not failing" (no signal) rather than crashing
+	// status — it can never produce the run-history flip this fix addresses.
 	var sweepFailing status.SweepFailingFn // nil => no sweep-health signal
 	if dbPath != "" {
 		if db, derr := state.OpenReadOnly(dbPath); derr == nil {
 			defer db.Close()
-			lastRun = func(jobID string) (string, time.Time, bool, error) {
-				// Retry on a transient read error (e.g. SQLITE_BUSY if the
-				// writer's brief commit lock outlasts busy_timeout) so a
-				// momentary lock is never mistaken for history. Crucially we do
-				// NOT conflate the two failure shapes:
-				//   - herr != nil  → a transient READ error. Return it as an
-				//     error (found=false) so the job reads UNKNOWN for THIS tick
-				//     only; it is not a definitive "never ran" claim and the
-				//     next status read recovers. Previously an error and an
-				//     empty result were collapsed into the same found=false,
-				//     so a transient query error rolled OVERALL to UNKNOWN
-				//     identically to a genuine fresh install.
-				//   - herr == nil && len(runs) == 0 → a GENUINE "no run yet".
-				runs, herr := historyWithRetry(db.Runs.History, jobID)
-				if herr != nil {
-					return "", time.Time{}, false, herr
-				}
-				if len(runs) == 0 {
-					return "", time.Time{}, false, nil
-				}
-				// A malformed/corrupt StartedAt parses to the year-0 zero time,
-				// which would mis-bucket age as ">1h" and lie about staleness
-				// (false DEGRADED). Treat an unparseable timestamp as "no run
-				// found" → the job reads UNKNOWN ("no runs yet") instead.
-				t, perr := time.Parse(time.RFC3339Nano, runs[0].StartedAt)
-				if perr != nil {
-					return "", time.Time{}, false, nil
-				}
-				return runs[0].Status, t, true, nil
-			}
-			// Sweep-health: a sweep-failed event within the last 5m (and no
-			// recovery since) means the periodic re-verify is wedged. A query
-			// error degrades to "not failing" rather than crashing status.
 			sweepFailing = func() bool {
 				_, failing, serr := db.Events.SweepFailingSince(5 * time.Minute)
 				return serr == nil && failing
@@ -310,34 +316,6 @@ func runStatus(args []string) int {
 		return 0
 	}
 	return 1
-}
-
-// historyReadAttempts / historyReadBackoff bound the status reader's retry on
-// a transient History error. With a 5s busy_timeout already absorbing the
-// writer's sub-millisecond commit lock, a couple of short retries is ample;
-// the goal is to avoid surfacing a momentary SQLITE_BUSY as missing history,
-// not to mask a genuinely broken DB.
-const (
-	historyReadAttempts = 3
-	historyReadBackoff  = 25 * time.Millisecond
-)
-
-// historyWithRetry calls the run-history query, retrying only on a transient
-// ERROR. A successful read — including a genuine empty result — returns
-// immediately and is NEVER retried (an empty history is a real answer, not a
-// failure). Separating "error" from "empty" is what keeps a transient read
-// error from masquerading as "no runs yet". query mirrors JobRunRepo.History.
-func historyWithRetry(query func(jobID string, limit int) ([]state.JobRun, error), jobID string) ([]state.JobRun, error) {
-	var runs []state.JobRun
-	var err error
-	for attempt := 0; attempt < historyReadAttempts; attempt++ {
-		runs, err = query(jobID, 1)
-		if err == nil {
-			return runs, nil
-		}
-		time.Sleep(historyReadBackoff)
-	}
-	return runs, err
 }
 
 func runRun(args []string) int {

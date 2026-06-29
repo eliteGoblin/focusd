@@ -16,6 +16,7 @@ import (
 	"github.com/eliteGoblin/focusd/platform/internal/core/plugin"
 	"github.com/eliteGoblin/focusd/platform/internal/core/runner"
 	"github.com/eliteGoblin/focusd/platform/internal/core/scheduler"
+	"github.com/eliteGoblin/focusd/platform/internal/core/snapshot"
 	"github.com/eliteGoblin/focusd/platform/internal/core/state"
 	"github.com/eliteGoblin/focusd/platform/internal/osadapter"
 )
@@ -61,6 +62,11 @@ type App struct {
 
 	pluginDir string // resolved scan dir (override or adapter default)
 	logClose  func() error
+	// snap is the status-snapshot writer, rooted in the workdir next to
+	// state.db. The scheduler and runner mirror every recorded run into it so
+	// `platform status` reads run-state from this tiny atomic file instead of
+	// contending with the constantly-writing live DB. nil for in-memory DBs.
+	snap *snapshot.Store
 }
 
 // Bootstrap resolves the runtime in strict order: adapter → run mode →
@@ -162,6 +168,13 @@ func Bootstrap(opts Options) (*App, error) {
 		return nil, err
 	}
 
+	// Status snapshot lives next to state.db in the workdir. Skip it for an
+	// in-memory DB (no real directory) — the snapshot is a no-op there.
+	var snap *snapshot.Store
+	if dbPath != ":memory:" {
+		snap = snapshot.NewStore(filepath.Dir(dbPath))
+	}
+
 	log.Info("platform bootstrapped",
 		"os", adapter.CurrentOS(), "arch", adapter.CurrentArch(),
 		"mode", string(mode), "config", cfgPath, "state_db", dbPath)
@@ -185,6 +198,7 @@ func Bootstrap(opts Options) (*App, error) {
 		Log:       log,
 		pluginDir: pluginDir,
 		logClose:  logClose,
+		snap:      snap,
 	}, nil
 }
 
@@ -264,8 +278,10 @@ func (a *App) BuildScheduler() (*scheduler.Scheduler, int, error) {
 	}
 	run := runner.NewWithMode(a.State, a.Mode).
 		WithVerifier(bundleVerifier{}).
-		WithLogger(a.Log)
-	s := scheduler.New(run, a.State, a.Log, a.Mode)
+		WithLogger(a.Log).
+		WithSnapshot(a.snap)
+	s := scheduler.New(run, a.State, a.Log, a.Mode).
+		WithSnapshot(a.snap)
 	n, err := s.Register(a.Config.Jobs, byID)
 	if err != nil {
 		return nil, 0, err

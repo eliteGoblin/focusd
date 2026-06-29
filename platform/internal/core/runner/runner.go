@@ -24,6 +24,7 @@ import (
 	"time"
 
 	"github.com/eliteGoblin/focusd/platform/internal/core/plugin"
+	"github.com/eliteGoblin/focusd/platform/internal/core/snapshot"
 	"github.com/eliteGoblin/focusd/platform/internal/core/state"
 	"github.com/eliteGoblin/focusd/platform/internal/osadapter"
 )
@@ -97,6 +98,11 @@ type Runner struct {
 	// logger (set in New/NewWithMode) so existing callers and tests are
 	// unaffected and call sites never nil-check.
 	log *slog.Logger
+	// snap mirrors each finished run into the status snapshot (the read fast
+	// path that decouples `platform status` from the contended live DB). A nil
+	// *snapshot.Store is a no-op, so an injected-less runner (tests, in-memory
+	// DBs with no workdir) behaves exactly as before.
+	snap *snapshot.Store
 }
 
 // WithVerifier returns r with the point-of-use integrity verifier set.
@@ -116,6 +122,24 @@ func (r *Runner) WithLogger(log *slog.Logger) *Runner {
 		r.log = log
 	}
 	return r
+}
+
+// WithSnapshot returns r wired to mirror each recorded run into the status
+// snapshot (the DB-free read fast path). A nil store leaves the runner as a
+// no-op writer. Returns the same *Runner for fluent wiring.
+func (r *Runner) WithSnapshot(s *snapshot.Store) *Runner {
+	r.snap = s
+	return r
+}
+
+// recordSnapshot mirrors one terminal run into the status snapshot. It is
+// best-effort: the DB row is already the source of truth, so a snapshot write
+// failure is logged and swallowed rather than failing the run. nil-safe via
+// the Store's nil receiver.
+func (r *Runner) recordSnapshot(jobID, status string, startedAt time.Time) {
+	if err := r.snap.Record(jobID, status, startedAt); err != nil {
+		r.log.Warn("status snapshot write failed", "job", jobID, "err_type", fmt.Sprintf("%T", err))
+	}
 }
 
 // New builds a Runner in user mode (no privilege-drop). System-mode
@@ -207,6 +231,7 @@ func (r *Runner) runOnce(ctx context.Context, job Job, p plugin.Discovered, trig
 		if rerr := r.DB.Runs.RecordUnavailable(job.ID, p.Manifest.ID, reason); rerr != nil {
 			return Outcome{}, rerr
 		}
+		r.recordSnapshot(job.ID, state.RunStatusUnavailable, time.Now())
 		return Outcome{Status: state.RunStatusUnavailable, Message: reason}, nil
 	}
 
@@ -249,6 +274,7 @@ func (r *Runner) runOnce(ctx context.Context, job Job, p plugin.Discovered, trig
 			if rerr := r.DB.Events.RecordIntegrityCheckFailed(job.ID, p.Manifest.ID, "integrity verify errored"); rerr != nil {
 				return Outcome{}, rerr
 			}
+			r.recordSnapshot(job.ID, state.RunStatusError, time.Now())
 			// terminal=true: a verify error already recorded exactly one error
 			// run + one event for this tick. Mark it terminal so Run does NOT
 			// loop and re-record on a job with Retry>0 — the retry is the NEXT
@@ -276,6 +302,7 @@ func (r *Runner) runOnce(ctx context.Context, job Job, p plugin.Discovered, trig
 	}
 	defer cleanup()
 
+	startedAt := time.Now().UTC()
 	runID, err := r.DB.Runs.Start(job.ID, p.Manifest.ID, p.Manifest.Version, triggeredBy)
 	if err != nil {
 		return Outcome{}, err
@@ -339,6 +366,10 @@ func (r *Runner) runOnce(ctx context.Context, job Job, p plugin.Discovered, trig
 	if finishErr != nil {
 		return out, finishErr
 	}
+	// Mirror the just-finished run into the status snapshot (the DB-free read
+	// fast path) using the SAME start time the DB row carries, so the snapshot
+	// and DB agree on recency.
+	r.recordSnapshot(job.ID, out.Status, startedAt)
 	return out, nil
 }
 
