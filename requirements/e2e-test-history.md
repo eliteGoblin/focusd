@@ -16,7 +16,9 @@
 > **FEATURE 17 ↔ TC-14 (workdir delete), TC-18 (combinations), TC-19 (no
 > generation pileup), TC-21 (post-recovery convergence — open follow-up);
 > FEATURE 18 ↔ TC-16 (Login-Item off), TC-17 (offline
-> total-teardown, supersedes TC-05), TC-18; FEATURE 19 ↔ TC-20 (no tells).**
+> total-teardown, supersedes TC-05), TC-18; FEATURE 19 ↔ TC-20 (no tells);
+> the F17/F19 convergence + status-flip follow-ups ↔ TC-21 (post-recovery
+> convergence) + TC-22 (status never false-UNKNOWN — DB run-history concurrency).**
 >
 > **Redaction (non-negotiable).** Verify as a developer, but NEVER print the
 > disguised workdir, labels, rotated binary paths, or plugin paths. Report
@@ -241,7 +243,12 @@ mesh; macOS gives no API to re-enable), (d) **kill all processes**, plus their
   mesh marker **and** the role flags returns **nothing**; the login/background
   entries are **not** three near-identical hex-suffixed names (varied/plausible,
   don't cluster); stale records from prior generations are cleaned.
-- **Expect:** no at-a-glance tells. **Status: ⏳ pending (F19).**
+- **Expect:** no at-a-glance tells. **Status: ✅ PASS** (live, daemon-v0.5.7,
+  2026-06-29): e2e-verifier confirmed searching the live process list for the mesh
+  marker **and** the role flags returns **0** hits (role/marker moved off argv into
+  the plist environment); the supervisor labels are varied/plausible and **do not
+  cluster** as a near-identical hex triplet. `argv[0]` (binary path) stays visible
+  to root by design (honest limit).
 
 ### TC-21 🟡 Post-recovery generation convergence — no invisible zombies / orphan platforms — *F17 follow-up*  `[found 2026-06-29 — FAILING]`
 - **Origin (peer-reviewed, confirmed real):** after **workdir-delete/recovery
@@ -270,7 +277,38 @@ mesh; macOS gives no API to re-enable), (d) **kill all processes**, plus their
   binary is absent) and have the retire step boot them out + remove their entry +
   end their orphaned platform process, gated by the existing safe-to-remove check.
 - **Expect:** converges to one generation / one platform after recovery cycles.
-  **Status: 🟡 FAIL (open until the F17 follow-up ships).**
+  **Status: 🟡 PARTIAL — convergence logic shipped (#73, daemon-v0.5.7), NOT yet
+  clean live.** The dead-binary/zombie-generation retire + orphan-platform end
+  shipped and the **convergence logic works live** (install "retired 2 → 1
+  platform"). But live testing found **three residual sub-gaps** that keep this
+  FAIL until clean:
+  - (a) **Stale on-disk files left behind.** Retiring a generation boots out its
+    entries + ends its platform, but leaves the superseded **workdir / state.db
+    files on disk** — convergence to one *live* generation is reached, but disk
+    clutter from prior generations is not swept.
+  - (b) **Status-flip / OVERALL UNKNOWN during convergence** — root-caused to a
+    state-DB run-history read/write concurrency bug (NOT multi-generation). Tracked
+    as **TC-22**; fix in progress.
+  - (c) **Manual cleanup helper isn't F19-env-aware** — the manual clean-slate path
+    still keys on the old `--mesh` argv tell, not the new env-carried marker
+    (F19), so it can miss F19-style generations.
+  Re-verify to PASS once (a)/(c) are cleaned and TC-22 is fixed.
+
+### TC-22 🟡 Status never falsely reads OVERALL UNKNOWN — run-history DB concurrency  *F17/F19 follow-up*  `[found 2026-06-29 — FAILING]`
+- **Origin:** during install/convergence churn `status` intermittently flipped to a
+  display showing **OVERALL UNKNOWN** even though protection was genuinely healthy
+  and enforcing. Root-caused (NOT a multi-generation artifact) to a **concurrent
+  read/write of the plugin run-history in the state DB**: a `status` read racing a
+  reconcile write returned a partial/empty run-history, which rendered as UNKNOWN —
+  a **truthfulness/observability** false-signal of the latent-failure class (status
+  lying about a healthy system, this time pessimistically).
+- **Check:** under install/convergence churn (and steady state), `status` reflects
+  the **true current health** — a healthy, enforcing system never renders OVERALL
+  **UNKNOWN**; concurrent `status` reads during a reconcile write return a complete,
+  consistent run-history.
+- **Expect:** no false UNKNOWN; status read is consistent under concurrency.
+  **Status: 🟡 FAIL (fix in progress, not yet verified live).** Dev agent is fixing
+  the run-history read/write concurrency root cause.
 
 ### TC-10 🟠 Plugin **config**/policy integrity  (follow-up / icebox)
 - **Check (future):** plugin configs (blocklists, target apps, job schedule)
@@ -315,3 +353,4 @@ mesh; macOS gives no API to re-enable), (d) **kill all processes**, plus their
 | 2026-06-22 | platform v0.16.2 (F16) | TC-11, TC-12, TC-13 | TC-05 (deferred) | F16 whitebox logging live-verified: steady-state log clean (TC-12) + tamper logged as `WARN plugin tamper repaired` independent of status (TC-13); watchdog (TC-05) deferred per owner |
 | 2026-06-22 | platform v0.16.3 (status KISS) | TC-07, TC-08, TC-11 | — | status = current-state: recovered tamper → `ok`/OVERALL HEALTHY (no `tampered` verdict); tamper only in log/events; watchdog manually restored (`present`, never degrades). TC-05 still deferred (FDA) |
 | 2026-06-29 | daemon-v0.5.6 (F17) + platform v0.16.4 (kill-steam Dota2 fix, #71) | TC-14, TC-19 | TC-21 (new) | F17 live-verified: workdir-delete recovered via baked fallback (down ~28s `desired=none` → adopt v0.16.3 → up ~56s, no permanent BLOCK; TC-14, go-reviewer-confirmed); fresh install "retired 4 prior generation(s)" → 1 platform (TC-19). Final: single generation, 1 platform, desired=good=v0.16.4, OVERALL HEALTHY. First TC-14 attempt was a false-pass (split-on-space path truncation → `rm` missed) — caught by a `test -d` gate; methodology lesson recorded on TC-14. NEW peer-reviewed bug → TC-21 (FAIL): post-recovery generations with deleted binaries are invisible to install cleanup + orphan platforms accumulate (hygiene gap, protection stays HEALTHY) |
+| 2026-06-29 | daemon-v0.5.7 (F19 + F17 convergence fix, #73) + platform v0.16.4 | TC-14 (re-confirmed under F19), TC-20 | TC-21 (still partial), TC-22 (new) | F19 live-verified: `ps` for the mesh marker + role flags returns **0** (role moved off argv into plist env); supervisor labels varied/non-clustering (TC-20 PASS). TC-14 re-confirmed under daemon-v0.5.7. F17 convergence fix (#73) retires dead-binary/zombie generations + ends orphan platforms — **convergence logic works live** (install "retired 2 → 1 platform"), but TC-21 stays PARTIAL: (a) stale workdir/state.db files left on disk, (b) status-flip → **TC-22 NEW** (run-history DB read/write concurrency → false OVERALL UNKNOWN; fix in progress), (c) manual cleanup helper not F19-env-aware |
