@@ -2,6 +2,7 @@ package main
 
 import (
 	"errors"
+	"strings"
 	"testing"
 
 	"github.com/eliteGoblin/focusd/daemon/internal/mode"
@@ -153,6 +154,61 @@ func TestRunWatchdogIncompleteMeshRebuilds(t *testing.T) {
 	if !installed {
 		t.Fatalf("install was NOT called for an incomplete mesh; want called")
 	}
+}
+
+// TestRunWatchdogRebuildSpecIsProdPlist locks TC-23: the watchdog's LOCAL
+// rebuild must render FEATURE-19 PROD plists — the role/mesh marker rides in
+// EnvironmentVariables, NOT argv — so a watchdog/companion-driven rebuild can
+// never re-leak `run --r <role> --mesh` into `ps` (the leak TC-23 caught). The
+// watchdog resolves a REAL deployment mode (user/system, never test) via
+// mode.Resolve, so Spec.isTest() is false and args() is nil. We capture the
+// EXACT spec the watchdog hands to installMesh and assert the rendered plist's
+// ProgramArguments is the binary ALONE for every role (the env marker, which
+// `ps` does not display, carries the role). Both real modes are covered: the
+// companion runs the watchdog as the user (LaunchAgent) or as root (LaunchDaemon).
+func TestRunWatchdogRebuildSpecIsProdPlist(t *testing.T) {
+	for _, m := range []mode.Mode{mode.User, mode.System} {
+		t.Run(string(m), func(t *testing.T) {
+			var gotSpec *osadapter.Spec
+			runWatchdog("/copy/bin", m, "v1.2.3",
+				okVerify,
+				func() (osadapter.CurInstall, error) { return osadapter.CurInstall{}, nil },
+				func(s *osadapter.Spec) error { gotSpec = s; return nil },
+			)
+			if gotSpec == nil {
+				t.Fatal("watchdog did not call install for an absent mesh")
+			}
+			if gotSpec.Mode == mode.Test {
+				t.Fatalf("watchdog rebuild spec is test mode → would re-leak full argv")
+			}
+			for _, r := range osadapter.AllRoles {
+				pa := progArgsBlock(t, osadapter.Plist(*gotSpec, r))
+				for _, leak := range []string{"--mesh", "<string>run</string>", "<string>ensure</string>"} {
+					if strings.Contains(pa, leak) {
+						t.Fatalf("%s ProgramArguments leaks %q (TC-23 regression):\n%s", r, leak, pa)
+					}
+				}
+			}
+		})
+	}
+}
+
+// progArgsBlock extracts the <key>ProgramArguments</key><array>…</array>
+// substring — what `ps` surfaces — so a leak scan ignores the env dict (whose
+// value legitimately holds "run:a"/"ensure").
+func progArgsBlock(t *testing.T, plist string) string {
+	t.Helper()
+	const head = "<key>ProgramArguments</key><array>"
+	i := strings.Index(plist, head)
+	if i < 0 {
+		t.Fatalf("plist has no ProgramArguments:\n%s", plist)
+	}
+	rest := plist[i:]
+	end := strings.Index(rest, "</array>")
+	if end < 0 {
+		t.Fatalf("plist ProgramArguments not closed:\n%s", plist)
+	}
+	return rest[:end]
 }
 
 // TestRunWatchdogRebuildFailureNonZero: a failed local rebuild surfaces a
