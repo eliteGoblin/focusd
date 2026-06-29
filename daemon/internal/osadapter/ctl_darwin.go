@@ -517,6 +517,73 @@ func RetireOtherGenerations(m mode.Mode, keepBinaryPath string) (int, error) {
 		c.bootout, os.Remove, pkillBinary, os.RemoveAll), nil
 }
 
+// stateDBFile is the SQLite state file a platform writes into its generation
+// workdir (see platform: filepath.Join(workdir, "state.db")). A hidden-dot
+// directory directly under the support root that contains this file is the
+// generation-workdir signature SweepOrphanWorkdirs keys on. The out-of-band
+// watchdog copy dir (also a hidden-dot sibling) holds only the relocated binary
+// and NO state.db, so it is excluded by construction.
+const stateDBFile = "state.db"
+
+// SweepOrphanWorkdirs deletes generation workdirs that survive on disk with NO
+// loaded plist or running process backing them — the residual a teardown /
+// recovery / re-install cycle leaves behind (FEATURE 17 follow-up, TC-21).
+// RetireOtherGenerations only catches generations still visible to a plist scan
+// (live "other" + dead-binary "zombie" generations); a generation whose plist
+// was already removed leaves ONLY orphaned files on disk, invisible to that
+// scan. Those stale state.db copies clutter disk and confuse status reads
+// (multiple state sources). This sweep is the disk-side complement: after any
+// install exactly ONE generation workdir (the keep) survives.
+//
+// It scans the IMMEDIATE children of the mode's support root and removes each
+// hidden-dot directory that contains a state.db file (the generation signature)
+// and is NOT the keepWorkdir. Every removal is GATED by safeToRemoveWorkdir
+// (absolute, strictly under the support root, not the keep, not an ancestor of
+// the keep) — the same belt RetireOtherGenerations uses. The watchdog copy dir
+// has no state.db so it is never a candidate. Best-effort throughout: it returns
+// only the count of removed workdirs (never the disguised paths) and never errors
+// out the install — a failed remove is skipped, a scan failure returns the count
+// so far with the error for optional logging.
+//
+// keepWorkdir is the new install's workdir (Dir of the relocated binary).
+func SweepOrphanWorkdirs(m mode.Mode, keepWorkdir string) (removed int, err error) {
+	home, _ := os.UserHomeDir()
+	root := mode.SupportRoot(m, home)
+	entries, rerr := os.ReadDir(root)
+	if rerr != nil {
+		if os.IsNotExist(rerr) {
+			return 0, nil
+		}
+		return 0, rerr
+	}
+	keep := filepath.Clean(keepWorkdir)
+	for _, e := range entries {
+		if !e.IsDir() || !strings.HasPrefix(e.Name(), ".") {
+			continue // only hidden-dot directories are generation workdirs
+		}
+		dir := filepath.Join(root, e.Name())
+		if filepath.Clean(dir) == keep {
+			continue // the surviving generation — never sweep it
+		}
+		// The generation signature: a state.db file. The watchdog copy dir (a
+		// hidden-dot sibling) has none, so it is naturally excluded; a legit
+		// third-party Application Support dir is not hidden-dot and lacks our
+		// state.db, so it can never match.
+		if st, serr := os.Stat(filepath.Join(dir, stateDBFile)); serr != nil || st.IsDir() {
+			continue
+		}
+		// GUARD: only RemoveAll a dir strictly under the support root that is
+		// neither the keep nor an ancestor of it (the same belt the generation
+		// retirement uses). Best-effort: a remove failure is skipped, not fatal.
+		if safeToRemoveWorkdir(dir, root, keepWorkdir) {
+			if rmErr := os.RemoveAll(dir); rmErr == nil {
+				removed++
+			}
+		}
+	}
+	return removed, nil
+}
+
 // minBinPathLen is the floor on a binary path before retirement will pkill -f
 // it. Any real disguised install path is far longer; a short value like "/"
 // (a corrupt/dead-gen ProgramArguments[0]) must never expand into a broad
