@@ -1,12 +1,19 @@
 # FEATURE 19 — Deeper disguise (kill the obvious tells the owner found)
 
-- **Status:** 🔨 defining / approved-building (product owner approved 2026-06-29)
+- **Status:** ✅ shipped + live-verified (daemon-v0.5.7, PR #73, 2026-06-29).
+  The mesh role/marker moved off the command line into the plist environment, and
+  the supervisor labels were given distinct non-clustering naming styles.
+  **Live-verified (TC-20):** e2e-verifier confirmed `ps` for the mesh marker + role
+  flags returns **0** hits and the labels do not cluster as a near-identical
+  triplet. **Residual:** the stale-records cleanup overlaps FEATURE 17's generation
+  cleanup, which still leaves stale on-disk workdir/state files after recovery
+  cycles (e2e TC-21, open).
 - **Builds on:** [FEATURE 10](10-mesh-label-decorrelation.md) (decorrelated mesh
   labels) · [FEATURE 14](14-mesh-argv-leak-minimization.md) (argv leak
   minimization — this extends that work). Picks up the **iceboxed stale-records
   cleanup** noted as a residual in FEATURE 14.
-- **Maps to:** e2e-test-history teardown-matrix TCs (the disguise checks fold into
-  the live-deploy verification).
+- **Maps to:** e2e-test-history **TC-20** (no at-a-glance tells); the stale-record
+  cleanup overlaps **TC-21** (post-recovery convergence, open).
 
 ## Why
 
