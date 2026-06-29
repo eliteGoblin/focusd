@@ -1,0 +1,196 @@
+package main
+
+import (
+	"os"
+	"testing"
+	"time"
+
+	"github.com/eliteGoblin/focusd/daemon/internal/companion"
+	"github.com/eliteGoblin/focusd/daemon/internal/mode"
+)
+
+// companionDir builds a real companion.Dir rooted under a temp HOME and creates
+// the folder so tests can drop heartbeat/desired/backup files into it.
+func companionTestDir(t *testing.T) companion.Dir {
+	t.Helper()
+	home := t.TempDir()
+	dir := companion.For(mode.User, home)
+	if err := os.MkdirAll(dir.Root(), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	return dir
+}
+
+func writeFile(t *testing.T, path, content string) {
+	t.Helper()
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// recorder captures the seam calls so a test asserts exactly what recover did.
+type recorder struct {
+	verified    []string
+	execBin     string
+	execDesired string
+	execCalls   int
+}
+
+const goodDesired = "v0.16.3"
+
+// TestRecoverFreshHeartbeatNoOp: a fresh heartbeat means the daemon is alive —
+// recover must be a pure no-op: it never verifies the backup and never execs.
+func TestRecoverFreshHeartbeatNoOp(t *testing.T) {
+	dir := companionTestDir(t)
+	writeFile(t, dir.Heartbeat(), "")        // just touched (mtime = now)
+	writeFile(t, dir.Desired(), goodDesired) // present but must NOT be consulted
+	writeFile(t, dir.Backup(), "SIGNED-DAEMON")
+
+	rec := &recorder{}
+	err := recover(dir, time.Now(),
+		func(p string) (bool, error) { rec.verified = append(rec.verified, p); return true, nil },
+		func(bin, desired string) error { rec.execCalls++; return nil },
+	)
+	if err != nil {
+		t.Fatalf("recover (fresh) = %v, want nil", err)
+	}
+	if len(rec.verified) != 0 {
+		t.Fatalf("verify ran on a fresh heartbeat; want 0, got %v", rec.verified)
+	}
+	if rec.execCalls != 0 {
+		t.Fatalf("execDaemon ran on a fresh heartbeat; want 0, got %d", rec.execCalls)
+	}
+}
+
+// TestRecoverStaleValidBackupExecs: a stale heartbeat + valid desired + a
+// signature-verifying backup → recover promotes the backup and hands off to the
+// idempotent watchdog (execDaemon) with the promote path + pinned version.
+//
+// ANTI-FIGHT (invariant #3): the handoff target is the daemon's `watchdog`,
+// which no-ops a complete mesh (see runWatchdog tests in cmd/daemon) — so even
+// this stale-but-actually-healthy path creates ZERO new generations.
+func TestRecoverStaleValidBackupExecs(t *testing.T) {
+	dir := companionTestDir(t)
+	writeFile(t, dir.Heartbeat(), "")
+	staleMtime := time.Now().Add(-companion.StaleThreshold - time.Minute)
+	if err := os.Chtimes(dir.Heartbeat(), staleMtime, staleMtime); err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, dir.Desired(), goodDesired)
+	writeFile(t, dir.Backup(), "SIGNED-DAEMON-BYTES")
+
+	rec := &recorder{}
+	err := recover(dir, time.Now(),
+		func(p string) (bool, error) { rec.verified = append(rec.verified, p); return true, nil },
+		func(bin, desired string) error {
+			rec.execCalls++
+			rec.execBin = bin
+			rec.execDesired = desired
+			return nil
+		},
+	)
+	if err != nil {
+		t.Fatalf("recover (stale+valid) = %v, want nil", err)
+	}
+	if len(rec.verified) != 1 || rec.verified[0] != dir.Backup() {
+		t.Fatalf("verify calls = %v, want [%s]", rec.verified, dir.Backup())
+	}
+	if rec.execCalls != 1 {
+		t.Fatalf("execDaemon calls = %d, want 1", rec.execCalls)
+	}
+	if rec.execBin != dir.Promote() {
+		t.Fatalf("execDaemon bin = %q, want promote path %q", rec.execBin, dir.Promote())
+	}
+	if rec.execDesired != goodDesired {
+		t.Fatalf("execDaemon desired = %q, want %q", rec.execDesired, goodDesired)
+	}
+	// The verified backup was atomically placed at the promote path.
+	if _, statErr := os.Stat(dir.Promote()); statErr != nil {
+		t.Fatalf("promote path not placed: %v", statErr)
+	}
+}
+
+// TestRecoverStaleBadBackupNoPromote: a stale heartbeat but a backup that FAILS
+// signature verification → recover must NOT promote and must NOT exec; it
+// returns an error. Closes the poisoned-offline-restore hole (acceptance #4).
+func TestRecoverStaleBadBackupNoPromote(t *testing.T) {
+	dir := companionTestDir(t)
+	staleMtime := time.Now().Add(-companion.StaleThreshold - time.Minute)
+	writeFile(t, dir.Heartbeat(), "")
+	if err := os.Chtimes(dir.Heartbeat(), staleMtime, staleMtime); err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, dir.Desired(), goodDesired)
+	writeFile(t, dir.Backup(), "TAMPERED")
+
+	rec := &recorder{}
+	err := recover(dir, time.Now(),
+		func(p string) (bool, error) { rec.verified = append(rec.verified, p); return false, nil }, // reject
+		func(bin, desired string) error { rec.execCalls++; return nil },
+	)
+	if err == nil {
+		t.Fatalf("recover (stale+bad backup) = nil, want error")
+	}
+	if rec.execCalls != 0 {
+		t.Fatalf("execDaemon ran with an unverified backup; want 0, got %d", rec.execCalls)
+	}
+	if _, statErr := os.Stat(dir.Promote()); statErr == nil {
+		t.Fatalf("backup was promoted despite failing verification")
+	}
+}
+
+// TestRecoverStaleInvalidDesiredNoVerify: a stale heartbeat with a missing/
+// garbage desired version is refused BEFORE the backup is even verified — the
+// watchdog can't rebuild without a valid -v, so we never promote.
+func TestRecoverStaleInvalidDesiredNoVerify(t *testing.T) {
+	for _, desired := range []string{"", "latest", "garbage"} {
+		t.Run("desired="+desired, func(t *testing.T) {
+			dir := companionTestDir(t)
+			staleMtime := time.Now().Add(-companion.StaleThreshold - time.Minute)
+			writeFile(t, dir.Heartbeat(), "")
+			if err := os.Chtimes(dir.Heartbeat(), staleMtime, staleMtime); err != nil {
+				t.Fatal(err)
+			}
+			if desired != "" {
+				writeFile(t, dir.Desired(), desired)
+			}
+			writeFile(t, dir.Backup(), "SIGNED-DAEMON")
+
+			rec := &recorder{}
+			err := recover(dir, time.Now(),
+				func(p string) (bool, error) { rec.verified = append(rec.verified, p); return true, nil },
+				func(bin, desired string) error { rec.execCalls++; return nil },
+			)
+			if err == nil {
+				t.Fatalf("recover with invalid desired %q = nil, want error", desired)
+			}
+			if len(rec.verified) != 0 {
+				t.Fatalf("verify ran before rejecting invalid desired %q: %v", desired, rec.verified)
+			}
+			if rec.execCalls != 0 {
+				t.Fatalf("execDaemon ran with invalid desired %q", desired)
+			}
+		})
+	}
+}
+
+// TestRecoverMissingHeartbeatTreatedStale: with NO heartbeat file at all (a
+// freshly-wiped state), recover treats the daemon as down and restores.
+func TestRecoverMissingHeartbeatTreatedStale(t *testing.T) {
+	dir := companionTestDir(t)
+	// No heartbeat file.
+	writeFile(t, dir.Desired(), goodDesired)
+	writeFile(t, dir.Backup(), "SIGNED-DAEMON")
+
+	rec := &recorder{}
+	err := recover(dir, time.Now(),
+		func(p string) (bool, error) { rec.verified = append(rec.verified, p); return true, nil },
+		func(bin, desired string) error { rec.execCalls++; return nil },
+	)
+	if err != nil {
+		t.Fatalf("recover (missing heartbeat) = %v, want nil", err)
+	}
+	if rec.execCalls != 1 {
+		t.Fatalf("execDaemon calls = %d, want 1 (missing heartbeat ⇒ stale)", rec.execCalls)
+	}
+}
