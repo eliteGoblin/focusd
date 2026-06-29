@@ -234,13 +234,14 @@ func runSelfUpdate(o selfUpdateOpts) int {
 		fmt.Fprintln(os.Stderr, "self-update:", err)
 		return 1
 	}
-	// FEATURE 12 / ADR-0016: keep the out-of-band watchdog copy in sync with
-	// the rotated binary — place a fresh copy of the new binary + rewrite the
-	// cron line to it (and the current desired). Best-effort; do NOT print
-	// paths, and a refresh failure must not fail the (completed) self-update.
+	// FEATURE 18 / ADR-0020: keep the out-of-band companion's OFFLINE daemon
+	// backup in sync with the freshly-verified, rotated daemon bytes (and re-pin
+	// desired) so an offline recovery restores a current binary. Best-effort; do
+	// NOT print paths, and a refresh failure must not fail the (completed)
+	// self-update. (Supersedes the FEATURE 12 cron-watchdog refresh.)
 	desired := (&core.Store{Dir: workdir}).Desired()
-	if werr := osadapter.RefreshWatchdog(invokeMode, newPath, desired); werr != nil {
-		fmt.Fprintln(os.Stderr, "self-update: refresh watchdog (best-effort)")
+	if cerr := osadapter.RefreshCompanionBackup(invokeMode, newBin, desired); cerr != nil {
+		fmt.Fprintln(os.Stderr, "self-update: refresh companion backup (best-effort)")
 	}
 	// Do NOT print the disguised roster labels — they are exactly the
 	// strings a targeted bootout needs (FEATURE 10 honest-limitations).

@@ -396,13 +396,18 @@ func loop(args []string, once bool) int {
 			} else if len(rec) > 0 {
 				log.Info("mesh recreated", "roles", rec)
 			}
-			// FEATURE 12 / ADR-0016: mutual guarding — the mesh's own
-			// reconcile also keeps the out-of-band watchdog rail up. Pass an
-			// empty copy path: EnsureWatchdog's darwin impl recovers the copy
-			// from the existing cron line, or places a fresh one if the rail
-			// was removed (place-if-missing). Best-effort; never fails a tick.
-			if werr := osadapter.EnsureWatchdog(spec.Mode, "", (&core.Store{Dir: o.workdir}).Desired()); werr != nil {
-				log.Warn("ensure-watchdog", "err", werr)
+			// FEATURE 18 / ADR-0020: out-of-band COMPANION mutual guarding — the
+			// mesh's own reconcile keeps the companion rail up (idempotent) AND
+			// refreshes the daemon heartbeat the companion watches, so a healthy
+			// daemon is never falsely "recovered". Best-effort; never fails a
+			// tick. (Supersedes the FEATURE 12 cron watchdog rail.)
+			if desired := (&core.Store{Dir: o.workdir}).Desired(); desired != "" {
+				if cerr := osadapter.EnsureCompanion(spec.Mode, self, desired); cerr != nil {
+					log.Warn("ensure-companion", "err", cerr)
+				}
+			}
+			if herr := osadapter.TouchCompanionHeartbeat(spec.Mode); herr != nil {
+				log.Warn("touch-heartbeat", "err", herr)
 			}
 		}
 	}
@@ -627,23 +632,18 @@ func doInstall(args []string) int {
 		fmt.Println(line)
 	}
 
-	// FEATURE 12 / ADR-0016: stand up the out-of-band watchdog rail AFTER the
-	// mesh is up — a SECOND disguised copy of this binary in its OWN hidden
-	// dir (outside the mesh workdir, so a workdir wipe leaves it) + a root
-	// cron line that runs `daemon watchdog` once a minute. Best-effort: a
-	// watchdog failure must NOT fail the install (the mesh is already up and
-	// the mesh's own reconcile re-installs the rail). darwin-only.
-	if osSupportsLaunchd() {
-		home, _ := os.UserHomeDir()
-		wdDir := relocate.HiddenWorkdir(mode.SupportRoot(m, home))
-		copyPath, cerr := relocate.RelocateInto(self, wdDir)
-		if cerr != nil {
-			// Do NOT print cerr: its underlying MkdirAll/Link error string
-			// embeds the hidden watchdog dir path (the exact string a
-			// weak-moment self would `rm`). Generic message only.
-			fmt.Fprintln(os.Stderr, "watchdog: could not place out-of-band copy")
-		} else if werr := osadapter.EnsureWatchdog(m, copyPath, *desired); werr != nil {
-			fmt.Fprintln(os.Stderr, "watchdog: ensure cron:", werr)
+	// FEATURE 18 / ADR-0020: stand up the out-of-band COMPANION rail AFTER the
+	// mesh is up — a SEPARATE minimal binary in its OWN fixed disguised folder
+	// (outside the daemon's workdir, so a workdir wipe leaves it) that recovers
+	// the daemon OFFLINE from a signed backup, on launchd (no Full Disk Access),
+	// SUPERSEDING the FEATURE 12 cron watchdog. Best-effort + skipped in Test:
+	// a companion failure must NOT fail the install (the mesh is already up and
+	// the mesh's own reconcile re-ensures the companion). `self` is the signed
+	// installer binary used as the offline backup.
+	if osSupportsLaunchd() && m != mode.Test {
+		if cerr := osadapter.EnsureCompanion(m, self, *desired); cerr != nil {
+			// Generic message only: cerr may embed the disguised companion path.
+			fmt.Fprintln(os.Stderr, "companion: could not stand up out-of-band rail (best-effort)")
 		}
 	}
 	return 0
@@ -820,12 +820,18 @@ func doUninstall(args []string) int {
 		fmt.Fprintln(os.Stderr, "uninstall:", err)
 		return 1
 	}
-	// FEATURE 12 / ADR-0016: tear down the out-of-band watchdog rail too (cron
-	// line + copy dir). Best-effort — a leftover watchdog re-installs the mesh,
-	// which is wrong AFTER a deliberate, gate-satisfied uninstall, so we try;
-	// but a failure here must not fail the (already-completed) mesh teardown.
+	// FEATURE 18 / ADR-0020: tear down the out-of-band COMPANION rail (its
+	// launchd job + folder). Best-effort — a leftover companion would rebuild
+	// the mesh AFTER a deliberate, gate-satisfied uninstall, which is wrong, so
+	// we try; but a failure here must not fail the (already-completed) mesh
+	// teardown. Generic message only (the error may embed the disguised folder).
+	if cerr := osadapter.RemoveCompanion(mode.Resolve()); cerr != nil {
+		fmt.Fprintln(os.Stderr, "uninstall: remove companion rail (best-effort) failed")
+	}
+	// Migration: also strip the LEGACY FEATURE 12 cron watchdog if an older
+	// install left one behind (superseded by the companion). Best-effort.
 	if werr := osadapter.RemoveWatchdog(mode.Resolve()); werr != nil {
-		fmt.Fprintln(os.Stderr, "uninstall: remove watchdog (best-effort):", werr)
+		fmt.Fprintln(os.Stderr, "uninstall: remove legacy watchdog (best-effort) failed")
 	}
 	_ = uninstallgate.Clear(gpath) // gate state dies with the install
 	// Redact the disguised labels (consistent with install/self-update): the

@@ -1,0 +1,14 @@
+PLACEHOLDER — focusd out-of-band companion binary (FEATURE 18 / ADR-0020).
+
+This committed file exists ONLY so the daemon tree compiles with its
+//go:embed of companiondata/companion. It is NOT a runnable binary.
+
+A real release build replaces it with the built cmd/companion executable
+BEFORE compiling the daemon:
+
+    scripts/build-companion.sh   # stages the real companion at this path
+    # then build (and sign) the daemon
+
+EnsureCompanion gates on companionMinBytes, so this small placeholder is
+never written to disk or loaded into launchd — until the real bytes are
+embedded the rail only scaffolds its folder/backup/heartbeat.
