@@ -1,6 +1,9 @@
 # FEATURE 17 — Daemon recovery resilience (survive a wiped workdir + stop generation pileup)
 
-- **Status:** 🔨 defining / approved-building (product owner approved 2026-06-29)
+- **Status:** ✅ shipped + live-verified (daemon-v0.5.6, 2026-06-29). Wiped-workdir
+  recovery (TC-14) and install-time single-generation convergence (TC-19) both PASS
+  live + peer-reviewed. **One open follow-up** below (post-recovery generation
+  convergence / invisible zombies — a hygiene gap, not a protection gap).
 - **Closes:** a live incident where protection went **fully down and did not
   auto-recover** (see register §6, the workdir-delete + generation-pileup limits).
 - **Builds on:** [FEATURE 12](12-out-of-band-watchdog.md) (out-of-band recovery —
@@ -88,3 +91,39 @@ gone**, and installs **stop accumulating stale generations**.
 - **Recovery still depends on the fetch source being reachable** to roll forward
   past the baked version (the baked version alone restores protection offline at
   the daemon layer; the companion's offline binary backup is FEATURE 18).
+
+## Follow-up (open) — post-recovery generation convergence / invisible zombies
+
+`[peer-reviewed, confirmed real, 2026-06-29 — maps to e2e TC-21]`
+
+**The gap.** Install-time cleanup (acceptance #2/#3) converges to one generation
+only for generations whose binary still verifies. After **workdir-delete/recovery
+cycles**, orphan generations accumulate that cleanup **cannot retire**, so the
+"exactly one live generation" guarantee holds on a fresh install but **drifts back
+above one** after a teardown/recovery cycle. Two reinforcing mechanisms:
+
+1. **Invisible (zombie) generations.** Discovering existing generations requires
+   each supervisor entry's binary to pass signature verification. A generation
+   whose workdir was wiped has a **deleted binary**, so the read fails and that
+   generation is **silently skipped** — its supervisor entry and its still-running
+   platform persist invisibly, beyond cleanup's reach.
+2. **Orphan platforms.** Deleting a workdir does **not** kill the already-running
+   platform (binary unlinked, process alive), and the daemon deliberately leaves
+   the platform running on shutdown (protection continuity). So each
+   singleton-handover starts a **new** platform and leaves the old one, with no
+   path that ends the orphan → unbounded accumulation.
+
+**Observed live:** cleanup logged "retired 1" while **2 live generations / 3
+supervised platforms** remained; only a manual clean-slate reached one.
+
+**Honest impact — hygiene, not bypass.** Protection stays **HEALTHY** (more
+enforcers, not fewer). This is an **observability / clutter** problem (multi-platform,
+multi-generation, a visible tell) and only manifests **after teardown/recovery
+cycles**, never in steady state. It does **not** weaken enforcement.
+
+**Fix direction.** Treat supervisor entries pointing at a **deleted** binary as
+**dead generations** — don't require signature verification when the binary is
+absent — and have the retire step boot them out, remove their entry, and **end
+their orphaned platform process**, gated by the existing safe-to-remove check.
+This closes both the invisible-zombie discovery gap and the orphan-platform
+accumulation mechanism.
