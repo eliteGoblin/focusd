@@ -8,14 +8,16 @@ import (
 	"time"
 )
 
-// TestHistory_NeverEmptyUnderConcurrentWrites reproduces the status-flip bug:
-// a read-only connection (the `status` reader) must NEVER read back 0 rows for
-// a job that has already recorded at least one run, even while a separate
-// read-write connection (the scheduler) is continuously inserting runs.
+// TestHistory_NeverEmptyUnderConcurrentWrites is the same-process guard for
+// the status-flip bug: a read-only connection (the `status` reader) must NEVER
+// read back 0 rows for a job that already recorded at least one run, even while
+// a separate read-write connection (the scheduler) inserts runs continuously.
 //
-// On origin/master (rollback-journal mode) this fails: the read-only
-// connection transiently observes an empty result, which the status reader
-// maps to "no runs yet" → UNKNOWN, flipping the overall verdict.
+// NOTE: this same-process variant is necessary but NOT sufficient — it passed
+// under the earlier WAL fix too, because a same-uid in-process reader CAN
+// attach the WAL's -shm and so sees committed-but-uncheckpointed runs. The live
+// flip was a CROSS-PROCESS reader that could not attach a hot WAL; see
+// TestStatusReader_CrossProcess_SeesCommittedRuns for the decisive reproduction.
 func TestHistory_NeverEmptyUnderConcurrentWrites(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "state.db")
 
@@ -85,10 +87,15 @@ func TestHistory_NeverEmptyUnderConcurrentWrites(t *testing.T) {
 	}
 }
 
-// TestOpen_UsesWAL pins the root-cause fix: the writer DB must be in WAL mode
-// so the read-only status snapshot never contends with the scheduler. A
-// regression to rollback-journal mode reintroduces the status flip.
-func TestOpen_UsesWAL(t *testing.T) {
+// TestOpen_UsesRollbackJournal pins the root-cause fix and guards against
+// re-introducing the earlier (failed) WAL attempt. The writer DB must use
+// rollback-journal mode (journal_mode=delete) so every commit lands in the
+// MAIN db file and is therefore visible to ANY read-only reader — including a
+// separate, possibly privilege-dropped `daemon status` process — with no
+// dependency on attaching a WAL -shm sidecar. A regression to WAL reintroduces
+// the cross-process status flip (committed runs stranded in an unattachable
+// -wal → stale 0-row reads → HEALTHY↔UNKNOWN).
+func TestOpen_UsesRollbackJournal(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "state.db")
 	db, err := Open(path)
 	if err != nil {
@@ -100,7 +107,12 @@ func TestOpen_UsesWAL(t *testing.T) {
 	if err := db.sql.QueryRow(`PRAGMA journal_mode`).Scan(&mode); err != nil {
 		t.Fatalf("PRAGMA journal_mode: %v", err)
 	}
-	if mode != "wal" {
-		t.Fatalf("journal_mode = %q, want wal", mode)
+	if mode == "wal" {
+		t.Fatalf("journal_mode = %q, want a rollback-journal mode (delete) — "+
+			"WAL strands committed runs in the -wal and reintroduces the "+
+			"cross-process status flip", mode)
+	}
+	if mode != "delete" {
+		t.Fatalf("journal_mode = %q, want delete", mode)
 	}
 }

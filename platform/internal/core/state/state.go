@@ -35,17 +35,25 @@ func Open(path string) (*DB, error) {
 		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 			return nil, fmt.Errorf("create state dir: %w", err)
 		}
-		// WAL mode is the fix for the `status` flip: in the default
-		// rollback-journal mode a writer holds an EXCLUSIVE lock during
-		// commit, so the separate read-only `status` process contends with
-		// the scheduler and its History query can hit SQLITE_BUSY. The status
-		// reader maps that error to found=false → "no runs yet" → the OVERALL
-		// verdict flips HEALTHY↔UNKNOWN. WAL lets a reader take a consistent
-		// committed snapshot without ever blocking (or being blocked by) the
-		// writer, so a job with >=1 recorded run is always read back as such.
-		// busy_timeout still backs the rare writer-vs-checkpointer contention;
-		// foreign_keys on for integrity.
-		dsn = "file:" + path + "?_pragma=busy_timeout(5000)&_pragma=journal_mode(WAL)&_pragma=foreign_keys(1)"
+		// Rollback-journal mode (journal_mode=DELETE) is required for the
+		// `status` flip fix. The separate `daemon status` PROCESS opens this
+		// DB read-only (OpenReadOnly, mode=ro). Under WAL, freshly committed
+		// runs live in the -wal sidecar until a checkpoint folds them into the
+		// main file; a cross-process read-only opener that cannot attach the
+		// WAL's shared-memory index (-shm) — the live case: a separate, possibly
+		// privilege-dropped reader against a hot, un-checkpointed -wal — reads
+		// the STALE main file and sees 0 rows → "no runs yet" → OVERALL flips
+		// HEALTHY↔UNKNOWN. (This is why the earlier WAL fix passed in-process
+		// but failed live.) In rollback-journal mode every commit lands in the
+		// MAIN db file and the journal is removed on commit, so ANY read-only
+		// reader — same process or separate, regardless of -shm permissions —
+		// always observes the last committed state. No sidecar, no staleness.
+		// journal_mode(DELETE) is set explicitly so a DB previously left in
+		// (persistent) WAL mode is converted back on open. The reader's
+		// contention with a writer's brief commit lock is handled by a generous
+		// busy_timeout + reader retry (see OpenReadOnly / status), never by
+		// treating SQLITE_BUSY as empty. foreign_keys on for integrity.
+		dsn = "file:" + path + "?_pragma=busy_timeout(5000)&_pragma=journal_mode(DELETE)&_pragma=foreign_keys(1)"
 	}
 
 	sqldb, err := sql.Open("sqlite", dsn)
@@ -84,7 +92,11 @@ func Open(path string) (*DB, error) {
 // expected to degrade to "history unavailable" rather than treat this as
 // fatal.
 func OpenReadOnly(path string) (*DB, error) {
-	dsn := "file:" + path + "?mode=ro&_pragma=busy_timeout(2000)"
+	// A generous busy_timeout lets a read query ride out the writer's brief
+	// per-commit EXCLUSIVE lock (rollback-journal mode) instead of erroring,
+	// so a momentary lock is never surfaced as "no runs". The caller adds a
+	// bounded retry on top for the rare timeout overrun.
+	dsn := "file:" + path + "?mode=ro&_pragma=busy_timeout(5000)"
 	sqldb, err := sql.Open("sqlite", dsn)
 	if err != nil {
 		return nil, fmt.Errorf("open sqlite ro: %w", err)

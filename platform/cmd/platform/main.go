@@ -259,9 +259,24 @@ func runStatus(args []string) int {
 		if db, derr := state.OpenReadOnly(dbPath); derr == nil {
 			defer db.Close()
 			lastRun = func(jobID string) (string, time.Time, bool, error) {
-				runs, herr := db.Runs.History(jobID, 1)
-				if herr != nil || len(runs) == 0 {
+				// Retry on a transient read error (e.g. SQLITE_BUSY if the
+				// writer's brief commit lock outlasts busy_timeout) so a
+				// momentary lock is never mistaken for history. Crucially we do
+				// NOT conflate the two failure shapes:
+				//   - herr != nil  → a transient READ error. Return it as an
+				//     error (found=false) so the job reads UNKNOWN for THIS tick
+				//     only; it is not a definitive "never ran" claim and the
+				//     next status read recovers. Previously an error and an
+				//     empty result were collapsed into the same found=false,
+				//     so a transient query error rolled OVERALL to UNKNOWN
+				//     identically to a genuine fresh install.
+				//   - herr == nil && len(runs) == 0 → a GENUINE "no run yet".
+				runs, herr := historyWithRetry(db.Runs.History, jobID)
+				if herr != nil {
 					return "", time.Time{}, false, herr
+				}
+				if len(runs) == 0 {
+					return "", time.Time{}, false, nil
 				}
 				// A malformed/corrupt StartedAt parses to the year-0 zero time,
 				// which would mis-bucket age as ">1h" and lie about staleness
@@ -295,6 +310,34 @@ func runStatus(args []string) int {
 		return 0
 	}
 	return 1
+}
+
+// historyReadAttempts / historyReadBackoff bound the status reader's retry on
+// a transient History error. With a 5s busy_timeout already absorbing the
+// writer's sub-millisecond commit lock, a couple of short retries is ample;
+// the goal is to avoid surfacing a momentary SQLITE_BUSY as missing history,
+// not to mask a genuinely broken DB.
+const (
+	historyReadAttempts = 3
+	historyReadBackoff  = 25 * time.Millisecond
+)
+
+// historyWithRetry calls the run-history query, retrying only on a transient
+// ERROR. A successful read — including a genuine empty result — returns
+// immediately and is NEVER retried (an empty history is a real answer, not a
+// failure). Separating "error" from "empty" is what keeps a transient read
+// error from masquerading as "no runs yet". query mirrors JobRunRepo.History.
+func historyWithRetry(query func(jobID string, limit int) ([]state.JobRun, error), jobID string) ([]state.JobRun, error) {
+	var runs []state.JobRun
+	var err error
+	for attempt := 0; attempt < historyReadAttempts; attempt++ {
+		runs, err = query(jobID, 1)
+		if err == nil {
+			return runs, nil
+		}
+		time.Sleep(historyReadBackoff)
+	}
+	return runs, err
 }
 
 func runRun(args []string) int {
