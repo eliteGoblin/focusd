@@ -15,6 +15,7 @@ import (
 	"github.com/eliteGoblin/focusd/platform/internal/core/config"
 	"github.com/eliteGoblin/focusd/platform/internal/core/plugin"
 	"github.com/eliteGoblin/focusd/platform/internal/core/runner"
+	"github.com/eliteGoblin/focusd/platform/internal/core/snapshot"
 	"github.com/eliteGoblin/focusd/platform/internal/core/state"
 	"github.com/eliteGoblin/focusd/platform/internal/osadapter"
 	"github.com/robfig/cron/v3"
@@ -27,6 +28,11 @@ type Scheduler struct {
 	db   *state.DB
 	log  *slog.Logger
 	mode osadapter.RunMode // platform run mode; gates plugin run_as
+	// snap mirrors scheduler-recorded terminal runs (skipped / unavailable)
+	// into the status snapshot. The runner mirrors the runs it records; the
+	// scheduler mirrors the ones IT records before the runner is reached. A
+	// nil store is a no-op, so existing New(...) callers/tests are unaffected.
+	snap *snapshot.Store
 
 	mu         sync.Mutex
 	triggered  map[string]int  // jobID -> trigger count (test/observability)
@@ -47,6 +53,23 @@ func New(r *runner.Runner, db *state.DB, log *slog.Logger, mode osadapter.RunMod
 		mode:       mode,
 		triggered:  map[string]int{},
 		skipLogged: map[string]bool{},
+	}
+}
+
+// WithSnapshot wires the scheduler to mirror the terminal runs IT records
+// (no-overlap skips, mode-unavailable rows) into the status snapshot. A nil
+// store leaves it a no-op writer. Returns the same *Scheduler for chaining.
+func (s *Scheduler) WithSnapshot(snap *snapshot.Store) *Scheduler {
+	s.snap = snap
+	return s
+}
+
+// recordSnapshot mirrors one scheduler-recorded terminal run into the status
+// snapshot. Best-effort: the DB row is the source of truth, so a snapshot
+// write failure is logged and swallowed. nil-safe via the Store's receiver.
+func (s *Scheduler) recordSnapshot(jobID, status string) {
+	if err := s.snap.Record(jobID, status, time.Now()); err != nil {
+		s.log.Warn("status snapshot write failed", "job", jobID)
 	}
 }
 
@@ -174,6 +197,8 @@ func (s *Scheduler) trigger(j config.Job, p plugin.Discovered) {
 			// silently losing it would make status lie. (Go-reviewer MEDIUM.)
 			if rerr := s.db.Runs.RecordUnavailable(j.ID, j.Plugin, reason); rerr != nil {
 				s.log.Warn("record unavailable failed", "job", j.ID, "err", rerr)
+			} else {
+				s.recordSnapshot(j.ID, state.RunStatusUnavailable)
 			}
 		}
 		s.log.Debug("job unavailable (run_as not servable in this mode)",
@@ -194,6 +219,7 @@ func (s *Scheduler) trigger(j config.Job, p plugin.Discovered) {
 		}
 		if !ok {
 			_ = s.db.Runs.RecordSkipped(j.ID, j.Plugin, "previous run still active (no-overlap)")
+			s.recordSnapshot(j.ID, state.RunStatusSkipped)
 			s.event(state.SeverityInfo, "job_skipped", "no-overlap: previous run active", j.ID)
 			s.log.Info("job skipped (no-overlap)", "job", j.ID)
 			return
