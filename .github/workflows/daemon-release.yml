@@ -47,6 +47,11 @@ jobs:
           for t in $targets; do
             os=${t%/*}; arch=${t#*/}; ext=""
             [ "$os" = windows ] && ext=".exe"
+            # FEATURE 18 / ADR-0020: stage the REAL companion at the daemon's
+            # //go:embed path for THIS os/arch BEFORE the daemon build (in-repo
+            # that path is a tiny placeholder). The companion is deliberately
+            # NOT mesh-signed, so it stays invisible to mesh discovery.
+            COMPANION_GOOS=$os COMPANION_GOARCH=$arch bash ../scripts/build-companion.sh
             CGO_ENABLED=0 GOOS=$os GOARCH=$arch \
               go build -trimpath -ldflags "-s -w -X main.version=$V" \
               -o /tmp/daemon-$os-$arch$ext ./cmd/daemon
