@@ -706,6 +706,19 @@ func installMesh(self string, spec *osadapter.Spec, desired string) error {
 	} else if n > 0 {
 		fmt.Printf("retired %d prior generation(s)\n", n)
 	}
+	// FEATURE 17 follow-up (TC-21): retirement only catches generations still
+	// visible to a plist scan. A teardown/recovery/re-install cycle can also
+	// leave ORPHANED generation workdirs on disk — hidden-dot dirs with a stale
+	// state.db but NO plist/process backing them — invisible to retirement.
+	// Sweep them now (keep = the new install's workdir = Dir(relocated binary))
+	// so exactly ONE state.db survives and status reads a single source. Best-
+	// effort: a sweep failure must NOT fail an otherwise-successful install, and
+	// the swept paths are never surfaced.
+	if n, serr := osadapter.SweepOrphanWorkdirs(spec.Mode, filepath.Dir(spec.SelfPath)); serr != nil {
+		fmt.Fprintln(os.Stderr, "install: sweep orphan workdirs (best-effort) failed")
+	} else if n > 0 {
+		fmt.Printf("swept %d orphan workdir(s)\n", n)
+	}
 	return nil
 }
 
