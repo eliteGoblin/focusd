@@ -1,6 +1,7 @@
 package osadapter
 
 import (
+	"os"
 	"path/filepath"
 	"testing"
 )
@@ -58,39 +59,74 @@ func TestHasMeshFlag(t *testing.T) {
 
 // TestSafeToRemoveWorkdir pins the os.RemoveAll guard for generation cleanup
 // (FEATURE 17, Item 3): only an absolute path STRICTLY under the support root,
-// that is neither the keep workdir nor an ancestor of it, may be removed.
+// that is neither the keep workdir nor an ancestor of it, may be removed. The
+// guard now resolves symlinks on BOTH dir and supportRoot, so real on-disk
+// dirs are required — t.TempDir() + os.MkdirAll give us those.
 func TestSafeToRemoveWorkdir(t *testing.T) {
-	root := "/Library/Application Support"
-	keep := filepath.Join(root, ".keepgen.aaaa")
+	mkdir := func(p string) string {
+		t.Helper()
+		if err := os.MkdirAll(p, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		return p
+	}
+
+	root := t.TempDir()
+	// keep lives one level deep so we can also exercise an ancestor-of-keep dir.
+	keepParent := mkdir(filepath.Join(root, ".keepgen.aaaa"))
+	keep := mkdir(filepath.Join(keepParent, "inner"))
+	oldGen := mkdir(filepath.Join(root, ".oldgen.bbbb"))
+	nestedOld := mkdir(filepath.Join(oldGen, "bin"))
+	outside := t.TempDir() // a real dir entirely outside root
+
 	cases := []struct {
-		name string
-		dir  string
-		want bool
+		name        string
+		dir         string
+		supportRoot string
+		keep        string
+		want        bool
 	}{
-		{"valid old generation", filepath.Join(root, ".oldgen.bbbb"), true},
-		{"valid nested old generation", filepath.Join(root, ".oldgen.bbbb", "bin"), true},
-		{"empty dir", "", false},
-		{"relative dir", "oldgen", false},
-		{"the support root itself", root, false},
-		{"outside the support root", "/Library/LaunchDaemons/x", false},
-		{"escape via traversal sibling", "/Library/Application SupportXX/y", false},
-		{"the keep workdir", keep, false},
-		{"ancestor of keep (== root parent)", "/Library", false},
-		{"ancestor of keep (root)", root, false},
+		{"valid old generation", oldGen, root, keep, true},
+		{"valid nested old generation", nestedOld, root, keep, true},
+		{"empty dir", "", root, keep, false},
+		{"relative dir", "oldgen", root, keep, false},
+		{"relative supportRoot", oldGen, "Library/Application Support", keep, false},
+		{"non-existent dir under root", filepath.Join(root, ".ghost"), root, keep, false},
+		{"the support root itself", root, root, keep, false},
+		{"outside the support root", outside, root, keep, false},
+		{"the keep workdir", keep, root, keep, false},
+		{"ancestor of keep (under root)", keepParent, root, keep, false},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			if got := safeToRemoveWorkdir(c.dir, root, keep); got != c.want {
-				t.Fatalf("safeToRemoveWorkdir(%q) = %v, want %v", c.dir, got, c.want)
+			if got := safeToRemoveWorkdir(c.dir, c.supportRoot, c.keep); got != c.want {
+				t.Fatalf("safeToRemoveWorkdir(%q, %q, %q) = %v, want %v",
+					c.dir, c.supportRoot, c.keep, got, c.want)
 			}
 		})
 	}
 
-	// Empty keepWorkdir must not weaken the under-root guard.
-	if !safeToRemoveWorkdir(filepath.Join(root, ".g.cccc"), root, "") {
+	// A symlinked INTERMEDIATE component that escapes the root must be refused:
+	// <root>/link -> <outside>, so <root>/link/evil is lexically under root but
+	// RemoveAll would follow the link and delete OUTSIDE root.
+	t.Run("symlinked intermediate escapes root", func(t *testing.T) {
+		linkRoot := t.TempDir()
+		escapeTarget := t.TempDir()
+		mkdir(filepath.Join(escapeTarget, "evil"))
+		if err := os.Symlink(escapeTarget, filepath.Join(linkRoot, "link")); err != nil {
+			t.Fatal(err)
+		}
+		dir := filepath.Join(linkRoot, "link", "evil") // resolves outside linkRoot
+		if safeToRemoveWorkdir(dir, linkRoot, "") {
+			t.Fatal("a dir whose intermediate symlink escapes the root must be refused")
+		}
+	})
+
+	// Empty keepWorkdir must not weaken the under-root guard (happy path).
+	if !safeToRemoveWorkdir(oldGen, root, "") {
 		t.Fatal("a valid under-root dir must be removable even with no keep workdir")
 	}
-	if safeToRemoveWorkdir("/etc", root, "") {
+	if safeToRemoveWorkdir(outside, root, "") {
 		t.Fatal("a path outside the root must never be removable")
 	}
 }

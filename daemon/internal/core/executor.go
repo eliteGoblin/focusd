@@ -84,6 +84,13 @@ type Executor struct {
 	// Store.LockPath() (preserves existing tests + the test-mode per-workdir
 	// isolation, which build() sets explicitly).
 	LockFilePath string
+	// fallbackWarned latches the one-shot "adopting baked fallback" WARN. When
+	// the workdir is persistently unwritable (the desired write keeps failing)
+	// the fallback branch runs every ~2s tick; without this latch it would spam
+	// the log forever. We log the FIRST adoption, suppress repeats, and re-arm
+	// (reset to false) the moment a real desired version is present on disk
+	// again — so a later recurrence is logged afresh.
+	fallbackWarned bool
 }
 
 // New builds an Executor.
@@ -139,6 +146,13 @@ func (e *Executor) Tick(ctx context.Context) (Action, error) {
 	desired := e.Store.Desired()
 	haveConfig := e.Store.HaveConfig()
 
+	// A real desired version is present again → re-arm the one-shot fallback
+	// WARN so a future wipe is reported afresh (and not silently suppressed by
+	// a latch left set from an earlier recovery).
+	if desired != "" {
+		e.fallbackWarned = false
+	}
+
 	// FEATURE 17 (recovery resilience): a wiped workdir leaves no desired
 	// version on disk, which Decide treats as Blocked → no platform → no
 	// protection. If a baked Fallback is set, adopt it: re-pin it to disk
@@ -146,8 +160,9 @@ func (e *Executor) Tick(ctx context.Context) (Action, error) {
 	// tick drives EnsureRunning instead of Blocked. FLOOR-not-ceiling — this
 	// runs ONLY when the store desired is empty; an explicit pin always wins.
 	if desired == "" && e.Fallback != "" {
-		if e.Log != nil {
+		if e.Log != nil && !e.fallbackWarned {
 			e.Log.Warn("no desired version on disk; adopting baked fallback")
+			e.fallbackWarned = true
 		}
 		// Best-effort persist. Even if the write fails (e.g. store not yet
 		// writable), drive toward the fallback THIS tick so a transient FS

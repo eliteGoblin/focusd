@@ -112,11 +112,29 @@ func hasMeshFlag(argv []string) bool {
 //
 // Pure → unit-tested on Linux CI.
 func safeToRemoveWorkdir(dir, supportRoot, keepWorkdir string) bool {
-	if dir == "" || supportRoot == "" || !filepath.IsAbs(dir) {
+	// BOTH must be absolute up front: a relative supportRoot would make the
+	// containment check meaningless (filepath.Rel against a relative base can
+	// spuriously "contain" almost anything), so refuse before resolving.
+	if dir == "" || supportRoot == "" || !filepath.IsAbs(dir) || !filepath.IsAbs(supportRoot) {
 		return false
 	}
-	dir = filepath.Clean(dir)
-	root := filepath.Clean(supportRoot)
+
+	// Resolve symlinks on BOTH before the containment check so RemoveAll and
+	// this guard agree on the REAL paths. Without this, a symlinked intermediate
+	// component of dir (e.g. <root>/link -> /outside) passes a lexical
+	// under-root check yet RemoveAll would follow the link and delete OUTSIDE
+	// root. EvalSymlinks also fails for a non-existent path → we refuse, which
+	// is correct: a workdir we cannot stat is not a workdir we should rm -rf.
+	rdir, err := filepath.EvalSymlinks(dir)
+	if err != nil {
+		return false
+	}
+	rroot, err := filepath.EvalSymlinks(supportRoot)
+	if err != nil {
+		return false
+	}
+	dir = filepath.Clean(rdir)
+	root := filepath.Clean(rroot)
 
 	// Must be strictly under root: a valid relative path that is neither "."
 	// (== root) nor an escape ("..").
@@ -126,7 +144,14 @@ func safeToRemoveWorkdir(dir, supportRoot, keepWorkdir string) bool {
 	}
 
 	if keepWorkdir != "" {
+		// Resolve keep too so the comparison is against real paths (matching the
+		// resolved dir). Best-effort: a not-yet-existing keep falls back to its
+		// cleaned form rather than refusing — the keep guard only ever ADDS
+		// safety, so a cleaned compare is acceptable when it can't be resolved.
 		keep := filepath.Clean(keepWorkdir)
+		if rk, kerr := filepath.EvalSymlinks(keepWorkdir); kerr == nil {
+			keep = filepath.Clean(rk)
+		}
 		if dir == keep {
 			return false // never delete the surviving generation's workdir
 		}

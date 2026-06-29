@@ -290,7 +290,16 @@ func singletonLockPath(m mode.Mode, workdir string) string {
 	if m == mode.Test {
 		return (&core.Store{Dir: workdir}).LockPath()
 	}
-	home, _ := os.UserHomeDir()
+	home, err := os.UserHomeDir()
+	if err != nil {
+		// No resolvable home → mode.SupportRoot would yield a RELATIVE path, and
+		// a relative singleton lock defeats the cross-generation election (each
+		// generation, started from its own cwd, would flock a different file →
+		// twin platforms). Fall back to the per-workdir lock: it still elects one
+		// platform within a generation, which is strictly safer than a relative
+		// path that elects none across them.
+		return (&core.Store{Dir: workdir}).LockPath()
+	}
 	return filepath.Join(mode.SupportRoot(m, home), fixedSingletonLockName)
 }
 
@@ -669,7 +678,7 @@ func installMesh(self string, spec *osadapter.Spec, desired string) error {
 		return fmt.Errorf("write desired: %w", err)
 	}
 	if err := osadapter.Install(*spec); err != nil {
-		return err
+		return fmt.Errorf("install mesh: %w", err)
 	}
 	// FEATURE 17 Item 3: the new generation is up FIRST (above); now retire any
 	// OLDER generations left behind by a wiped-state reinstall (distinct

@@ -158,11 +158,22 @@ type fakeRetire struct {
 
 // TestRetireGenerationsKeepsKeepRetiresOthers: the keep generation is never
 // touched; every other generation is booted out + plists removed + binary
-// killed, and its workdir is RemoveAll'd ONLY when path-sanity allows.
+// killed, and its workdir is RemoveAll'd ONLY when path-sanity allows. Uses
+// real on-disk dirs because safeToRemoveWorkdir now resolves symlinks (a
+// non-existent workdir is refused).
 func TestRetireGenerationsKeepsKeepRetiresOthers(t *testing.T) {
-	root := "/Library/Application Support"
-	keepBin := filepath.Join(root, ".keep", "keep.bin")
-	keepWorkdir := filepath.Dir(keepBin)
+	mkdir := func(p string) string {
+		t.Helper()
+		if err := os.MkdirAll(p, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		return p
+	}
+	root := t.TempDir()
+	keepWorkdir := mkdir(filepath.Join(root, ".keep"))
+	keepBin := filepath.Join(keepWorkdir, "keep.bin")
+	old1Workdir := mkdir(filepath.Join(root, ".old1")) // SAFE: real, under root
+	old2Workdir := t.TempDir()                         // UNSAFE: real, outside root
 
 	gens := []Generation{
 		{ // surviving generation — must be skipped entirely
@@ -171,14 +182,14 @@ func TestRetireGenerationsKeepsKeepRetiresOthers(t *testing.T) {
 			PlistPaths: []string{"/p/k1", "/p/k2", "/p/k3"},
 		},
 		{ // old generation with a SAFE workdir → fully retired incl. RemoveAll
-			BinaryPath: filepath.Join(root, ".old1", "old1.bin"),
-			Workdir:    filepath.Join(root, ".old1"),
+			BinaryPath: filepath.Join(old1Workdir, "old1.bin"),
+			Workdir:    old1Workdir,
 			Labels:     []string{"o1a", "o1b", "o1c"},
 			PlistPaths: []string{"/p/o1a", "/p/o1b", "/p/o1c"},
 		},
 		{ // old generation with an UNSAFE workdir (outside root) → no RemoveAll
-			BinaryPath: "/somewhere/else/old2.bin",
-			Workdir:    "/somewhere/else",
+			BinaryPath: filepath.Join(old2Workdir, "old2.bin"),
+			Workdir:    old2Workdir,
 			Labels:     []string{"o2a"},
 			PlistPaths: []string{"/p/o2a"},
 		},
@@ -205,18 +216,52 @@ func TestRetireGenerationsKeepsKeepRetiresOthers(t *testing.T) {
 		t.Fatalf("keep workdir must never be RemoveAll'd")
 	}
 	// Old1 fully retired including its (safe) workdir.
-	if !contains(f.removedAll, filepath.Join(root, ".old1")) {
+	if !contains(f.removedAll, old1Workdir) {
 		t.Fatalf("safe old1 workdir must be RemoveAll'd, got %v", f.removedAll)
 	}
 	// Old2's unsafe workdir must NOT be removed, but it is still booted out.
-	if contains(f.removedAll, "/somewhere/else") {
+	if contains(f.removedAll, old2Workdir) {
 		t.Fatalf("unsafe workdir must NOT be RemoveAll'd, got %v", f.removedAll)
 	}
 	if !contains(f.bootedOut, "o2a") {
 		t.Fatalf("old2 label must still be booted out, got %v", f.bootedOut)
 	}
-	if !contains(f.killed, "/somewhere/else/old2.bin") {
+	if !contains(f.killed, filepath.Join(old2Workdir, "old2.bin")) {
 		t.Fatalf("old2 binary must be killed, got %v", f.killed)
+	}
+}
+
+// TestRetireGenerationsNoopOnEmptyKeep: an empty keepBinaryPath is a bug, not a
+// request to wipe everything. With a real generation present and no keep target,
+// retireGenerations must retire NOTHING and never touch launchd/FS — otherwise
+// the empty keep would make every generation "other" and tear the mesh down
+// (ROOT bootout + os.RemoveAll blast radius).
+func TestRetireGenerationsNoopOnEmptyKeep(t *testing.T) {
+	root := t.TempDir()
+	gens := []Generation{
+		{
+			BinaryPath: filepath.Join(root, ".only", "only.bin"),
+			Workdir:    filepath.Join(root, ".only"),
+			Labels:     []string{"a", "b", "c"},
+			PlistPaths: []string{"/p/a", "/p/b", "/p/c"},
+		},
+	}
+	f := &fakeRetire{}
+	n := retireGenerations(gens, "", root,
+		func(l string) error { f.bootedOut = append(f.bootedOut, l); return nil },
+		func(p string) error { f.removedPlist = append(f.removedPlist, p); return nil },
+		func(b string) { f.killed = append(f.killed, b) },
+		func(d string) error { f.removedAll = append(f.removedAll, d); return nil },
+	)
+	if n != 0 {
+		t.Fatalf("empty keep must retire 0, got %d", n)
+	}
+	if len(f.bootedOut) != 0 {
+		t.Fatalf("empty keep must never bootout, got %v", f.bootedOut)
+	}
+	if len(f.removedPlist) != 0 || len(f.killed) != 0 || len(f.removedAll) != 0 {
+		t.Fatalf("empty keep must have zero side effects, got plist=%v killed=%v removedAll=%v",
+			f.removedPlist, f.killed, f.removedAll)
 	}
 }
 

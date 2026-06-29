@@ -423,6 +423,13 @@ func DiscoverAllGenerations(m mode.Mode, verify Verifier) ([]Generation, error) 
 // the new generation is already up; NEVER from the self-update path (in-place
 // rotation transiently looks like two generations).
 func RetireOtherGenerations(m mode.Mode, keepBinaryPath string) (int, error) {
+	// Refuse to retire ANYTHING without a surviving generation to keep: an
+	// empty keepBinaryPath would make every discovered generation "other" and
+	// tear the whole mesh down (the bootout + os.RemoveAll blast radius). A
+	// caller with no keep target is a bug, not a request to wipe everything.
+	if keepBinaryPath == "" {
+		return 0, fmt.Errorf("retire: keepBinaryPath must not be empty")
+	}
 	gens, err := DiscoverAllGenerations(m, sig.VerifyFile)
 	if err != nil {
 		return 0, err
@@ -446,10 +453,12 @@ func retireGenerations(
 	killBin func(string),
 	removeAll func(string) error,
 ) int {
-	keepWorkdir := ""
-	if keepBinaryPath != "" {
-		keepWorkdir = filepath.Dir(keepBinaryPath)
+	// Defense in depth (mirrors RetireOtherGenerations): with no keep target
+	// EVERY generation would be "other" and get torn down. Retire nothing.
+	if keepBinaryPath == "" {
+		return 0
 	}
+	keepWorkdir := filepath.Dir(keepBinaryPath)
 	retired := 0
 	for _, g := range gens {
 		if g.BinaryPath == keepBinaryPath {
