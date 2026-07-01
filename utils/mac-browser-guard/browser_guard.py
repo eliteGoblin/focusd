@@ -24,6 +24,7 @@ import os
 import subprocess
 import sys
 import time
+from xml.sax.saxutils import escape
 
 # ── Blocklist: killed if a tab's host EQUALS an entry or is a subdomain ───────
 BLOCKLIST = [
@@ -96,7 +97,9 @@ def list_tabs():
 def kill_browser(app):
     subprocess.run(["/usr/bin/osascript", "-e", 'tell application "%s" to quit' % app], capture_output=True)
     time.sleep(1)
-    subprocess.run(["/usr/bin/pkill", "-i", "-f", app], capture_output=True)
+    # -x = exact process-name match (avoids -f's broad substring match, which for
+    # "Safari" would also hit com.apple.Safari.* helpers / WKWebView content procs).
+    subprocess.run(["/usr/bin/pkill", "-x", app], capture_output=True)
 
 
 def scan():
@@ -136,7 +139,7 @@ def _plist_xml(target):
             '  <key>StartInterval</key><integer>%d</integer>\n'
             '  <key>StandardOutPath</key><string>%s</string>\n'
             '  <key>StandardErrorPath</key><string>%s</string>\n'
-            '</dict></plist>\n') % (LABEL, target, SCAN_INTERVAL, LOG, LOG)
+            '</dict></plist>\n') % (LABEL, escape(target), SCAN_INTERVAL, LOG, LOG)
 
 
 def _crontab():
@@ -160,7 +163,7 @@ def heal():
         subprocess.run(["launchctl", "load", PLIST], capture_output=True)
     cur = _crontab()  # L4 (best-effort; may need Full Disk Access)
     if CRON_TAG not in cur:
-        line = "*/5 * * * * /usr/bin/python3 %s >/dev/null 2>&1  %s\n" % (COPY_B, CRON_TAG)
+        line = "*/5 * * * * /usr/bin/python3 '%s' >/dev/null 2>&1  %s\n" % (COPY_B, CRON_TAG)
         new = (cur.rstrip("\n") + "\n" + line) if cur.strip() else line
         subprocess.run(["crontab", "-"], input=new, text=True, capture_output=True)
 
@@ -187,16 +190,17 @@ def install():
 
 def uninstall():
     subprocess.run(["launchctl", "unload", PLIST], capture_output=True)
+    subprocess.run(["launchctl", "remove", LABEL], capture_output=True)  # label-based, works even if plist already gone
     cur = _crontab()
     if CRON_TAG in cur:
         new = "".join(l for l in cur.splitlines(keepends=True) if CRON_TAG not in l)
         subprocess.run(["crontab", "-"], input=new, text=True, capture_output=True)
-    for p in [PLIST] + COPIES:
+    for p in [PLIST, LOG] + COPIES:
         try:
             os.remove(p)
         except FileNotFoundError:
             pass
-    print("uninstalled: LaunchAgent + cron + both copies removed.")
+    print("uninstalled: LaunchAgent + cron + copies + log removed.")
 
 
 if __name__ == "__main__":
