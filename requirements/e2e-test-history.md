@@ -21,7 +21,12 @@
 > the F17/F19 convergence + status-flip follow-ups ↔ TC-21 (post-recovery
 > convergence — PASS) + TC-22 (status never false-UNKNOWN — DB run-history
 > concurrency — PASS) + TC-24 (churn-window status-vs-disk skew — WATCH).
-> TC-23 confirmed open with decisive evidence (bug #83).**
+> TC-23 confirmed open with decisive evidence (bug #83).
+> **FEATURE 20 (mac-browser-guard) ↔ TC-U1 — a UTILITY-tier case (ADR-0021),
+> kept OUTSIDE the platform mesh suite: it exercises a user-mode script on a
+> different execution path, not the signed daemon/platform mesh, so its run model
+> is not the mesh "walk every TC each deploy" model — see the Utility-tier
+> section below.**
 >
 > **Redaction (non-negotiable).** Verify as a developer, but NEVER print the
 > disguised workdir, labels, rotated binary paths, or plugin paths. Report
@@ -394,6 +399,35 @@ mesh; macOS gives no API to re-enable), (d) **kill all processes**, plus their
 
 ---
 
+## Utility-tier test cases (OUTSIDE the platform mesh suite — different execution path)
+
+> **These do NOT belong to the platform mesh regression suite above.** The
+> mesh suite verifies the **enforced tier** (signed daemon/platform/plugins) and
+> is walked in full on every live deploy. The cases here verify the **utility /
+> fallback tier** (ADR-0021) — standalone user-mode helpers that run where the
+> enforced stack can't. Different code, different execution path, different (ad-hoc,
+> per-machine) run model. They are recorded here so the ownership invariant holds
+> (every shipped feature → a TC) **without** implying the mesh run model applies.
+
+### TC-U1 🟡 (utility tier) mac-browser-guard quits a browser on a blocklisted tab — *FEATURE 20 / ADR-0021*  `[added 2026-07-02]`
+- **Tier:** utility / fallback (user-mode script), NOT the enforced mesh — see ADR-0021.
+- **Criterion:** the user-mode guard detects **ALL** open browser tabs (including
+  non-active / background tabs) and **quits the browser** when any tab is on a
+  blocklisted host — entirely in user mode (no sudo/admin).
+- **Repro:** open a blocklisted site in Chrome, then run the guard's one-shot scan
+  (`utils/mac-browser-guard/browser_guard.py`) → the browser quits.
+- **Key-moment excerpt (redaction-safe, from the live run):**
+  `tabs detected: 7` → `MATCH -> would kill: Google Chrome ( www.rba.com.au )` →
+  `killing: Google Chrome` → `Chrome is KILLED`.
+  *(`rba.com.au` was a temporary test blocklist entry; the shipped blocklist is
+  google / youtube / bilibili / etc.)*
+- **Expect:** all open tabs seen (incl. non-active), browser quit on a blocklisted
+  host. **Status: ✅ PASS (live-verified 2026-07-01, real Mac).**
+- **Honest limit (ADR-0021):** browser-only, user-mode, removable — thin friction,
+  no signing/tamper-resistance/commitment-gate. Not a mesh guarantee.
+
+---
+
 ## Run Log
 | Date | Deploy | Pass | Fail | Notes |
 |------|--------|------|------|-------|
@@ -405,4 +439,5 @@ mesh; macOS gives no API to re-enable), (d) **kill all processes**, plus their
 | 2026-06-29 | daemon-v0.5.6 (F17) + platform v0.16.4 (kill-steam Dota2 fix, #71) | TC-14, TC-19 | TC-21 (new) | F17 live-verified: workdir-delete recovered via baked fallback (down ~28s `desired=none` → adopt v0.16.3 → up ~56s, no permanent BLOCK; TC-14, go-reviewer-confirmed); fresh install "retired 4 prior generation(s)" → 1 platform (TC-19). Final: single generation, 1 platform, desired=good=v0.16.4, OVERALL HEALTHY. First TC-14 attempt was a false-pass (split-on-space path truncation → `rm` missed) — caught by a `test -d` gate; methodology lesson recorded on TC-14. NEW peer-reviewed bug → TC-21 (FAIL): post-recovery generations with deleted binaries are invisible to install cleanup + orphan platforms accumulate (hygiene gap, protection stays HEALTHY) |
 | 2026-06-29 | daemon-v0.5.7 (F19 + F17 convergence fix, #73) + platform v0.16.4 | TC-14 (re-confirmed under F19), TC-20 | TC-21 (still partial), TC-22 (new) | F19 live-verified: `ps` for the mesh marker + role flags returns **0** (role moved off argv into plist env); supervisor labels varied/non-clustering (TC-20 PASS). TC-14 re-confirmed under daemon-v0.5.7. F17 convergence fix (#73) retires dead-binary/zombie generations + ends orphan platforms — **convergence logic works live** (install "retired 2 → 1 platform"), but TC-21 stays PARTIAL: (a) stale workdir/state.db files left on disk, (b) status-flip → **TC-22 NEW** (run-history DB read/write concurrency → false OVERALL UNKNOWN; fix in progress), (c) manual cleanup helper not F19-env-aware |
 | 2026-06-29 | daemon-v0.5.9 (F18 + orphan-sweep, #76/#78/#80) + platform v0.16.7 (status snapshot, #79) | TC-16, TC-17, TC-21, TC-22 | TC-23 (new) | **F18 shipped + live-verified (Phase 1):** removed the entire in-band rail (daemon down, 0 platforms, 0 mesh plists) → the separate launchd companion (own folder, no FDA) detected the stale heartbeat and rebuilt the daemon from its signed offline backup (7.9MB, signature-checked) → mesh + platform back; companion excluded from mesh discovery/cleanup by construction (TC-16/TC-17 PASS; Phase 2 offline-platform restore deferred). **TC-21 PASS** — orphan-sweep (daemon-v0.5.8) verified live: after recovery/install churn exactly 1 state.db + 1 platform. **TC-22 PASS** — status snapshot (platform v0.16.7): 8 rapid reads stable, no false UNKNOWN; root cause was the status read contending with the reconcile writer, fixed by reading an atomic snapshot (3 prior attempts — orphan-sweep, WAL, rollback-journal — were dead-ends). **NEW TC-23 (FAIL):** the companion/watchdog rebuild path re-introduces the `--mesh` argv leak (F19 hides it only on the `daemon install` path) — `ps` shows `run --r a/b --mesh` after an out-of-band recovery until the next clean install; hygiene/friction, not a bypass |
+| 2026-07-01 | mac-browser-guard (FEATURE 20, utility tier — NOT a mesh deploy) | TC-U1 | — | Utility-tier live check on a real Mac (outside the platform mesh suite): user-mode guard saw all 7 open tabs incl. non-active, matched a blocklisted host, and quit Chrome (`tabs detected: 7` → `MATCH -> would kill … www.rba.com.au` → `Chrome is KILLED`). PASS. |
 | 2026-06-29 | daemon-v0.5.10 + platform v0.16.7 (independent e2e re-verification) | TC-14, TC-16, TC-17, TC-20, TC-21, TC-22 | TC-23 (confirmed, #83); TC-24 (WATCH, noted) | **Independent e2e-verifier re-ran the suite on daemon-v0.5.10.** **TC-14 PASS** — status `desired=none` (platform down, no BLOCK) → `desired=v0.16.3` (baked fallback) → `platform running` (old platform pid dead, fresh state.db); held stable on the fallback ~12 min, no permanent BLOCK. **TC-16/17 PASS** — entire in-band rail removed (0 mesh plists, 0 platforms, gen-roots deleted) → the preserved companion rebuilt the daemon **UNATTENDED** into a fresh single generation (3 plists, 1 state.db, 3/3 roles, platform back). **TC-20 PASS** — `ps … grep 'run --r\| --mesh'` = 0; 3/3 roles. **TC-21 PASS** — 1 state.db, 1 pid, no zombies. **TC-22 PASS** — 10/10 rapid reads identical, 0 changes. **TC-23 stays FAIL — now confirmed with DECISIVE evidence (#83):** direct plist read after the companion rebuild → mesh plists with `--mesh` = **2**, F19 env marker = **0** (rebuild writes pre-F19-format plists); ruled out test-mode **and** stale backup; root cause not yet pinned (both prior theories refuted); hygiene/friction, clean install clears it. **NEW TC-24 (WATCH):** churn-window status-vs-disk skew — `status` printed "3/3 roles running" while on-disk generations = 0 for one sample, self-corrected next sample (latent-failure class; FAIL if reproduced). |
