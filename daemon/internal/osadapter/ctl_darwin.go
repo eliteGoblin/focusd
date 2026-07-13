@@ -17,6 +17,7 @@ import (
 
 	"github.com/eliteGoblin/focusd/daemon/internal/core"
 	"github.com/eliteGoblin/focusd/daemon/internal/mode"
+	"github.com/eliteGoblin/focusd/daemon/internal/platdir"
 	"github.com/eliteGoblin/focusd/daemon/internal/sig"
 )
 
@@ -564,6 +565,14 @@ func SweepOrphanWorkdirs(m mode.Mode, keepWorkdir string) (removed int, err erro
 		dir := filepath.Join(root, e.Name())
 		if filepath.Clean(dir) == keep {
 			continue // the surviving generation — never sweep it
+		}
+		// FEATURE 21 (HF1): a disposable platform-workdir now holds the state.db
+		// (the daemon-home does not). Skip sentinel-marked platform-workdirs here
+		// so this daemon-home orphan sweep never deletes the LIVE platform
+		// storage; stale platform-workdirs are handled by
+		// SweepStalePlatformWorkdirs.
+		if platdir.IsPlatformWorkdir(dir) {
+			continue
 		}
 		// The generation signature: a state.db file. The watchdog copy dir (a
 		// hidden-dot sibling) has none, so it is naturally excluded; a legit

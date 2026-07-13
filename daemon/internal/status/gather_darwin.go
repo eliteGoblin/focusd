@@ -15,9 +15,29 @@ import (
 	"github.com/eliteGoblin/focusd/daemon/internal/core"
 	"github.com/eliteGoblin/focusd/daemon/internal/mode"
 	"github.com/eliteGoblin/focusd/daemon/internal/osadapter"
+	"github.com/eliteGoblin/focusd/daemon/internal/platdir"
 	"github.com/eliteGoblin/focusd/daemon/internal/sig"
 	"github.com/eliteGoblin/focusd/daemon/internal/status/redact"
 )
+
+// platformStore builds a Store rooted at the discovered daemon-home whose
+// platform binaries resolve to the disposable platform-workdir (FEATURE 21 /
+// HF1), read from the pointer file. Status only READS the pointer — it must
+// never create a platform-workdir — so a missing pointer falls back to the
+// daemon-home (legacy single-root). Returns the store and the platform-workdir
+// path (both derived from the already-tokenised daemon-home; neither escapes
+// the caller's redact.Use closure).
+func platformStore(daemonHome string) (*core.Store, string) {
+	platWD := platdir.Read(daemonHome)
+	if platWD == "" {
+		platWD = daemonHome
+	}
+	st := &core.Store{Dir: daemonHome}
+	if platWD != daemonHome {
+		st.PlatformDir = platWD
+	}
+	return st, platWD
+}
 
 // warmupWindow is how young an install (by version.json mtime) may be, with
 // no good version yet, and still read HEALTHY — warming up rather than DOWN.
@@ -165,10 +185,13 @@ func procCount(workdir redact.Token, good string) int {
 	return redact.Use(workdir, func(raw string) int {
 		ctx, cancel := context.WithTimeout(context.Background(), platformStatusTimeout)
 		defer cancel()
-		binPath := (&core.Store{Dir: raw}).BinPath(good)
+		st, platWD := platformStore(raw)
+		binPath := st.BinPath(good)
 		// pgrep -f -x: match the full argument vector exactly. The platform
-		// is started as `<binPath> --workdir <wd>`, so match that exact argv.
-		pattern := binPath + " --workdir " + raw
+		// is started as `<binPath> --workdir <platform-workdir>`, so match that
+		// exact argv (FEATURE 21 / HF1: workdir is the platform-workdir, NOT the
+		// daemon-home).
+		pattern := binPath + " --workdir " + platWD
 		out, err := exec.CommandContext(ctx, "pgrep", "-f", "-x", pattern).Output()
 		if err != nil {
 			// Exit status 1 = no match (count 0); any other error we also
@@ -200,14 +223,16 @@ func gatherPlatform(workdir redact.Token, jsonMode bool) PlatformDetail {
 	// discovered workdir. The binary path and the workdir both stay inside
 	// the Use closure — they never escape into the returned detail.
 	pd := redact.Use(workdir, func(raw string) PlatformDetail {
-		st := &core.Store{Dir: raw}
+		st, platWD := platformStore(raw)
 		good := st.Good()
 		if good == "" {
 			// No good version → no platform process to query.
 			return PlatformDetail{Available: false}
 		}
 		binPath := st.BinPath(good)
-		out, exitCode, ran := runPlatformStatus(binPath, raw, jsonMode)
+		// FEATURE 21 (HF1): query the platform in its own disposable workdir
+		// (state.db lives there), not the daemon-home.
+		out, exitCode, ran := runPlatformStatus(binPath, platWD, jsonMode)
 
 		// The command itself failed to produce a health verdict (exec error,
 		// timeout, or exit >= 2) → unavailable. The daemon still reports its

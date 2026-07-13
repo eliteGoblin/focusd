@@ -57,6 +57,11 @@ func (p *ProcSvc) Start(binPath, v string) error {
 	defer p.mu.Unlock()
 
 	c := exec.Command(binPath, "--workdir", p.Workdir)
+	// FEATURE 21 (HF1) self-heal: the platform-workdir is disposable and may
+	// have just been wiped. Recreate it before launch so the engine has a
+	// writable --workdir (state.db) and platform.log has a parent dir.
+	// Best-effort: a mkdir failure degrades to the existing behavior below.
+	_ = os.MkdirAll(p.Workdir, 0o700)
 	// Capture the engine's stdout+stderr to <workdir>/platform.log so the
 	// engine + plugins are observable. Best-effort: a log-open failure must
 	// NOT block protection from starting, so we degrade to the prior

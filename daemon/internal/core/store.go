@@ -11,11 +11,33 @@ import (
 // daemon process is stateless; durable facts live in these files and
 // are re-read every tick (kubelet : etcd shape).
 //
-//	<workdir>/version.json   {"desired":"v1"}      desired version
-//	<workdir>/good           "v1"                  last-known-good
-//	<workdir>/bad/<v>        (marker file)         crash-looped versions
-//	<workdir>/bin/<v>/platform                     platform binaries
-type Store struct{ Dir string }
+// FEATURE 21 (HF1): the daemon's own state and the platform's disposable
+// binaries now live under SEPARATE roots so a platform-workdir wipe can't take
+// the daemon's identity/state down with it. Dir is the daemon-home (survives a
+// wipe); PlatformDir, when set, is the disposable platform-workdir where the
+// platform binaries live. PlatformDir empty ⇒ BinPath falls back to Dir (the
+// legacy single-root layout, still used by unit/e2e tests and non-mesh runs).
+//
+//	<Dir>/version.json         {"desired":"v1"}   desired version   (daemon-home)
+//	<Dir>/good                 "v1"               last-known-good   (daemon-home)
+//	<Dir>/bad/<v>              (marker file)      crash-looped      (daemon-home)
+//	<Dir>/.roster              (masked labels)    mesh roster       (daemon-home)
+//	<platformRoot>/bin/<v>/platform               platform binaries (platform-workdir)
+type Store struct {
+	Dir string
+	// PlatformDir is the disposable platform-workdir root for platform
+	// binaries (bin/<v>/platform). Empty ⇒ use Dir (legacy single root).
+	PlatformDir string
+}
+
+// platformRoot is where the platform binaries live: the separate
+// platform-workdir when set, else the daemon-home (legacy single-root).
+func (s *Store) platformRoot() string {
+	if s.PlatformDir != "" {
+		return s.PlatformDir
+	}
+	return s.Dir
+}
 
 // VersionFile is the basename of the desired-version config under the workdir.
 // Exported so callers that must locate it (e.g. status install-age) reference
@@ -42,9 +64,10 @@ func (s *Store) badDir() string      { return filepath.Join(s.Dir, "bad") }
 // it via the core roster helpers.
 func (s *Store) RosterPath() string { return filepath.Join(s.Dir, RosterFile) }
 
-// BinPath is where the platform binary for version v lives.
+// BinPath is where the platform binary for version v lives — under the
+// platform-workdir (disposable) when PlatformDir is set, else under Dir.
 func (s *Store) BinPath(v string) string {
-	return filepath.Join(s.Dir, "bin", v, "platform")
+	return filepath.Join(s.platformRoot(), "bin", v, "platform")
 }
 
 // LockPath is the singleton-lock file the winning daemon holds for the
