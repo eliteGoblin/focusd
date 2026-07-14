@@ -515,7 +515,7 @@ func RetireOtherGenerations(m mode.Mode, keepBinaryPath string) (int, error) {
 	root := mode.SupportRoot(m, home)
 	c := launchctlCtl{m: m}
 	return retireGenerations(gens, dead, keepBinaryPath, root,
-		c.bootout, os.Remove, pkillBinary, os.RemoveAll), nil
+		c.bootout, os.Remove, pkillBinary, killGenerationPlatform(root), os.RemoveAll), nil
 }
 
 // stateDBFile is the SQLite state file a platform writes into its generation
@@ -605,11 +605,20 @@ const minBinPathLen = 20 // shorter than any real disguised install path
 // killBin/removeAll are the side-effecting seams. Returns the number of
 // generations retired (live others whose BinaryPath != keepBinaryPath, PLUS
 // every dead/zombie generation).
+//
+// FEATURE 25: killGenPlatform is the platform-kill seam — for every retired
+// generation it is called with that generation's daemon-home (workdir) so the
+// generation's PLATFORM process (a separate binary under a separate
+// platform-workdir, HF1) is torn down too. killBin only reaps the DAEMON binary
+// path; without this, a retired generation's orphaned platform child survived
+// and accreted (the root-cause hole). The keep generation is skipped entirely,
+// so its platform is never touched here.
 func retireGenerations(
 	gens []Generation, dead []DeadGeneration, keepBinaryPath, supportRoot string,
 	bootout func(string) error,
 	removePlist func(string) error,
 	killBin func(string),
+	killGenPlatform func(daemonHome string),
 	removeAll func(string) error,
 ) int {
 	// Defense in depth (mirrors RetireOtherGenerations): with no keep target
@@ -636,6 +645,14 @@ func retireGenerations(
 		// install paths are far longer than minBinPathLen.
 		if len(bin) > minBinPathLen {
 			killBin(bin) // best-effort; no surviving daemon shares this path
+		}
+		// FEATURE 25: also tear down this generation's PLATFORM process (a
+		// separate binary under its own platform-workdir, HF1). killBin above only
+		// matched the DAEMON binary; a retired generation's orphaned platform must
+		// die too or it survives + accretes. Keyed on the daemon-home so the seam
+		// resolves the platform-workdir pointer itself (best-effort, guarded).
+		if killGenPlatform != nil && workdir != "" {
+			killGenPlatform(workdir)
 		}
 		// GUARD: only RemoveAll a workdir that is strictly under the mode's
 		// support root, is not the keep workdir, and is not an ancestor of it.
@@ -878,8 +895,21 @@ func SelfUpdateProd(
 	if newSpec.Workdir != "" {
 		rs = newWorkdirRoster(newSpec.Workdir)
 	}
+	// FEATURE 25 (Element 2): after the swap, reap the OLD platform orphan
+	// (bounded to the invoke mode) + sweep stale platform-workdirs. The new
+	// platform PID is not known here (the new daemon starts it on its next tick),
+	// so keepPID=0 = no PID exemption — the reaper kills same-mode orphans and the
+	// new daemon self-heals its own platform if it was already up. NOT a
+	// both-modes converge (that would break the transient two-generation swap).
+	afterSwap := func() {
+		home, _ := os.UserHomeDir()
+		root := mode.SupportRoot(newSpec.Mode, home)
+		_, _ = reapForeignPlatforms(root, 0, "", listPlatformProcs, killProc)
+		keepPW := platdir.Read(newSpec.Workdir) // survivor platform-workdir pointer
+		_, _ = SweepStalePlatformWorkdirs(root, keepPW)
+	}
 	return SelfUpdate(cur, newSpec, newBin, c, fs, p, binPlacerFS{}, rs,
-		healthyTimeout, probeInterval, keepOld)
+		healthyTimeout, probeInterval, keepOld, afterSwap)
 }
 
 func between(s, a, b string) string {

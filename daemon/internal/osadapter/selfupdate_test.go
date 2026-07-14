@@ -156,6 +156,44 @@ func allHealthy(s Spec) (loaded, pids map[string]bool) {
 
 // --- tests ---------------------------------------------------------------
 
+// TestSelfUpdate_AfterSwapRunsAfterOldBootout (FEATURE 25, Element 2): the
+// post-swap convergence seam runs EXACTLY ONCE and only AFTER the old mesh has
+// been booted out — so reaping the old platform orphan can never race the still-
+// live old daemon.
+func TestSelfUpdate_AfterSwapRunsAfterOldBootout(t *testing.T) {
+	c, fs := newFakeCtl(), newFakeFS()
+	cur := curInstall()
+	for i, l := range cur.Labels {
+		c.loadedSet[l] = true
+		fs.files[cur.PlistPaths[i]] = "OLD"
+	}
+	b := &fakeBinPlacer{bytes: map[string][]byte{cur.BinaryPath: {0x01}}}
+	s := newSpec()
+	loaded, pids := allHealthy(s)
+	p := newFakeProber(loaded, pids)
+
+	calls := 0
+	oldStillLoaded := false
+	afterSwap := func() {
+		calls++
+		for _, l := range cur.Labels {
+			if c.loaded(l) {
+				oldStillLoaded = true
+			}
+		}
+	}
+	if err := SelfUpdate(cur, s, []byte("NEWBIN"), c, fs, p, &fakeBinPlacerWrap{b}, nil,
+		2*time.Second, 5*time.Millisecond, false, afterSwap); err != nil {
+		t.Fatalf("self-update: %v", err)
+	}
+	if calls != 1 {
+		t.Fatalf("afterSwap must run exactly once, got %d", calls)
+	}
+	if oldStillLoaded {
+		t.Fatal("afterSwap must run AFTER every old label is booted out")
+	}
+}
+
 func TestSelfUpdate_HappyPath(t *testing.T) {
 	c, fs := newFakeCtl(), newFakeFS()
 	// Pre-load the OLD mesh so bootout-old has something to remove.
@@ -170,7 +208,7 @@ func TestSelfUpdate_HappyPath(t *testing.T) {
 	loaded, pids := allHealthy(s)
 	p := newFakeProber(loaded, pids)
 
-	if err := SelfUpdate(cur, s, []byte("NEWBIN"), c, fs, p, &fakeBinPlacerWrap{b}, nil, 2*time.Second, 5*time.Millisecond, false); err != nil {
+	if err := SelfUpdate(cur, s, []byte("NEWBIN"), c, fs, p, &fakeBinPlacerWrap{b}, nil, 2*time.Second, 5*time.Millisecond, false, nil); err != nil {
 		t.Fatalf("happy path: %v", err)
 	}
 
@@ -212,7 +250,7 @@ func TestSelfUpdate_KeepOldLeavesOldOnDisk(t *testing.T) {
 	loaded, pids := allHealthy(s)
 	p := newFakeProber(loaded, pids)
 
-	if err := SelfUpdate(cur, s, []byte("NEWBIN"), c, fs, p, &fakeBinPlacerWrap{b}, nil, 2*time.Second, 5*time.Millisecond, true); err != nil {
+	if err := SelfUpdate(cur, s, []byte("NEWBIN"), c, fs, p, &fakeBinPlacerWrap{b}, nil, 2*time.Second, 5*time.Millisecond, true, nil); err != nil {
 		t.Fatalf("keep-old: %v", err)
 	}
 
@@ -235,7 +273,7 @@ func TestSelfUpdate_PreflightNoInstall(t *testing.T) {
 	c, fs := newFakeCtl(), newFakeFS()
 	b := &fakeBinPlacer{}
 	p := newFakeProber(nil, nil)
-	err := SelfUpdate(CurInstall{}, newSpec(), []byte("X"), c, fs, p, &fakeBinPlacerWrap{b}, nil, time.Second, 5*time.Millisecond, false)
+	err := SelfUpdate(CurInstall{}, newSpec(), []byte("X"), c, fs, p, &fakeBinPlacerWrap{b}, nil, time.Second, 5*time.Millisecond, false, nil)
 	if err == nil || !strings.Contains(err.Error(), "incomplete install") {
 		t.Fatalf("expected preflight failure, got %v", err)
 	}
@@ -255,7 +293,7 @@ func TestSelfUpdate_RejectsSamePath(t *testing.T) {
 	s.SelfPath = cur.BinaryPath // same path → must reject (AMFI premise)
 	b := &fakeBinPlacer{}
 	p := newFakeProber(nil, nil)
-	err := SelfUpdate(cur, s, []byte("X"), c, fs, p, &fakeBinPlacerWrap{b}, nil, time.Second, 5*time.Millisecond, false)
+	err := SelfUpdate(cur, s, []byte("X"), c, fs, p, &fakeBinPlacerWrap{b}, nil, time.Second, 5*time.Millisecond, false, nil)
 	if err == nil || !strings.Contains(err.Error(), "path rotation") {
 		t.Fatalf("expected path-rotation rejection, got %v", err)
 	}
@@ -277,7 +315,7 @@ func TestSelfUpdate_BootstrapFailRollsBack(t *testing.T) {
 	// Make role B bootstrap fail.
 	c.bootstrapFailOn = fs.plistPath(s.Label(RoleB))
 
-	err := SelfUpdate(cur, s, []byte("NEWBIN"), c, fs, p, &fakeBinPlacerWrap{b}, nil, time.Second, 5*time.Millisecond, false)
+	err := SelfUpdate(cur, s, []byte("NEWBIN"), c, fs, p, &fakeBinPlacerWrap{b}, nil, time.Second, 5*time.Millisecond, false, nil)
 	if err == nil || !strings.Contains(err.Error(), "bootstrap new") {
 		t.Fatalf("expected bootstrap error, got %v", err)
 	}
@@ -319,7 +357,7 @@ func TestSelfUpdate_PlistWriteFailRollsBack(t *testing.T) {
 	// Make plist write fail for role ensure (last one).
 	fs.writeFailOn = fs.plistPath(s.Label(RoleEnsure))
 
-	err := SelfUpdate(cur, s, []byte("NEWBIN"), c, fs, newFakeProber(nil, nil), &fakeBinPlacerWrap{b}, nil, time.Second, 5*time.Millisecond, false)
+	err := SelfUpdate(cur, s, []byte("NEWBIN"), c, fs, newFakeProber(nil, nil), &fakeBinPlacerWrap{b}, nil, time.Second, 5*time.Millisecond, false, nil)
 	if err == nil || !strings.Contains(err.Error(), "write new plist") {
 		t.Fatalf("expected write-plist error, got %v", err)
 	}
@@ -345,7 +383,7 @@ func TestSelfUpdate_HealthPollTimeoutRollsBack(t *testing.T) {
 	p := newFakeProber(nil, nil)
 	p.neverHealthy = true
 
-	err := SelfUpdate(cur, s, []byte("NEWBIN"), c, fs, p, &fakeBinPlacerWrap{b}, nil, 30*time.Millisecond, 5*time.Millisecond, false)
+	err := SelfUpdate(cur, s, []byte("NEWBIN"), c, fs, p, &fakeBinPlacerWrap{b}, nil, 30*time.Millisecond, 5*time.Millisecond, false, nil)
 	if err == nil || !strings.Contains(err.Error(), "health-poll timeout") {
 		t.Fatalf("expected health-poll timeout, got %v", err)
 	}
@@ -384,7 +422,7 @@ func TestSelfUpdate_OldBootoutFailureNotFatal(t *testing.T) {
 	// = ensure → B → A) — error is swallowed and the run succeeds anyway.
 	c.bootoutErrOn = map[string]error{cur.Labels[0]: errors.New("synthetic")}
 
-	if err := SelfUpdate(cur, s, []byte("NEWBIN"), c, fs, p, &fakeBinPlacerWrap{b}, nil, time.Second, 5*time.Millisecond, false); err != nil {
+	if err := SelfUpdate(cur, s, []byte("NEWBIN"), c, fs, p, &fakeBinPlacerWrap{b}, nil, time.Second, 5*time.Millisecond, false, nil); err != nil {
 		t.Fatalf("old-bootout failure must not be fatal: %v", err)
 	}
 	// New mesh up.
@@ -411,7 +449,7 @@ func TestSelfUpdate_HealthPollNeedsTwoConsecutiveOKs(t *testing.T) {
 	// OKs are required AND that intermittent failures don't latch.)
 	p.gateRounds = 1
 
-	if err := SelfUpdate(cur, s, []byte("NEWBIN"), c, fs, p, &fakeBinPlacerWrap{b}, nil, 1*time.Second, 5*time.Millisecond, false); err != nil {
+	if err := SelfUpdate(cur, s, []byte("NEWBIN"), c, fs, p, &fakeBinPlacerWrap{b}, nil, 1*time.Second, 5*time.Millisecond, false, nil); err != nil {
 		t.Fatalf("expected eventual healthy: %v", err)
 	}
 }
@@ -426,7 +464,7 @@ func TestSelfUpdate_PlaceBinaryFailureFatal(t *testing.T) {
 	b := &fakeBinPlacer{bytes: map[string][]byte{cur.BinaryPath: {0x01}}}
 	s := newSpec()
 	b.failOn = s.SelfPath
-	err := SelfUpdate(cur, s, []byte("X"), c, fs, newFakeProber(nil, nil), &fakeBinPlacerWrap{b}, nil, time.Second, 5*time.Millisecond, false)
+	err := SelfUpdate(cur, s, []byte("X"), c, fs, newFakeProber(nil, nil), &fakeBinPlacerWrap{b}, nil, time.Second, 5*time.Millisecond, false, nil)
 	if err == nil || !strings.Contains(err.Error(), "place new binary") {
 		t.Fatalf("expected place failure, got %v", err)
 	}
@@ -486,7 +524,7 @@ func TestSelfUpdate_MigratesOldSchemeMeshNoDoubleRun(t *testing.T) {
 	p := newFakeProber(loaded, pids)
 
 	if err := SelfUpdate(cur, s, []byte("NEWBIN"), c, fs, p, &fakeBinPlacerWrap{b}, rs,
-		2*time.Second, 5*time.Millisecond, false); err != nil {
+		2*time.Second, 5*time.Millisecond, false, nil); err != nil {
 		t.Fatalf("migration self-update failed: %v", err)
 	}
 

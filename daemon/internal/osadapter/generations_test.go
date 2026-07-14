@@ -305,6 +305,7 @@ func TestRetireGenerationsKeepsKeepRetiresOthers(t *testing.T) {
 		func(l string) error { f.bootedOut = append(f.bootedOut, l); return nil },
 		func(p string) error { f.removedPlist = append(f.removedPlist, p); return nil },
 		func(b string) { f.killed = append(f.killed, b) },
+		func(string) {}, // killGenPlatform: no-op (platform-kill covered by FEATURE 25 tests)
 		func(d string) error { f.removedAll = append(f.removedAll, d); return nil },
 	)
 
@@ -356,6 +357,7 @@ func TestRetireGenerationsNoopOnEmptyKeep(t *testing.T) {
 		func(l string) error { f.bootedOut = append(f.bootedOut, l); return nil },
 		func(p string) error { f.removedPlist = append(f.removedPlist, p); return nil },
 		func(b string) { f.killed = append(f.killed, b) },
+		func(string) {}, // killGenPlatform: no-op (platform-kill covered by FEATURE 25 tests)
 		func(d string) error { f.removedAll = append(f.removedAll, d); return nil },
 	)
 	if n != 0 {
@@ -419,6 +421,7 @@ func TestRetireGenerationsRetiresDeadZombies(t *testing.T) {
 		func(l string) error { f.bootedOut = append(f.bootedOut, l); return nil },
 		func(p string) error { f.removedPlist = append(f.removedPlist, p); return nil },
 		func(b string) { f.killed = append(f.killed, b) },
+		func(string) {}, // killGenPlatform: no-op (platform-kill covered by FEATURE 25 tests)
 		func(d string) error { f.removedAll = append(f.removedAll, d); return nil },
 	)
 
@@ -473,6 +476,7 @@ func TestRetireGenerationsSkipsPkillOnShortPath(t *testing.T) {
 		func(l string) error { f.bootedOut = append(f.bootedOut, l); return nil },
 		func(p string) error { f.removedPlist = append(f.removedPlist, p); return nil },
 		func(b string) { f.killed = append(f.killed, b) },
+		func(string) {}, // killGenPlatform: no-op (platform-kill covered by FEATURE 25 tests)
 		func(d string) error { f.removedAll = append(f.removedAll, d); return nil },
 	)
 

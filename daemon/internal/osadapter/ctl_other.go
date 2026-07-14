@@ -58,6 +58,16 @@ func RetireOtherGenerations(mode.Mode, string) (int, error) { return 0, nil }
 // workdirs to sweep). Returns (0, nil) so the cross-platform install path treats
 // it as "nothing to do" rather than surfacing ErrUnsupported on every install.
 func SweepOrphanWorkdirs(mode.Mode, string) (int, error) { return 0, nil }
+
+// ConvergeSingleInstance is a no-op on non-darwin (no launchd mesh to converge).
+// Returns (0, 0, nil) so the cross-platform install path treats it as "nothing
+// to do" rather than surfacing ErrUnsupported (FEATURE 25).
+func ConvergeSingleInstance(mode.Mode, string, string, int) (int, int, error) { return 0, 0, nil }
+
+// ReapForeignPlatforms is a no-op on non-darwin (no launchd-reparented orphan
+// platforms to reap). Returns (0, nil) so the reconcile loop / self-update wire
+// it uniformly (FEATURE 25).
+func ReapForeignPlatforms(int) (int, error) { return 0, nil }
 func MeshStatus(mode.Mode) (loaded, total int, found bool, err error) {
 	return 0, 0, false, ErrUnsupported
 }
