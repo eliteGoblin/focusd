@@ -52,6 +52,49 @@ func TestPlistWorkerVsEnsurer(t *testing.T) {
 	}
 }
 
+// TestWorkerRespawnContract pins the full launchd RESPAWN contract for the A/B
+// mesh workers — the fast recovery path when a worker is killed. launchd itself
+// does the relaunch (an OS behaviour a unit test cannot exercise; the live e2e
+// tier kills a real mesh member and observes the fresh respawn), so what we CAN
+// pin here is the declaration that GUARANTEES that relaunch and its speed:
+//
+//   - KeepAlive=true       → launchd relaunches the worker whenever it exits
+//     (kill / crash), unconditionally.
+//   - RunAtLoad=true       → it is (re)started at load / login, not lazily.
+//   - ThrottleInterval=1   → the relaunch throttle is 1s, overriding launchd's
+//     10s default, so a killed worker is back in ~1s (FEATURE 10 / ADR-0014).
+//
+// Whole-mesh recovery cadence (documented, verified live): if BOTH workers are
+// down, the ensurer StartInterval (~10s), the out-of-band companion (~30s,
+// companionInterval) and the root cron watchdog (~1min) rebuild the mesh. This
+// unit test owns only the per-worker fast path; the multi-tier cadence is a
+// live-e2e concern.
+func TestWorkerRespawnContract(t *testing.T) {
+	s := Spec{SelfPath: "/d/daemon", Workdir: "/wd", Github: "o/r",
+		Asset: "platform-darwin-arm64", Interval: 2 * time.Second,
+		EnsureInterval: 30 * time.Second}
+
+	for _, r := range []Role{RoleA, RoleB} {
+		p := Plist(s, r)
+		for _, want := range []string{
+			"<key>KeepAlive</key><true/>",
+			"<key>RunAtLoad</key><true/>",
+			"<key>ThrottleInterval</key><integer>1</integer>",
+		} {
+			if !strings.Contains(p, want) {
+				t.Fatalf("worker %v plist missing respawn directive %q:\n%s", r, want, p)
+			}
+		}
+	}
+
+	// The ensurer is the periodic backstop, NOT a KeepAlive worker — it must not
+	// carry the fast-relaunch throttle (it runs on StartInterval instead).
+	e := Plist(s, RoleEnsure)
+	if strings.Contains(e, "ThrottleInterval") {
+		t.Fatalf("ensurer must not carry ThrottleInterval (it is StartInterval-driven):\n%s", e)
+	}
+}
+
 // TestPlistProdArgvEmptyMarkerInEnv asserts FEATURE 19 / ADR-0018: a PROD mesh
 // plist's argv is now EMPTY (the binary alone) — even the role/mesh marker
 // FEATURE 14 had kept (`run --r <role> --mesh` / `ensure`) is gone from the
