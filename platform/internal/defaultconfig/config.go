@@ -72,10 +72,17 @@ func LoadWithOverrides(overridePath string) (*config.Config, []string, error) {
 //     same-ID base entry; new IDs are appended. IDs only in base
 //     stay as-is (so users never lose default jobs silently).
 //
-// To disable a default job, put it in the override with `enabled:
-// false`. To remove it entirely from the active set, override + disable
-// (we deliberately do not provide a "delete" — accidental deletion of
-// the default protections is exactly what this whole design avoids).
+// TIGHTEN-ONLY — the "no inside door handle" rule (this is the LIVE home of
+// that guarantee; the old unwired reconcile.Desired assertion was deleted):
+// the override file is UNSIGNED, so it may CUSTOMISE or STRENGTHEN a baked job
+// but it may NOT DISABLE a baked-enabled protection. A root user who finds the
+// disposable workdir must not be able to switch a default protection off by
+// dropping `enabled: false` into config.yaml. Such an override is refused —
+// the job stays enabled and a warning is emitted. Additive/tightening changes
+// (brand-new jobs, enabling a baked-disabled job, tuning an already-enabled
+// job's config/schedule) still apply. (There is deliberately no "delete" — an
+// accidental or malicious removal of the default protections is exactly what
+// this whole design avoids.)
 //
 // NOTE on map aliasing: `Job.Config` and `Service.Config` are reference
 // maps; base entries that aren't overridden share their map with the
@@ -83,13 +90,23 @@ func LoadWithOverrides(overridePath string) (*config.Config, []string, error) {
 // construction, so this is intentional (zero-copy of unchanged jobs).
 func Merge(base, over *config.Config) (*config.Config, []string) {
 	out := *base
+	var warnings []string
 	if over.Platform.LogLevel != "" {
 		out.Platform.LogLevel = over.Platform.LogLevel
 	}
-	if over.Platform.RunMode != "" {
-		out.Platform.RunMode = over.Platform.RunMode
+	// TIGHTEN-ONLY: run_mode selects which plugin privilege class runs
+	// (system vs user). An unsigned override that forces `user` on a
+	// root-launched platform would make every run_as:system job (dns-block,
+	// kill-steam, network-block) report "unavailable" and go silently
+	// unscheduled — a TOTAL disable of the core enforcement layers via one
+	// field, and exactly the "inside door handle" this design forbids. Refuse
+	// an override of run_mode: it comes from the baked default or OS
+	// auto-detect only (out already carries base.Platform.RunMode).
+	if over.Platform.RunMode != "" && over.Platform.RunMode != base.Platform.RunMode {
+		warnings = append(warnings, fmt.Sprintf(
+			"override run_mode %q refused (tighten-only); run_mode is set by the baked default / OS auto-detect",
+			over.Platform.RunMode))
 	}
-	var warnings []string
 	out.Jobs, warnings = mergeJobs(base.Jobs, over.Jobs, warnings)
 	out.Services, warnings = mergeServices(base.Services, over.Services, warnings)
 	return &out, warnings
@@ -104,6 +121,15 @@ func mergeJobs(base, over []config.Job, warnings []string) ([]config.Job, []stri
 	}
 	for _, j := range over {
 		if i, ok := idx[j.ID]; ok {
+			// TIGHTEN-ONLY ("no inside door handle"): an UNSIGNED workdir
+			// override must never DISABLE a baked-enabled protection. Refuse
+			// the disable — keep the job enabled, warn — then apply the rest
+			// of the override (schedule/config tuning is still allowed).
+			if out[i].Enabled && !j.Enabled {
+				warnings = append(warnings, fmt.Sprintf(
+					"job %q override tried to disable a baked-enabled protection; refused (tighten-only)", j.ID))
+				j.Enabled = true
+			}
 			// Architect-review #4: a same-ID override pointing at a
 			// different plugin is almost always a user typo (e.g.
 			// `plugin: kil-steam`) that would silently no-op the
@@ -132,6 +158,14 @@ func mergeServices(base, over []config.Service, warnings []string) ([]config.Ser
 	}
 	for _, s := range over {
 		if i, ok := idx[s.ID]; ok {
+			// TIGHTEN-ONLY (mirrors mergeJobs): an unsigned override must not
+			// disable a baked-enabled service. Refuse the disable, warn, then
+			// apply the rest of the override.
+			if out[i].Enabled && !s.Enabled {
+				warnings = append(warnings, fmt.Sprintf(
+					"service %q override tried to disable a baked-enabled protection; refused (tighten-only)", s.ID))
+				s.Enabled = true
+			}
 			if s.Plugin != out[i].Plugin {
 				warnings = append(warnings, fmt.Sprintf(
 					"service %q overrides default plugin %q with %q (possible typo?)",

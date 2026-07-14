@@ -1,11 +1,12 @@
-// Behavior 4 (Bug 1) regression: the platform's --workdir flow must, end
-// to end, take the embedded default config and overlay the on-disk
-// override file at <workdir>/config.yaml — disabled defaults stay listed
-// (just enabled=false), new IDs are appended, and untouched defaults
-// pass through. This proves the wiring `parseCommon` →
-// defaultconfig.LoadWithOverrides → app.Bootstrap actually carries the
-// merged config into the running App, not just that the loader works in
-// isolation (which the unit tests already cover).
+// Behavior 4 (Bug 1) regression + FIX 2 (tighten-only): the platform's
+// --workdir flow must, end to end, take the embedded default config and
+// overlay the on-disk override at <workdir>/config.yaml — new IDs are
+// appended, untouched defaults pass through, and (tighten-only, "no inside
+// door handle") an override that tries to DISABLE a baked-enabled default is
+// REFUSED: the protection stays enabled all the way into the running App.
+// This proves the wiring `parseCommon` → defaultconfig.LoadWithOverrides →
+// app.Bootstrap carries the merged config into the running App, not just that
+// the loader works in isolation (which the unit tests already cover).
 package integration
 
 import (
@@ -31,8 +32,11 @@ func TestPlatformBootstrapMergesWorkdirOverride(t *testing.T) {
 		t.Fatalf("embedded default must have >=2 jobs to exercise both "+
 			"override-disable and untouched-passthrough; got %d", len(defaultCfg.Jobs))
 	}
-	toDisable := defaultCfg.Jobs[0]  // we'll override + disable this one
+	target := defaultCfg.Jobs[0]     // baked-enabled; we'll try (and fail) to disable it
 	toPreserve := defaultCfg.Jobs[1] // we'll leave this one untouched
+	if !target.Enabled {
+		t.Fatalf("test precondition: %q must be baked enabled to exercise the refusal", target.ID)
+	}
 
 	// Simulate the daemon's --workdir layout: a tempdir holding the
 	// user's override config.yaml. parseCommon's path resolution is
@@ -43,8 +47,8 @@ func TestPlatformBootstrapMergesWorkdirOverride(t *testing.T) {
 		"platform:\n" +
 		"  log_level: debug\n" +
 		"jobs:\n" +
-		"  - id: " + toDisable.ID + "\n" +
-		"    plugin: " + toDisable.Plugin + "\n" +
+		"  - id: " + target.ID + "\n" +
+		"    plugin: " + target.Plugin + "\n" +
 		"    enabled: false\n" +
 		"    schedule: \"@every 1h\"\n" +
 		"    timeout: 1s\n" +
@@ -82,7 +86,7 @@ func TestPlatformBootstrapMergesWorkdirOverride(t *testing.T) {
 	defer a.Close()
 
 	// 1. Job count = defaults + 1 (the new my-custom-job is appended;
-	//    overridden-disabled IDs stay as replace-by-ID, not delete).
+	//    same-ID overrides stay as replace-by-ID, not delete).
 	gotJobs := a.Config.Jobs
 	wantCount := len(defaultCfg.Jobs) + 1
 	if len(gotJobs) != wantCount {
@@ -90,13 +94,18 @@ func TestPlatformBootstrapMergesWorkdirOverride(t *testing.T) {
 			len(gotJobs), wantCount, len(defaultCfg.Jobs))
 	}
 
-	// 2. The disabled default is still present, with enabled=false.
-	disabled := findJob(gotJobs, toDisable.ID)
-	if disabled == nil {
-		t.Fatalf("override-disabled default %q vanished from merged config", toDisable.ID)
+	// 2. TIGHTEN-ONLY: the override tried to disable a baked-enabled default;
+	//    end-to-end the App must still see it ENABLED (the disable is refused),
+	//    while its non-disable field (schedule) still merged.
+	targeted := findJob(gotJobs, target.ID)
+	if targeted == nil {
+		t.Fatalf("targeted default %q vanished from merged config", target.ID)
 	}
-	if disabled.Enabled {
-		t.Fatalf("default %q must be enabled=false after override", toDisable.ID)
+	if !targeted.Enabled {
+		t.Fatalf("tighten-only: override must NOT disable baked-enabled %q end-to-end", target.ID)
+	}
+	if targeted.Schedule != "@every 1h" {
+		t.Fatalf("non-disable override fields must still merge, schedule=%q", targeted.Schedule)
 	}
 
 	// 3. The untouched default passes through with its original enabled
