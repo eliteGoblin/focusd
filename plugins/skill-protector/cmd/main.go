@@ -13,9 +13,11 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
 	"flag"
 	"fmt"
+	"io"
 	"os"
 
 	"github.com/eliteGoblin/focusd/plugins/skill-protector/internal/reconciler"
@@ -49,7 +51,15 @@ func run(args []string) int {
 	if err := fs.Parse(args[1:]); err != nil {
 		return 2
 	}
-	_ = cfgPath // config currently unused; read for protocol compliance only.
+	// Config is currently unused (no tuning knobs), but we still drain it
+	// per the plugin contract so the parent's pipe write completes — the
+	// disguised (stdin) path never leaves the config bytes in argv. A read
+	// error is surfaced the same way sibling plugins surface config errors.
+	if _, err := readJobConfig(*cfgPath); err != nil {
+		fmt.Fprintln(os.Stderr, "config:", err)
+		emit(result{Status: "error", Message: err.Error()})
+		return 2
+	}
 
 	home := *homeOverride
 	if home == "" {
@@ -95,6 +105,25 @@ func run(args []string) int {
 		Details: details,
 	})
 	return 0
+}
+
+// readJobConfig returns the job-config JSON bytes: from --config <path>
+// (compat) when set, else drained from stdin (the disguised path — the
+// config path never appears in this process's argv). Empty/absent => nil.
+// skill-protector has no tuning knobs, so callers discard the bytes; the
+// drain still matters so the parent's pipe write completes. HF4 (FEATURE 24).
+func readJobConfig(cfgPath string) ([]byte, error) {
+	if cfgPath != "" {
+		return os.ReadFile(cfgPath)
+	}
+	b, err := io.ReadAll(os.Stdin)
+	if err != nil {
+		return nil, fmt.Errorf("read stdin config: %w", err)
+	}
+	if len(bytes.TrimSpace(b)) == 0 {
+		return nil, nil // no config → defaults
+	}
+	return b, nil
 }
 
 // emit writes the result JSON to stdout for the runner to parse. A

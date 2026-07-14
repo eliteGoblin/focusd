@@ -387,6 +387,15 @@ func build(o opts) (*core.Executor, *slog.Logger) {
 	if platWD != o.workdir {
 		st.PlatformDir = platWD
 	}
+	// HF4 (FEATURE 24): outside test mode, seed the per-install disguise salt so
+	// the platform binary lands under a disguised basename and the child runs
+	// under a generic argv[0] (no version/'platform'/workdir in `ps`). Test mode
+	// deliberately stays on the legacy, deterministic layout so e2e is
+	// self-contained. Best-effort: a write failure degrades to the legacy layout
+	// (empty salt ⇒ PlatformArgv0/BinPath fall back) rather than blocking.
+	if o.modeVal() != mode.Test {
+		_, _ = st.EnsureInstallSalt()
+	}
 	var f core.Fetcher
 	if o.releaseDir != "" {
 		f = &fetch.Local{Dir: o.releaseDir}
@@ -394,6 +403,9 @@ func build(o opts) (*core.Executor, *slog.Logger) {
 		f = &fetch.GitHub{Repo: o.github, Asset: o.asset}
 	}
 	p := platformsvc.New(platWD)
+	// HF4: set the disguised argv[0] for the platform child (empty in test mode /
+	// no-salt ⇒ ProcSvc keeps the legacy visible argv).
+	p.Argv0 = st.PlatformArgv0()
 	if o.healthy > 0 {
 		p.Healthy = o.healthy
 	}

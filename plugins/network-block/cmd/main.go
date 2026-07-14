@@ -20,10 +20,12 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"flag"
 	"fmt"
+	"io"
 	"os"
 	"time"
 
@@ -76,7 +78,13 @@ func run(args []string) int {
 		return 2
 	}
 
-	cfg, err := loadConfig(*cfgPath)
+	raw, err := readJobConfig(*cfgPath)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "config:", err)
+		emit(result{Status: "error", Message: err.Error()})
+		return 2
+	}
+	cfg, err := loadConfig(raw)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "config:", err)
 		emit(result{Status: "error", Message: err.Error()})
@@ -143,19 +151,35 @@ func runWithDeps(cfg pluginConfig, resolver reconciler.Resolver, pf reconciler.P
 	return 0
 }
 
-// loadConfig parses the job-config JSON file and validates it. Returns
-// an error suitable for exit-code-2 (plugin error) reporting.
-func loadConfig(path string) (pluginConfig, error) {
-	if path == "" {
-		return pluginConfig{}, fmt.Errorf("--config is required")
+// readJobConfig returns the job-config JSON bytes: from --config <path>
+// (compat) when set, else drained from stdin (the disguised path — the
+// config path never appears in this process's argv). Empty/absent => nil
+// (grounded defaults). HF4 (FEATURE 24).
+func readJobConfig(cfgPath string) ([]byte, error) {
+	if cfgPath != "" {
+		return os.ReadFile(cfgPath)
 	}
-	raw, err := os.ReadFile(path)
+	b, err := io.ReadAll(os.Stdin)
 	if err != nil {
-		return pluginConfig{}, fmt.Errorf("read %s: %w", path, err)
+		return nil, fmt.Errorf("read stdin config: %w", err)
+	}
+	if len(bytes.TrimSpace(b)) == 0 {
+		return nil, nil // no config → defaults
+	}
+	return b, nil
+}
+
+// loadConfig parses the job-config JSON bytes and validates it. Returns
+// an error suitable for exit-code-2 (plugin error) reporting. This plugin
+// requires config (anchor/table/domains/resolver), so empty/nil raw — no
+// --config and no stdin — is itself an error.
+func loadConfig(raw []byte) (pluginConfig, error) {
+	if len(raw) == 0 {
+		return pluginConfig{}, fmt.Errorf("config is required (via --config or stdin)")
 	}
 	var in jobInput
 	if err := json.Unmarshal(raw, &in); err != nil {
-		return pluginConfig{}, fmt.Errorf("parse %s: %w", path, err)
+		return pluginConfig{}, fmt.Errorf("parse config JSON: %w", err)
 	}
 
 	cfg := pluginConfig{}

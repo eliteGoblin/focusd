@@ -15,9 +15,16 @@ import (
 
 // ProcSvc manages a single platform child process.
 type ProcSvc struct {
-	Workdir   string        // passed to the platform as --workdir
+	Workdir   string        // platform-workdir (passed to the child via env, HF4)
 	Unhealthy time.Duration // exit sooner than this ⇒ "crashed quickly"
 	Healthy   time.Duration // alive longer than this ⇒ "healthy for"
+	// Argv0 is the HF4 (FEATURE 24) disguised argv[0] for the platform child.
+	// When set, the child is launched with a GENERIC token as argv[0] (no path,
+	// no 'platform', no version) and its --workdir moves OFF the command line
+	// into WorkdirEnvKey — so `ps aux | grep` over the live process finds nothing
+	// tied to the install. Empty ⇒ the legacy argv (binPath + --workdir <wd>),
+	// keeping dev runs and the existing platformsvc tests unchanged.
+	Argv0 string
 
 	mu        sync.Mutex
 	cmd       *exec.Cmd
@@ -28,13 +35,24 @@ type ProcSvc struct {
 	exitCh    chan struct{} // closed by the SINGLE waiter when cmd exits
 }
 
+// WorkdirEnvKey carries the platform-workdir to the child in its environment
+// instead of on argv (HF4). MUST match platform osadapter.WorkdirEnvKey (the
+// platform reads it in parseCommon). Duplicated literal across the module
+// boundary — like MeshEnvKey — because daemon and platform are separate modules.
+// The key is deliberately opaque and names neither focusd nor 'workdir'.
+const WorkdirEnvKey = "APP_STATE_DIR"
+
 // PlatformLogName is the engine log file under the workdir. The engine's
 // stdout+stderr (its slog stream, plugin job output, errors/warnings) are
 // captured here so the engine is OBSERVABLE. Previously the child's stdio
 // was left nil → connected to /dev/null, which silently discarded every
 // engine/plugin log line and hid real failures (the silent-failure trap the
 // observability principle forbids).
-const PlatformLogName = "platform.log"
+//
+// HF4 (FEATURE 24): the basename is neutral ("svc.log", not "platform.log") so a
+// filesystem grep for 'platform' does not hit the log file. MUST match the
+// platform's own logging.go basename (both write this file in the workdir).
+const PlatformLogName = "svc.log"
 
 // New builds a ProcSvc with sane default windows.
 func New(workdir string) *ProcSvc {
@@ -51,12 +69,36 @@ func (p *ProcSvc) RunningVersion() (string, error) {
 	return p.version, nil
 }
 
+// childArgvEnv renders the platform child's DISPLAY argv and environment (HF4).
+// Pure and side-effect-free so the greppability guard can assert directly.
+//
+//   - disguised (Argv0 set): argv = [<token>, "run"] — no path, no 'platform',
+//     no version; the workdir moves into WorkdirEnvKey in the returned env so
+//     `ps` never shows it. Env is os.Environ()+the workdir entry.
+//   - legacy (Argv0 empty): argv = [binPath, "--workdir", <workdir>] and env nil
+//     (inherit) — byte-for-byte the pre-HF4 behavior (dev runs, tests, e2e).
+func (p *ProcSvc) childArgvEnv(binPath string) (args, env []string) {
+	if p.Argv0 != "" {
+		return []string{p.Argv0, "run"}, append(os.Environ(), WorkdirEnvKey+"="+p.Workdir)
+	}
+	return []string{binPath, "--workdir", p.Workdir}, nil
+}
+
 // Start launches binPath as the platform for version v.
 func (p *ProcSvc) Start(binPath, v string) error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
-	c := exec.Command(binPath, "--workdir", p.Workdir)
+	// HF4 (FEATURE 24): render the child's DISPLAY argv + env (pure helper, so the
+	// greppability guard can assert no leak without launching). exec.Command sets
+	// cmd.Path = binPath (the real, root-visible executable); we then override
+	// cmd.Args so the LIVE process shows only the disguised argv.
+	args, env := p.childArgvEnv(binPath)
+	c := exec.Command(binPath)
+	c.Args = args
+	if env != nil {
+		c.Env = env
+	}
 	// FEATURE 21 (HF1) self-heal: the platform-workdir is disposable and may
 	// have just been wiped. Recreate it before launch so the engine has a
 	// writable --workdir (state.db) and platform.log has a parent dir.

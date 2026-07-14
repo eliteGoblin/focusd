@@ -1,10 +1,14 @@
 package core
 
 import (
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
+
+	"github.com/eliteGoblin/focusd/daemon/internal/relocate"
 )
 
 // Store is the daemon's tiny on-disk state under the workdir. The
@@ -51,6 +55,15 @@ const VersionFile = "version.json"
 // start. In-memory roster is authoritative; this file self-heals from it.
 const RosterFile = ".roster"
 
+// InstallSaltFile is the basename (in the daemon-home) of the per-install salt
+// that seeds every HF4 (FEATURE 24) disguise derivation: the platform binary's
+// on-disk basename (BinPath) and the platform child's argv[0] (PlatformArgv0).
+// It IS the "version→path index the daemon reads": salt + version → path,
+// deterministically, so status/procCount reconstructs the exact running argv
+// without a second lookup table. Neutral, dot-hidden basename; lives 0700 in the
+// disguised daemon-home. Absent ⇒ the legacy non-disguised layout (dev/tests).
+const InstallSaltFile = ".idx"
+
 type versionConfig struct {
 	Desired string `json:"desired"`
 }
@@ -64,10 +77,65 @@ func (s *Store) badDir() string      { return filepath.Join(s.Dir, "bad") }
 // it via the core roster helpers.
 func (s *Store) RosterPath() string { return filepath.Join(s.Dir, RosterFile) }
 
+// saltPath is the absolute path of the per-install disguise salt (daemon-home).
+func (s *Store) saltPath() string { return filepath.Join(s.Dir, InstallSaltFile) }
+
+// InstallSalt returns the per-install disguise salt, or "" if none has been
+// written yet (dev runs and the whole existing unit/e2e test corpus, which never
+// seed it — so they keep the legacy bin/<v>/platform layout unchanged).
+func (s *Store) InstallSalt() string {
+	b, err := os.ReadFile(s.saltPath())
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(b))
+}
+
+// EnsureInstallSalt returns the per-install salt, generating + persisting a fresh
+// 16-byte random one on first call (atomic write, 0600). Idempotent: once written
+// it is stable for the install's lifetime, so every daemon role and the status
+// subcommand derive the SAME disguised platform paths/argv. Called by the
+// reconcile-loop composition root; a write failure degrades to "" (legacy layout)
+// rather than blocking protection.
+func (s *Store) EnsureInstallSalt() (string, error) {
+	if v := s.InstallSalt(); v != "" {
+		return v, nil
+	}
+	buf := make([]byte, 16)
+	if _, err := rand.Read(buf); err != nil {
+		return "", err
+	}
+	salt := hex.EncodeToString(buf)
+	if err := atomicWrite(s.saltPath(), []byte(salt)); err != nil {
+		return "", err
+	}
+	// Tighten to 0600: the salt is the seed an attacker would need to map a
+	// disguised platform path back to a version. atomicWrite lands 0644.
+	_ = os.Chmod(s.saltPath(), 0o600)
+	return salt, nil
+}
+
 // BinPath is where the platform binary for version v lives — under the
 // platform-workdir (disposable) when PlatformDir is set, else under Dir.
+//
+// HF4 (FEATURE 24): with a per-install salt present the binary lives at
+// bin/<disguised-basename> (relocate.PlatformBinBase) — no 'platform' literal, no
+// version in the path. Without a salt (dev/tests) it falls back to the legacy
+// bin/<v>/platform. Both are pure functions of (salt, v), so every caller —
+// executor, fetch, status, watchdog — agrees on the path with no shared index.
 func (s *Store) BinPath(v string) string {
+	if base := relocate.PlatformBinBase(s.InstallSalt(), v); base != "" {
+		return filepath.Join(s.platformRoot(), "bin", base)
+	}
 	return filepath.Join(s.platformRoot(), "bin", v, "platform")
+}
+
+// PlatformArgv0 is the deterministic disguised argv[0] the daemon sets on the
+// platform child (HF4). Empty when no salt is present (legacy: the child keeps
+// its binary path as argv[0]). Derived from the salt so status/procCount can
+// rebuild the exact argv to match the running process.
+func (s *Store) PlatformArgv0() string {
+	return relocate.PlatformArgv0(s.InstallSalt())
 }
 
 // LockPath is the singleton-lock file the winning daemon holds for the

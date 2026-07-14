@@ -88,6 +88,13 @@ func parseCommon(name string, args []string) app.Options {
 	mode := fs.String("mode", "", "force run mode: user|system")
 	wd := fs.String("workdir", "", "daemon-managed workdir; derives config/state-db (default: empty = use OS layout)")
 	_ = fs.Parse(args)
+	// HF4 (FEATURE 24): the daemon now hands the workdir in the environment
+	// (WorkdirEnvKey) instead of on argv, so a live `ps` over the platform child
+	// shows no workdir path. Fall back to it when no explicit --workdir was given.
+	// An explicit flag still wins (direct CLI use, tests).
+	if *wd == "" {
+		*wd = os.Getenv(osadapter.WorkdirEnvKey)
+	}
 	opts := app.Options{
 		ConfigPath:  *cfg,
 		StateDBPath: *db,
