@@ -14,8 +14,8 @@ const sampleConfig = `
 platform:
   log_level: debug
 jobs:
-  - id: kill_steam
-    plugin: kill-steam
+  - id: demo_job
+    plugin: demo-job
     enabled: true
     schedule: "*/5 * * * *"
     timeout: "10s"
@@ -138,14 +138,14 @@ func TestDiscoverPluginsSyncsInventory(t *testing.T) {
 	defer a.Close()
 
 	pdir, _ := fa.DefaultPluginDir(osadapter.ModeUser)
-	ks := filepath.Join(pdir, "kill-steam")
+	ks := filepath.Join(pdir, "demo-job")
 	os.MkdirAll(ks, 0o755)
-	manifest := `{"id":"kill-steam","name":"Kill Steam","version":"1.0.0",
-"type":"job","protocol_version":"1","entrypoint":"./kill-steam",
+	manifest := `{"id":"demo-job","name":"Demo Job","version":"1.0.0",
+"type":"job","protocol_version":"1","entrypoint":"./demo-job",
 "supported_os":["` + fa.OS + `"],"supported_arch":["` + fa.Arch + `"],
 "required_privilege":"user","run_as":"current_user"}`
 	os.WriteFile(filepath.Join(ks, "plugin.json"), []byte(manifest), 0o644)
-	os.WriteFile(filepath.Join(ks, "kill-steam"), []byte("#!/bin/sh\n"), 0o755)
+	os.WriteFile(filepath.Join(ks, "demo-job"), []byte("#!/bin/sh\n"), 0o755)
 
 	found, err := a.DiscoverPlugins()
 	if err != nil {
@@ -155,7 +155,7 @@ func TestDiscoverPluginsSyncsInventory(t *testing.T) {
 		t.Fatalf("expected 1 OK plugin, got %+v", found)
 	}
 	rows, _ := a.State.Plugins.List()
-	if len(rows) != 1 || rows[0].ID != "kill-steam" {
+	if len(rows) != 1 || rows[0].ID != "demo-job" {
 		t.Errorf("inventory not synced: %+v", rows)
 	}
 }
@@ -189,7 +189,7 @@ func TestPluginDirOverrideUsed(t *testing.T) {
 
 func TestBuildSchedulerRegistersJobsForDiscoveredPlugins(t *testing.T) {
 	fa := testutil.NewFakeAdapter(t.TempDir())
-	writeUserConfig(t, fa, sampleConfig) // job kill-steam + service browser_monitor
+	writeUserConfig(t, fa, sampleConfig) // job demo-job + service browser_monitor
 	a, err := Bootstrap(Options{Adapter: fa})
 	if err != nil {
 		t.Fatalf("Bootstrap: %v", err)
@@ -197,13 +197,13 @@ func TestBuildSchedulerRegistersJobsForDiscoveredPlugins(t *testing.T) {
 	defer a.Close()
 
 	pdir, _ := fa.DefaultPluginDir(osadapter.ModeUser)
-	ks := filepath.Join(pdir, "kill-steam")
+	ks := filepath.Join(pdir, "demo-job")
 	os.MkdirAll(ks, 0o755)
-	m := `{"id":"kill-steam","name":"Kill Steam","version":"1.0.0","type":"job",
-"protocol_version":"1","entrypoint":"./kill-steam","supported_os":["` + fa.OS +
+	m := `{"id":"demo-job","name":"Demo Job","version":"1.0.0","type":"job",
+"protocol_version":"1","entrypoint":"./demo-job","supported_os":["` + fa.OS +
 		`"],"supported_arch":["` + fa.Arch + `"],"required_privilege":"user","run_as":"current_user"}`
 	os.WriteFile(filepath.Join(ks, "plugin.json"), []byte(m), 0o644)
-	os.WriteFile(filepath.Join(ks, "kill-steam"), []byte("#!/bin/sh\necho '{\"status\":\"ok\"}'\n"), 0o755)
+	os.WriteFile(filepath.Join(ks, "demo-job"), []byte("#!/bin/sh\necho '{\"status\":\"ok\"}'\n"), 0o755)
 
 	s, n, err := a.BuildScheduler()
 	if err != nil {

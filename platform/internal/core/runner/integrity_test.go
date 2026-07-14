@@ -254,6 +254,94 @@ func containsDot(s string) bool {
 	return false
 }
 
+// TestRunTOCTOUGuardRefusesSwapBetweenVerifyAndExec pins FEATURE 23, Fix 2:
+// the point-of-use verify passes, but the binary is swapped in the tiny window
+// before exec. The pre-exec re-hash guard MUST detect the change and refuse to
+// run the substitute — recording an error run + a check-failed event, never
+// executing the swapped-in binary.
+func TestRunTOCTOUGuardRefusesSwapBetweenVerifyAndExec(t *testing.T) {
+	r := newRunner(t)
+	// Verifier reports clean (no restore, no error): the on-disk binary matched
+	// genuine at verify time. The swap happens AFTER, via the afterPin seam.
+	r.WithVerifier(&fakeVerifier{})
+
+	// A plugin that, if the SUBSTITUTE ran, would print a tell-tale marker and
+	// exit 0. The guard must stop it before it ever execs.
+	p := testutil.ScriptPlugin(t, "guarded", `echo '{"status":"ok"}'
+exit 0`)
+
+	swapped := false
+	r.afterPin = func(binPath string) {
+		// Overwrite the just-verified binary with a different program,
+		// simulating a rename-swap landing in the verify→exec window.
+		if err := os.WriteFile(binPath, []byte("#!/bin/sh\necho SUBSTITUTE-RAN\nexit 0\n"), 0o755); err != nil {
+			t.Fatalf("simulate swap: %v", err)
+		}
+		swapped = true
+	}
+
+	out, err := r.Run(context.Background(), Job{ID: "j1", Retry: 2}, p, "scheduler")
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if !swapped {
+		t.Fatal("afterPin seam never fired; guard was not exercised")
+	}
+	if out.Status != state.RunStatusError {
+		t.Fatalf("a post-verify swap must be refused (error status), got %+v", out)
+	}
+	// The substitute must NOT have executed: no run row carries its stdout.
+	hist, herr := r.DB.Runs.History("j1", 10)
+	if herr != nil {
+		t.Fatalf("History: %v", herr)
+	}
+	if len(hist) != 1 {
+		t.Fatalf("expected exactly 1 recorded run (terminal, no in-tick retry), got %d", len(hist))
+	}
+	if hist[0].StdoutJSON != "" || strings.Contains(hist[0].StdoutJSON, "SUBSTITUTE") {
+		t.Errorf("substitute binary must not have run; stdout=%q", hist[0].StdoutJSON)
+	}
+	// A check-failed event must be recorded so the refusal is auditable.
+	ev, _ := r.DB.Events.Recent(10)
+	found := false
+	for _, e := range ev {
+		if e.EventType == state.EventIntegrityCheckFailed {
+			found = true
+		}
+	}
+	if !found {
+		t.Error("expected plugin_integrity_check_failed event after a detected swap")
+	}
+}
+
+// TestHashFileDetectsContentChange is a focused unit test for the pin
+// primitive the TOCTOU guard relies on: a re-hash of the same path after a
+// content change must differ (FEATURE 23, Fix 2).
+func TestHashFileDetectsContentChange(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "bin")
+	if err := os.WriteFile(p, []byte("genuine"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	a, err := hashFile(p)
+	if err != nil {
+		t.Fatalf("hashFile: %v", err)
+	}
+	if err := os.WriteFile(p, []byte("substitute"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	b, err := hashFile(p)
+	if err != nil {
+		t.Fatalf("hashFile: %v", err)
+	}
+	if a == b {
+		t.Fatal("hashFile must differ after a content change")
+	}
+	// A missing file is an error (the guard treats it as a refusal).
+	if _, err := hashFile(filepath.Join(t.TempDir(), "absent")); err == nil {
+		t.Error("hashFile of a missing file should error")
+	}
+}
+
 // TestRunNoVerifierRunsAsBefore: with no verifier wired, behaviour is
 // unchanged — the plugin runs exactly as it did pre-FEATURE-15.
 func TestRunNoVerifierRunsAsBefore(t *testing.T) {

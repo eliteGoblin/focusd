@@ -86,6 +86,74 @@ func TestVerifyOrRestore_SwapAndRestore(t *testing.T) {
 	}
 }
 
+// TestVerifyOrRestore_RestoresSwappedManifest is FEATURE 23, Fix 1: a swapped
+// plugin.json (the file that drives entrypoint/run_as resolution) is detected
+// and restored to the genuine embedded copy — so discovery's verify-before-
+// parse reads authentic bytes, not an attacker's redirected manifest.
+func TestVerifyOrRestore_RestoresSwappedManifest(t *testing.T) {
+	if !HasAny() {
+		t.Skip("no bundled plugins in this build; skipping")
+	}
+	root := t.TempDir()
+	if _, err := ExtractTo(root); err != nil {
+		t.Fatalf("initial extract: %v", err)
+	}
+	subdir, _ := firstPluginSubdir(t, root)
+	if subdir == "" {
+		t.Skip("no extensionless plugin binary in this build; skipping")
+	}
+	manifestPath := filepath.Join(root, subdir, "plugin.json")
+	genuine, err := os.ReadFile(manifestPath)
+	if err != nil {
+		t.Fatalf("read genuine manifest: %v", err)
+	}
+	// Tamper the manifest: a redirected entrypoint is the classic attack.
+	tampered := `{"id":"x","name":"x","version":"1.0.0","type":"job",` +
+		`"protocol_version":"1","entrypoint":"../evil","run_as":"system"}`
+	if err := os.WriteFile(manifestPath, []byte(tampered), 0o644); err != nil {
+		t.Fatalf("swap manifest: %v", err)
+	}
+	restored, _, _, err := VerifyOrRestore(root, subdir)
+	if err != nil {
+		t.Fatalf("VerifyOrRestore: %v", err)
+	}
+	if !restored {
+		t.Fatal("a swapped plugin.json must be restored")
+	}
+	got, err := os.ReadFile(manifestPath)
+	if err != nil {
+		t.Fatalf("read after restore: %v", err)
+	}
+	if string(got) != string(genuine) {
+		t.Fatal("plugin.json not restored to genuine content")
+	}
+}
+
+// TestIsBundled is FEATURE 23, Fix 3: the system-mode allowlist primitive. A
+// plugin subdir present in the embedded bundle is bundled; an unknown name or
+// any invalid/path-like value is not (fail closed).
+func TestIsBundled(t *testing.T) {
+	if !HasAny() {
+		t.Skip("no bundled plugins in this build; skipping")
+	}
+	root := t.TempDir()
+	if _, err := ExtractTo(root); err != nil {
+		t.Fatalf("extract: %v", err)
+	}
+	subdir, _ := firstPluginSubdir(t, root)
+	if subdir == "" {
+		t.Skip("no bundled plugin subdir in this build; skipping")
+	}
+	if !IsBundled(subdir) {
+		t.Errorf("bundled subdir %q reported not bundled", subdir)
+	}
+	for _, bad := range []string{"definitely-not-a-plugin", "", ".", "..", "a/b", "../x", "./x"} {
+		if IsBundled(bad) {
+			t.Errorf("non-bundled/invalid subdir %q must report false", bad)
+		}
+	}
+}
+
 // TestVerifyOrRestore_CleanFastPath is AC-5: on an untampered install no
 // file is rewritten and restored is false.
 func TestVerifyOrRestore_CleanFastPath(t *testing.T) {
