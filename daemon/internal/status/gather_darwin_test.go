@@ -199,6 +199,98 @@ func TestReadVersions_AbsentWorkdir(t *testing.T) {
 	}
 }
 
+// TestCountPlatformProcs drives the pgrep-miss / pidfile-floor logic over its
+// full matrix with injected seams (no live processes): a pgrep MISS floored by a
+// live supervised child, an orphan anomaly (pgrep>1) that the pidfile must never
+// mask, and the two genuine-DOWN cases. The last two rows share the seam inputs
+// (0, false) because the no-pidfile vs present-but-orphan distinction lives in
+// platformPidUp (exercised directly by TestPlatformPidUp) — at the floor level
+// both are "no positive liveness signal".
+func TestCountPlatformProcs(t *testing.T) {
+	cases := []struct {
+		name  string
+		pgrep int
+		pidUp bool
+		want  int
+	}{
+		{"pgrep miss (0) + pidfile up → floored to 1", 0, true, 1},
+		{"pgrep 2 + pidfile up → 2 (orphan anomaly never masked by the floor)", 2, true, 2},
+		{"pgrep 0 + no pidfile → 0 (genuinely down)", 0, false, 0},
+		{"pgrep 0 + pidfile present-but-orphan → 0 (no positive signal)", 0, false, 0},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			pgrep := func(string) int { return c.pgrep }
+			pidUp := func(string) bool { return c.pidUp }
+			if got := countPlatformProcs("pat", "/home", pgrep, pidUp); got != c.want {
+				t.Fatalf("countPlatformProcs(pgrep=%d,pidUp=%v) = %d, want %d",
+					c.pgrep, c.pidUp, got, c.want)
+			}
+		})
+	}
+}
+
+// TestCountPlatformProcs_PidUpLazyWhenPgrepPositive pins the short-circuit the
+// seam extraction preserves: when pgrep already sees a live process (n>=1) the
+// pidfile is NOT consulted (no extra file read), matching the original inline
+// `n < 1 && platformPidUp(...)` guard.
+func TestCountPlatformProcs_PidUpLazyWhenPgrepPositive(t *testing.T) {
+	pidUpCalls := 0
+	pidUp := func(string) bool { pidUpCalls++; return true }
+	if got := countPlatformProcs("pat", "/home", func(string) int { return 1 }, pidUp); got != 1 {
+		t.Fatalf("count = %d, want 1", got)
+	}
+	if pidUpCalls != 0 {
+		t.Fatalf("pidUp consulted %d times with a positive pgrep; want 0 (short-circuit)", pidUpCalls)
+	}
+}
+
+// TestPlatformPidUp exercises the salt-independent pid-liveness check over real
+// (but controlled) pidfiles: a missing/garbage/non-positive pidfile and a
+// definitely-dead pid all yield false (no positive signal → the caller falls
+// back to pgrep), while the live, non-orphaned test process itself reads as up.
+func TestPlatformPidUp(t *testing.T) {
+	writePid := func(t *testing.T, content string) string {
+		t.Helper()
+		home := t.TempDir()
+		if content != "\x00absent" {
+			if err := os.WriteFile(filepath.Join(home, core.PlatformPidFile), []byte(content), 0o600); err != nil {
+				t.Fatal(err)
+			}
+		}
+		return home
+	}
+
+	t.Run("absent pidfile → false", func(t *testing.T) {
+		if platformPidUp(writePid(t, "\x00absent")) {
+			t.Fatal("missing pidfile must read as not-up")
+		}
+	})
+	t.Run("garbage content → false", func(t *testing.T) {
+		if platformPidUp(writePid(t, "not-a-number")) {
+			t.Fatal("garbage pidfile must read as not-up")
+		}
+	})
+	t.Run("non-positive pid → false", func(t *testing.T) {
+		if platformPidUp(writePid(t, "0")) {
+			t.Fatal("pid<=0 must read as not-up")
+		}
+	})
+	t.Run("dead pid → false (Kill fails)", func(t *testing.T) {
+		// macOS caps pids well below 1e8, so this pid never names a live process.
+		if platformPidUp(writePid(t, "99999999")) {
+			t.Fatal("a dead pid must read as not-up")
+		}
+	})
+	t.Run("live non-orphaned self → true", func(t *testing.T) {
+		// The test process is alive and its parent (go test) is not launchd, so it
+		// satisfies both the liveness and the ppid!=1 (still-supervised) gates.
+		if !platformPidUp(writePid(t, strconv.Itoa(os.Getpid()))) {
+			t.Fatal("a live, non-orphaned pid must read as up")
+		}
+	})
+}
+
 // TestInstallAge_FromVersionJSON: warming-up detection derives age from
 // version.json mtime; a freshly written file reads as young.
 func TestInstallAge_FromVersionJSON(t *testing.T) {

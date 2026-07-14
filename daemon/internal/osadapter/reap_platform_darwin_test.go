@@ -344,6 +344,35 @@ func TestClassifyReapCandidate(t *testing.T) {
 	}
 }
 
+// TestUnderBinSegment is the DAEMON/PLATFORM discriminator's near-miss matrix:
+// only a genuine `.../bin/<component>` segment counts as the platform layout, so
+// a sibling dir named "sbin"/"binary", a dotted ".bin.x", and a bare trailing
+// "bin" (no following component) must all be rejected — otherwise the reaper
+// could misclassify a signed daemon mesh worker as a reapable platform and
+// SIGKILL the mesh. rootWithSep matches classifyReapCandidate's construction
+// (filepath.Clean(root)+separator), so it already ends with a separator.
+func TestUnderBinSegment(t *testing.T) {
+	const root = "/r/" // filepath.Clean("/r") + sep
+	cases := []struct {
+		name      string
+		cleanPath string
+		want      bool
+	}{
+		{"genuine bin segment with following component → match", "/r/.gen/bin/v0.16.7/platform", true},
+		{"sbin sibling segment → no match (bin must be a whole segment)", "/r/sbin/daemon", false},
+		{"dotted .bin.x segment → no match", "/r/.bin.x/payload", false},
+		{"bare trailing bin, no following component → no match", "/r/bin", false},
+		{"bin-prefixed segment name (binary) → no match", "/r/binary/thing", false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := underBinSegment(c.cleanPath, root); got != c.want {
+				t.Fatalf("underBinSegment(%q, %q) = %v, want %v", c.cleanPath, root, got, c.want)
+			}
+		})
+	}
+}
+
 // TestReapRefusesUnanchoredRoot: an empty/relative supportRoot reaps NOTHING.
 func TestReapRefusesUnanchoredRoot(t *testing.T) {
 	killed := 0

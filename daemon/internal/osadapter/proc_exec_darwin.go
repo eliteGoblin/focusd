@@ -29,10 +29,6 @@ import (
 // tier). CGO is disabled project-wide (CGO_ENABLED=0), so this is a raw
 // SYS_proc_info call rather than a libproc.h binding.
 const (
-	// sysProcInfo is XNU's proc_info syscall. BSD syscall numbers are shared
-	// across darwin/arm64 and darwin/amd64, so a single constant is correct on
-	// both supported Apple targets.
-	sysProcInfo = 336
 	// procInfoCallPIDInfo + procPIDPathInfo are the __proc_info sub-call and
 	// flavor libproc's proc_pidpath() issues (PROC_INFO_CALL_PIDINFO,
 	// PROC_PIDPATHINFO).
@@ -61,8 +57,11 @@ func procPidPath(pid int) (string, error) {
 	// return value as a length. Pass the buffer pointer directly as the Syscall6
 	// argument (the canonical pinned-pointer idiom the vet unsafeptr analyzer
 	// recognises).
+	// unix.SYS_PROC_INFO is XNU's proc_info syscall number (336). BSD syscall
+	// numbers are shared across darwin/arm64 and darwin/amd64, so the single
+	// x/sys/unix constant is correct on both supported Apple targets.
 	_, _, errno := unix.Syscall6(
-		uintptr(sysProcInfo),
+		uintptr(unix.SYS_PROC_INFO),
 		uintptr(procInfoCallPIDInfo),
 		uintptr(pid),
 		uintptr(procPIDPathInfo),

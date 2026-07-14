@@ -223,15 +223,24 @@ func procCount(workdir redact.Token, good string) int {
 		} else {
 			pattern = st.BinPath(good) + " --workdir " + platWD
 		}
-		n := pgrepCountExact(pattern)
-		// The pidfile is the salt-independent primary signal. Floor at 1 when it
-		// confirms a live supervised child, but NEVER below the pgrep count (so
-		// an orphan anomaly still surfaces).
-		if n < 1 && platformPidUp(st.Dir) {
-			return 1
-		}
-		return n
+		return countPlatformProcs(pattern, st.Dir, pgrepCountExact, platformPidUp)
 	})
+}
+
+// countPlatformProcs applies the salt-independent pidfile floor to the pgrep
+// count: pgrep is the primary signal AND the orphan counter, and a live
+// supervised child (pidUp) floors the count at 1 ONLY when pgrep missed (n<1) —
+// never below the pgrep count, so an orphan anomaly (n>1) still surfaces and a
+// pgrep miss can never falsely report DOWN. pidUp is consulted lazily (only when
+// n<1), matching the inline short-circuit it replaces. The pgrepCount and pidUp
+// seams are injected so the floor logic is unit-testable without live processes;
+// production wires pgrepCountExact + platformPidUp.
+func countPlatformProcs(pattern, daemonHome string, pgrepCount func(string) int, pidUp func(string) bool) int {
+	n := pgrepCount(pattern)
+	if n < 1 && pidUp(daemonHome) {
+		return 1
+	}
+	return n
 }
 
 // pgrepCountExact returns how many live processes have argv EXACTLY equal to
