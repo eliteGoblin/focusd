@@ -4,9 +4,12 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/eliteGoblin/focusd/daemon/internal/relocate"
 )
@@ -64,6 +67,16 @@ const RosterFile = ".roster"
 // disguised daemon-home. Absent ⇒ the legacy non-disguised layout (dev/tests).
 const InstallSaltFile = ".idx"
 
+// PlatformPidFile is the basename (in the daemon-home) of the platform child's
+// liveness pidfile (HF4 FEATURE 24, P3). It holds ONLY the child's OS pid as a
+// bare integer — no path, no version, no greppable word — so status liveness is
+// SALT-INDEPENDENT: a `focusd status` CLI reads it and probes the pid directly,
+// correct even if the disguise salt diverged from the running child's argv (the
+// old pgrep pattern could then miss and falsely report DOWN). Written by the
+// singleton-lock holder (platformsvc.Start) and removed by its exit waiter.
+// Neutral dot-hidden basename, like .roster/.idx.
+const PlatformPidFile = ".seq"
+
 type versionConfig struct {
 	Desired string `json:"desired"`
 }
@@ -101,17 +114,43 @@ func (s *Store) EnsureInstallSalt() (string, error) {
 	if v := s.InstallSalt(); v != "" {
 		return v, nil
 	}
+	if err := os.MkdirAll(s.Dir, 0o700); err != nil {
+		return "", err
+	}
 	buf := make([]byte, 16)
 	if _, err := rand.Read(buf); err != nil {
 		return "", err
 	}
 	salt := hex.EncodeToString(buf)
-	if err := atomicWrite(s.saltPath(), []byte(salt)); err != nil {
-		return "", err
+	// HF4 F1: ATOMIC claim. Both mesh roles (A and B) call this UNSYNCHRONIZED in
+	// build() before the singleton lock is held, so the old check-then-act let A
+	// launch the platform under saltA while B's later write overwrote disk with
+	// saltB — every later derivation (BinPath / PlatformArgv0 / status pgrep) then
+	// used saltB != the running child's argv, so a live platform silently reported
+	// DOWN. O_CREATE|O_EXCL makes EXACTLY ONE caller create the file and persist
+	// ITS salt; the losers get EEXIST and adopt the winner's. Born 0600 (the salt
+	// seeds every disguise derivation and must not be world-readable) — no
+	// separate chmod (F4: a chmod that failed left the secret 0644 with no log).
+	f, err := os.OpenFile(s.saltPath(), os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
+	if err != nil {
+		if errors.Is(err, os.ErrExist) {
+			// Lost the race: discard our value and adopt the winner's. The winner
+			// creates the file (briefly empty) then writes; retry the read to
+			// bridge that sub-millisecond window so we never adopt an empty salt.
+			for i := 0; i < 100; i++ {
+				if v := s.InstallSalt(); v != "" {
+					return v, nil
+				}
+				time.Sleep(time.Millisecond)
+			}
+			return "", errors.New("ensure salt: peer claimed the salt but it did not materialize")
+		}
+		return "", fmt.Errorf("ensure salt: open: %w", err)
 	}
-	// Tighten to 0600: the salt is the seed an attacker would need to map a
-	// disguised platform path back to a version. atomicWrite lands 0644.
-	_ = os.Chmod(s.saltPath(), 0o600)
+	defer f.Close()
+	if _, err := f.Write([]byte(salt)); err != nil {
+		return "", fmt.Errorf("ensure salt: write: %w", err)
+	}
 	return salt, nil
 }
 
