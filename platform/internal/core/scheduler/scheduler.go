@@ -146,17 +146,28 @@ func (s *Scheduler) Register(jobs []config.Job, plugins map[string]plugin.Discov
 	return registered, nil
 }
 
-// RegisterIntegritySweep adds one synthetic @every 1m entry that runs the
-// whole-bundle integrity reconcile (ADR-0019). This guarantees ≤1-tick
-// self-heal even for plugins that are idle or disabled — the point-of-use
-// check in the runner only fires for jobs that actually run, so a disabled
-// plugin's binary would otherwise never be re-verified. sweep is the
-// bundle ExtractTo call (idempotent / churn-free); on a non-nil error it
-// records an integrity_sweep_failed event (SeverityError) so a wedged
-// sweep can't hide behind a green status. Errors registering the cron
+// RegisterIntegritySweep adds one synthetic @every <interval> entry that runs
+// the whole-bundle integrity reconcile — the IDLE BACKSTOP (ADR-0019 / FEATURE
+// 23, Fix 4). The runner's point-of-use verify is the PER-SCHEDULED-RUN
+// guarantee: it fires immediately before every job that actually runs, so a
+// swap of a running plugin's binary is caught and repaired before exec. This
+// sweep covers the gap the point-of-use check cannot reach — plugins that are
+// idle or disabled, whose binaries would otherwise never be re-verified — so a
+// tamper of a non-running plugin self-heals within ≤1 sweep interval instead of
+// waiting for a restart.
+//
+// interval is the sweep cadence (config.Platform.IntegritySweepInterval);
+// values <= 0 fall back to the 1m default so a mis-set config can't disable the
+// backstop. sweep is the bundle ExtractTo call (idempotent / churn-free); on a
+// non-nil error it records an integrity_sweep_failed event (SeverityError) so a
+// wedged sweep can't hide behind a green status. Errors registering the cron
 // entry are returned to fail the build loudly.
-func (s *Scheduler) RegisterIntegritySweep(sweep func() error) error {
-	_, err := s.cron.AddFunc("@every 1m", func() {
+func (s *Scheduler) RegisterIntegritySweep(interval time.Duration, sweep func() error) error {
+	if interval <= 0 {
+		interval = config.DefaultSweepInterval
+	}
+	schedule := "@every " + interval.String()
+	_, err := s.cron.AddFunc(schedule, func() {
 		if err := sweep(); err != nil {
 			s.event(state.SeverityError, state.EventIntegritySweepFailed,
 				"plugin integrity sweep failed", "integrity-sweep")
@@ -166,7 +177,7 @@ func (s *Scheduler) RegisterIntegritySweep(sweep func() error) error {
 	if err != nil {
 		return fmt.Errorf("register integrity sweep: %w", err)
 	}
-	s.log.Info("integrity sweep registered", "schedule", "@every 1m")
+	s.log.Info("integrity sweep registered", "schedule", schedule)
 	return nil
 }
 

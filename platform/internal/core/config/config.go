@@ -48,7 +48,19 @@ type Platform struct {
 	// the running process via the OS adapter.
 	RunMode  osadapter.RunMode `yaml:"run_mode"`
 	LogLevel string            `yaml:"log_level"`
+	// IntegritySweepInterval is the cadence of the whole-bundle plugin
+	// integrity sweep — the IDLE BACKSTOP that re-reconciles even disabled /
+	// idle plugin binaries the runner's per-scheduled-run point-of-use check
+	// never reaches (FEATURE 23, Fix 4 / ADR-0019). The point-of-use verify is
+	// the per-run guarantee; this sweep bounds the self-heal latency for
+	// plugins that are not currently running. 0 (unset) => DefaultSweepInterval.
+	IntegritySweepInterval Duration `yaml:"integrity_sweep_interval"`
 }
+
+// DefaultSweepInterval is the whole-bundle integrity sweep cadence when the
+// config leaves integrity_sweep_interval unset. 1m keeps the historical
+// ADR-0019 backstop latency (≤1 tick self-heal for idle plugins).
+const DefaultSweepInterval = time.Minute
 
 // Job is a scheduled invocation of a job plugin.
 type Job struct {
@@ -104,12 +116,18 @@ func (c *Config) applyDefaults() {
 	if c.Platform.LogLevel == "" {
 		c.Platform.LogLevel = "info"
 	}
+	if c.Platform.IntegritySweepInterval <= 0 {
+		c.Platform.IntegritySweepInterval = Duration(DefaultSweepInterval)
+	}
 }
 
 // Validate enforces structural invariants. Returns the first violation.
 func (c *Config) Validate() error {
 	if c.Platform.RunMode != "" && !c.Platform.RunMode.Valid() {
 		return fmt.Errorf("platform.run_mode %q is invalid (use user|system or omit)", c.Platform.RunMode)
+	}
+	if c.Platform.IntegritySweepInterval < 0 {
+		return fmt.Errorf("platform.integrity_sweep_interval must be >= 0 (omit for default %s)", DefaultSweepInterval)
 	}
 
 	seenJob := make(map[string]struct{})

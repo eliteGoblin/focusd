@@ -21,14 +21,20 @@ import (
 	"github.com/eliteGoblin/focusd/platform/internal/osadapter"
 )
 
-// bundleVerifier adapts the bundle package to the runner's
-// integrityVerifier seam (ADR-0019): the genuine plugin copy embedded in
-// the signed platform binary is the trust root, reconciled at point of use.
+// bundleVerifier adapts the bundle package to both integrity seams: the
+// runner's point-of-use integrityVerifier (ADR-0019) and the discoverer's
+// integrityGuard (FEATURE 23). The genuine plugin copy embedded in the signed
+// platform binary is the trust root — reconciled before the manifest is read
+// (discovery) and again immediately before exec (runner).
 type bundleVerifier struct{}
 
 func (bundleVerifier) VerifyOrRestore(pluginRoot, subdir string) (bool, string, string, error) {
 	return bundle.VerifyOrRestore(pluginRoot, subdir)
 }
+
+// IsBundled reports whether subdir is a plugin directory that ships inside the
+// signed platform binary — the system-mode discovery allowlist (FEATURE 23).
+func (bundleVerifier) IsBundled(subdir string) bool { return bundle.IsBundled(subdir) }
 
 // Options control bootstrap. Zero value is valid: adapter auto-created,
 // mode auto-detected, paths from the adapter's default layout.
@@ -223,11 +229,11 @@ func guardMode(a osadapter.Adapter, mode osadapter.RunMode) error {
 // each plugin against host/protocol/privilege/security gates, and syncs
 // the result (accepted and rejected) into the inventory.
 func (a *App) DiscoverPlugins() ([]plugin.Discovered, error) {
-	d := &plugin.Discoverer{
+	d := (&plugin.Discoverer{
 		GOOS:   a.Adapter.CurrentOS(),
 		GOARCH: a.Adapter.CurrentArch(),
 		Mode:   a.Mode,
-	}
+	}).WithIntegrity(bundleVerifier{})
 	found, err := d.Discover(a.pluginDir)
 	if err != nil {
 		return nil, err
@@ -236,6 +242,20 @@ func (a *App) DiscoverPlugins() ([]plugin.Discovered, error) {
 		return nil, fmt.Errorf("sync inventory: %w", err)
 	}
 	for _, p := range found {
+		// A tamper repaired at discovery (FEATURE 23, Fix 1): the verify-before-
+		// parse check restored one of this plugin's on-disk files to the genuine
+		// embedded copy BEFORE the manifest was trusted. Record it as a security
+		// event (the runner's point-of-use check would never see it — discovery
+		// already restored the genuine files) and log it (redaction-safe: id +
+		// sha prefixes only, never a path). Keyed on a synthetic "discovery" job
+		// id so it never cross-matches a real job's per-job tamper query.
+		if p.Restored {
+			a.Log.Warn("plugin tamper repaired at discovery",
+				"plugin", rejectedID(p), "want_sha", p.TamperWant, "got_sha", p.TamperGot)
+			if rerr := a.State.Events.RecordTamperRepaired("discovery", rejectedID(p), p.TamperWant, p.TamperGot); rerr != nil {
+				a.Log.Warn("record discovery tamper event failed", "plugin", rejectedID(p))
+			}
+		}
 		switch {
 		case p.OK:
 			a.Log.Info("plugin discovered", "id", p.Manifest.ID, "dir", p.Dir)
@@ -286,14 +306,18 @@ func (a *App) BuildScheduler() (*scheduler.Scheduler, int, error) {
 	if err != nil {
 		return nil, 0, err
 	}
-	// @every 1m whole-bundle integrity sweep (ADR-0019): re-reconciles even
-	// idle/disabled plugin binaries the point-of-use check never reaches.
+	// Whole-bundle integrity sweep (ADR-0019 / FEATURE 23): the idle backstop
+	// that re-reconciles even idle/disabled plugin binaries the runner's
+	// per-scheduled-run point-of-use check never reaches. Cadence is
+	// configurable (config.Platform.IntegritySweepInterval; default 1m).
 	// ExtractTo is idempotent/churn-free, so this is a no-op when clean.
 	pluginDir := a.pluginDir
-	if err := s.RegisterIntegritySweep(func() error {
-		_, serr := bundle.ExtractTo(pluginDir)
-		return serr
-	}); err != nil {
+	if err := s.RegisterIntegritySweep(
+		a.Config.Platform.IntegritySweepInterval.Std(),
+		func() error {
+			_, serr := bundle.ExtractTo(pluginDir)
+			return serr
+		}); err != nil {
 		return nil, 0, err
 	}
 	return s, n, nil

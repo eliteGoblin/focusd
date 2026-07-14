@@ -13,6 +13,7 @@ package runner
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -103,6 +104,12 @@ type Runner struct {
 	// *snapshot.Store is a no-op, so an injected-less runner (tests, in-memory
 	// DBs with no workdir) behaves exactly as before.
 	snap *snapshot.Store
+	// afterPin is a TEST-ONLY seam (nil in production) fired immediately after
+	// the point-of-use check pins the verified content and BEFORE the pre-exec
+	// TOCTOU guard re-checks it. A test uses it to deterministically simulate a
+	// binary swap landing in the verify→exec window, exercising the guard's
+	// refuse path (FEATURE 23, Fix 2). Never set outside tests.
+	afterPin func(binaryPath string)
 }
 
 // WithVerifier returns r with the point-of-use integrity verifier set.
@@ -252,6 +259,12 @@ func (r *Runner) runOnce(ctx context.Context, job Job, p plugin.Discovered, trig
 	// the genuine one runs; an errored check means we do NOT exec a
 	// possibly-tampered binary (record an error run + event, retry next
 	// tick).
+	// verifiedSum pins the exact bytes the point-of-use check just confirmed
+	// genuine, so the TOCTOU guard below can prove the binary hasn't been
+	// swapped in the window between verify and exec (FEATURE 23, Fix 2). Zero
+	// value unless a verifier is wired (no-verifier runs behave as before).
+	var verifiedSum [32]byte
+	var havePin bool
 	if r.verifier != nil {
 		// p.Dir is the plugin's own directory (<pluginRoot>/<subdir>),
 		// always built via filepath.Join by discovery (no trailing slash).
@@ -263,23 +276,7 @@ func (r *Runner) runOnce(ctx context.Context, job Job, p plugin.Discovered, trig
 		restored, wantPrefix, gotPrefix, verr := r.verifier.VerifyOrRestore(pluginRoot, subdir)
 		if verr != nil {
 			const reason = "plugin integrity check failed; refusing to run possibly-tampered binary"
-			// Whitebox audit line (FEATURE 16): redaction-safe — plugin id +
-			// error CLASS only. verr may embed a disguised path; log its type,
-			// never its raw string, so the app log can't leak the workdir.
-			r.log.Error("plugin integrity check failed",
-				"plugin", p.Manifest.ID, "err_type", fmt.Sprintf("%T", verr))
-			if rerr := r.DB.Runs.RecordError(job.ID, p.Manifest.ID, reason); rerr != nil {
-				return Outcome{}, rerr
-			}
-			if rerr := r.DB.Events.RecordIntegrityCheckFailed(job.ID, p.Manifest.ID, "integrity verify errored"); rerr != nil {
-				return Outcome{}, rerr
-			}
-			r.recordSnapshot(job.ID, state.RunStatusError, time.Now())
-			// terminal=true: a verify error already recorded exactly one error
-			// run + one event for this tick. Mark it terminal so Run does NOT
-			// loop and re-record on a job with Retry>0 — the retry is the NEXT
-			// scheduled tick, not an in-tick re-check of a transient FS fault.
-			return Outcome{Status: state.RunStatusError, Message: reason, Err: verr.Error(), terminal: true}, nil
+			return r.integrityRefuse(job, p.Manifest.ID, reason, "integrity verify errored", verr)
 		}
 		if restored {
 			// Tamper detected and repaired: record the security event so
@@ -294,6 +291,19 @@ func (r *Runner) runOnce(ctx context.Context, job Job, p plugin.Discovered, trig
 				return Outcome{}, rerr
 			}
 		}
+		// Capture the now-genuine content so the pre-exec guard can detect a
+		// swap that lands after this point. A read failure here means we can't
+		// pin the binary — treat it exactly like a verify error (do not exec).
+		sum, herr := hashFile(p.BinaryPath)
+		if herr != nil {
+			const reason = "plugin integrity check failed; could not pin verified binary"
+			return r.integrityRefuse(job, p.Manifest.ID, reason, "pin hash failed", herr)
+		}
+		verifiedSum, havePin = sum, true
+		// Test-only: simulate a swap landing in the verify→exec window.
+		if r.afterPin != nil {
+			r.afterPin(p.BinaryPath)
+		}
 	}
 
 	cfgPath, cleanup, err := writeJobConfig(job, p.Manifest.ID, plan)
@@ -301,6 +311,30 @@ func (r *Runner) runOnce(ctx context.Context, job Job, p plugin.Discovered, trig
 		return Outcome{}, err
 	}
 	defer cleanup()
+
+	// TOCTOU guard (FEATURE 23, Fix 2). VerifyOrRestore confirmed the binary
+	// genuine, but a handful of statements (drop-path prep, config write) run
+	// before exec — a root attacker could rename-swap the path in that window
+	// and run a substitute. Re-hash here and compare to the pinned genuine
+	// content: a mismatch (or an unreadable file) means the binary changed
+	// since verify, so refuse and defer to the NEXT tick, which re-verifies +
+	// restores + runs the genuine copy. This runs BEFORE Runs.Start so a
+	// refusal records exactly one error run (no dangling started row), matching
+	// the verify-error path.
+	//
+	// This narrows the window to the few fast statements between here and the
+	// fork/exec. A hard inode pin (exec an open fd) is the stronger closure but
+	// is not portable: macOS — the primary target — rejects execve(/dev/fd/N)
+	// with EACCES and has no fexecve(2). The re-hash guard is the honest,
+	// portable closure and matches ADR-0019's stance: fast self-heal + detection
+	// against an impulsive swap, not an unbreakable seal against scripted root.
+	if havePin {
+		nowSum, herr := hashFile(p.BinaryPath)
+		if herr != nil || nowSum != verifiedSum {
+			const reason = "plugin binary changed between verify and exec; refusing to run"
+			return r.integrityRefuse(job, p.Manifest.ID, reason, "binary changed post-verify", herr)
+		}
+	}
 
 	startedAt := time.Now().UTC()
 	runID, err := r.DB.Runs.Start(job.ID, p.Manifest.ID, p.Manifest.Version, triggeredBy)
@@ -371,6 +405,49 @@ func (r *Runner) runOnce(ctx context.Context, job Job, p plugin.Discovered, trig
 	// and DB agree on recency.
 	r.recordSnapshot(job.ID, out.Status, startedAt)
 	return out, nil
+}
+
+// integrityRefuse records exactly one error run + one integrity-check-failed
+// event (terminal for this tick) and returns the refusal Outcome, so the
+// runner never execs a binary it could not confirm genuine (ADR-0019 / FEATURE
+// 23). Shared by the verify-error, pin-hash, and TOCTOU-swap paths. cause may
+// be nil (a detected swap has no underlying error). Redaction-safe: logs the
+// plugin id + error CLASS only — cause may embed a disguised path, so its raw
+// string never reaches the app log. terminal=true so a job with Retry>0 does
+// NOT re-run the verifier in-tick; the retry is the next scheduled tick.
+func (r *Runner) integrityRefuse(job Job, pluginID, runReason, eventReason string, cause error) (Outcome, error) {
+	r.log.Error("plugin integrity check failed",
+		"plugin", pluginID, "err_type", fmt.Sprintf("%T", cause))
+	if rerr := r.DB.Runs.RecordError(job.ID, pluginID, runReason); rerr != nil {
+		return Outcome{}, rerr
+	}
+	if rerr := r.DB.Events.RecordIntegrityCheckFailed(job.ID, pluginID, eventReason); rerr != nil {
+		return Outcome{}, rerr
+	}
+	r.recordSnapshot(job.ID, state.RunStatusError, time.Now())
+	errStr := ""
+	if cause != nil {
+		errStr = cause.Error()
+	}
+	return Outcome{Status: state.RunStatusError, Message: runReason, Err: errStr, terminal: true}, nil
+}
+
+// hashFile returns the sha256 of the file at path. Used to pin the exact bytes
+// the point-of-use check confirmed genuine, so a swap between verify and exec
+// is detectable (FEATURE 23, Fix 2).
+func hashFile(path string) ([32]byte, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return [32]byte{}, err
+	}
+	defer f.Close()
+	h := sha256.New()
+	if _, err := io.Copy(h, f); err != nil {
+		return [32]byte{}, err
+	}
+	var sum [32]byte
+	copy(sum[:], h.Sum(nil))
+	return sum, nil
 }
 
 // classify maps process result + context state to a run status.

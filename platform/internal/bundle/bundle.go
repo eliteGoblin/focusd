@@ -207,6 +207,33 @@ func reconcileFile(target, rel string, data []byte) (wrote bool, err error) {
 	return true, nil
 }
 
+// IsBundled reports whether subdir names a plugin directory that is part of
+// the embedded (signed) bundle. System-mode discovery uses this as an
+// ALLOWLIST (FEATURE 23, Fix 3): a plugin directory that is NOT inside the
+// Ed25519-signed platform binary must never be scheduled, closing the "rogue
+// extra plugin dir with a hand-written valid manifest" gap. VerifyOrRestore
+// only reconciles files it recognises, so it returns a benign no-op for an
+// unknown dir — that is not enough on its own to keep a rogue plugin OUT, so
+// this explicit membership check is the gate.
+//
+// The subdir is validated to a single path element exactly as VerifyOrRestore
+// does, so a path-like value can never widen the check to the whole tree or
+// escape the bundle namespace. Any invalid or unknown value returns false
+// (fail closed).
+func IsBundled(subdir string) bool {
+	clean := filepath.Clean(subdir)
+	if clean == "" || clean == "." || clean == ".." ||
+		strings.ContainsRune(clean, '/') || strings.ContainsRune(clean, os.PathSeparator) ||
+		clean != filepath.Base(clean) {
+		return false
+	}
+	info, err := fs.Stat(fsys, "data/"+clean)
+	if err != nil {
+		return false
+	}
+	return info.IsDir()
+}
+
 // HasAny reports whether the bundle contains any plugin at all (useful
 // for tests and an honest error if someone built the platform without
 // running the bundling step).
