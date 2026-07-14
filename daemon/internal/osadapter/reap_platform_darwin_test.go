@@ -186,7 +186,7 @@ func reapRoot(t *testing.T) string {
 // resolvePlatformExecs itself (the production system-wide scan) is covered by
 // TestResolvePlatformExecs_FindsSpawnedProcess.
 func execResolverFor(pids ...int) execResolver {
-	return func() (map[int]string, error) {
+	return func([]rawProc) (map[int]string, error) {
 		m := make(map[int]string)
 		for _, pid := range pids {
 			out, _ := exec.Command("lsof", "-p", strconv.Itoa(pid), "-a", "-d", "txt", "-Fn").Output()
@@ -213,7 +213,7 @@ func countLivePlatformsUnder(t *testing.T, root string, verify Verifier, pids ..
 	for _, p := range procs {
 		byPID[p.pid] = p
 	}
-	execs, _ := execResolverFor(pids...)()
+	execs, _ := execResolverFor(pids...)(nil)
 	n := 0
 	for _, pid := range pids {
 		p, ok := byPID[pid]
@@ -240,6 +240,11 @@ func TestClassifyReapCandidate(t *testing.T) {
 	// /platform, no version) — the HF4 case the old regex could never match.
 	disguised := root + "/.io.tailscale.d/bin/catalog.ab12cd34ef"
 	canonical := root + "/.d/bin/v0.16.7/platform"
+	// A signed DAEMON mesh-worker binary: it lives DIRECTLY in daemon-home
+	// (<support-root>/.<hidden>/<base>, relocate.RelocateInto) — NO bin segment —
+	// so despite being a genuine signed focusd binary under the same root it must
+	// NEVER be classified as a reapable platform (the C3 discriminator).
+	daemonBin := root + "/.com.apple.metadata.7f3a2c/bundle.payload.archive.9911aabb"
 	// Synthetic verifiers (no disk): the classifier is pure, so drive its verify
 	// seam directly rather than through sig.VerifyFile / testVerify (which stat
 	// real files that these synthetic paths do not have).
@@ -263,6 +268,21 @@ func TestClassifyReapCandidate(t *testing.T) {
 			name:     "signed canonical path under root → reap",
 			execPath: canonical, comm: canonical,
 			verify: okVerify, want: true,
+		},
+		{
+			name:     "signed DAEMON binary under root (no bin segment) → NOT reaped (daemon/platform discriminator)",
+			execPath: daemonBin, comm: "syncagent",
+			verify: okVerify, want: false,
+		},
+		{
+			name:     "signed DAEMON binary under root, absolute argv0 (dev, no disguise) → NOT reaped",
+			execPath: daemonBin, comm: daemonBin,
+			verify: okVerify, want: false,
+		},
+		{
+			name:     "deleted DAEMON binary (no bin segment) → NOT reaped (fallback needs bin/<semver>/platform)",
+			execPath: daemonBin, comm: daemonBin,
+			verify: func(p string) (bool, error) { return false, enoent(p) }, want: false,
 		},
 		{
 			name:     "present but UNSIGNED under root → NOT reaped (mismatch ≠ ENOENT)",
@@ -330,7 +350,7 @@ func TestReapRefusesUnanchoredRoot(t *testing.T) {
 	list := func() ([]rawProc, error) {
 		return []rawProc{{pid: 999, cmd: "/a/bin/v1.0.0/platform"}}, nil
 	}
-	execs := func() (map[int]string, error) {
+	execs := func([]rawProc) (map[int]string, error) {
 		return map[int]string{999: "/a/bin/v1.0.0/platform"}, nil
 	}
 	kill := func(int) { killed++ }
@@ -352,7 +372,7 @@ func TestReapExemptsByPath(t *testing.T) {
 	list := func() ([]rawProc, error) {
 		return []rawProc{{pid: 10, cmd: survivor}, {pid: 20, cmd: "syncagent"}}, nil
 	}
-	execs := func() (map[int]string, error) {
+	execs := func([]rawProc) (map[int]string, error) {
 		return map[int]string{10: survivor, 20: orphan}, nil
 	}
 	kill := func(pid int) { killed = append(killed, pid) }
@@ -629,19 +649,81 @@ func TestSixteenRepro_DeletedOrphan(t *testing.T) {
 		func(orphanBin string) Verifier { return verifyEnoentFor(orphanBin) })
 }
 
-// TestResolvePlatformExecs_FindsSpawnedProcess covers the PRODUCTION system-wide
-// resolver (the heavy path the other reap tests avoid via execResolverFor): a
-// single `lsof -d txt` over the whole machine must map a spawned process to its
+// TestResolvePlatformExecs_FindsSpawnedProcess covers the PRODUCTION resolver
+// (libproc proc_pidpath, lsof fallback): it must map a spawned process to its
 // executable path under the sandbox root.
 func TestResolvePlatformExecs_FindsSpawnedProcess(t *testing.T) {
 	root := reapRoot(t)
 	pid := spawnFakePlatform(t, root, ".sys", "v0.16.3")
-	execs, err := resolvePlatformExecs()
+	procs, lerr := listPlatformProcs()
+	if lerr != nil {
+		t.Fatalf("listPlatformProcs: %v", lerr)
+	}
+	execs, err := resolvePlatformExecs(procs)
 	if err != nil {
 		t.Fatalf("resolvePlatformExecs: %v", err)
 	}
 	got := filepath.Clean(execs[pid])
 	if got == "." || !strings.HasPrefix(got, filepath.Clean(root)+string(filepath.Separator)) {
-		t.Fatalf("system-wide resolver must map pid %d to an exec path under %q; got %q", pid, root, execs[pid])
+		t.Fatalf("resolver must map pid %d to an exec path under %q; got %q", pid, root, execs[pid])
+	}
+}
+
+// TestProcPidPath_ResolvesSelfExe pins the libproc seam (proc_exec_darwin.go):
+// proc_pidpath must return a process's REAL executable path from the kernel — the
+// disguise-proof handle the reaper's signature tier depends on. Resolving the
+// test process's OWN pid keeps this spawn-free (the spawned-pid path is already
+// covered by TestResolvePlatformExecs_FindsSpawnedProcess). A dead/zero pid must
+// error (fail-safe, so an unresolved pid degrades to lsof rather than a bogus
+// path the reaper could act on).
+func TestProcPidPath_ResolvesSelfExe(t *testing.T) {
+	got, err := procPidPath(os.Getpid())
+	if err != nil {
+		t.Fatalf("procPidPath(self): %v", err)
+	}
+	self, err := os.Executable()
+	if err != nil {
+		t.Fatalf("os.Executable: %v", err)
+	}
+	// Compare by identity (os.SameFile), robust to any symlink-form difference
+	// between proc_pidpath's resolved path and os.Executable().
+	gi, gerr := os.Stat(got)
+	si, serr := os.Stat(self)
+	if gerr != nil || serr != nil || !os.SameFile(gi, si) {
+		t.Fatalf("procPidPath = %q, want same file as %q (gerr=%v serr=%v)", got, self, gerr, serr)
+	}
+	if _, err := procPidPath(0); err == nil {
+		t.Fatal("procPidPath(0) must error (fail-safe, not a bogus path)")
+	}
+}
+
+// TestReap_SignedDaemonWorker_NeverReaped is the C3 safety proof: a signed
+// DAEMON-shaped process — its binary DIRECTLY in a hidden daemon-home dir under
+// the reap root, with NO bin segment (exactly relocate.RelocateInto's layout) —
+// is never classified as a platform, so it SURVIVES a reap that kills a genuine
+// platform sibling. Without the bin-segment discriminator the reaper (which
+// verifies every present binary as signed here) would SIGKILL the daemon worker.
+func TestReap_SignedDaemonWorker_NeverReaped(t *testing.T) {
+	root := reapRoot(t)
+	// Daemon worker: <root>/.<hidden>/<base> — no /bin/ segment.
+	daemonBin := filepath.Join(root, ".com.apple.metadata.7f3a2c", "bundle.payload.archive.9911aabb")
+	daemonPID := spawnFakePlatformAt(t, daemonBin)
+	// A genuine platform orphan: <root>/.<hidden>/bin/<base>.
+	platformBin := filepath.Join(root, ".orphan", "bin", "catalog.1234567890")
+	platformPID := spawnFakePlatformAt(t, platformBin)
+
+	if !isAlive(daemonPID) || !isAlive(platformPID) {
+		t.Fatal("pre-condition: daemon worker + platform orphan both alive")
+	}
+	n, err := reapForeignPlatforms(root, 0, "", listPlatformProcs, execResolverFor(daemonPID, platformPID), signedVerify(), killProc)
+	if err != nil {
+		t.Fatalf("reap: %v", err)
+	}
+	if n != 1 {
+		t.Fatalf("reaped %d, want exactly 1 (only the platform — never the daemon worker)", n)
+	}
+	waitDead(t, platformPID)
+	if !isAlive(daemonPID) {
+		t.Fatal("signed daemon worker (no bin segment) must NEVER be reaped")
 	}
 }

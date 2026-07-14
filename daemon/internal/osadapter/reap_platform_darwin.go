@@ -40,8 +40,16 @@ import (
 // pattern DiscoverAllGenerations already uses (verify → ENOENT fallback):
 //
 //  1. ANCHOR — the candidate's executable path must be strictly under THIS
-//     mode's SupportRoot. This bounds the set of binaries we ever read/verify to
-//     focusd's own tree; a process outside it is never a candidate.
+//     mode's SupportRoot AND under a `.../bin/...` PLATFORM-layout segment. This
+//     bounds the set of binaries we ever read/verify to focusd's own platform
+//     tree; a process outside it is never a candidate. The bin-segment half is
+//     the DAEMON/PLATFORM discriminator (FEATURE 25, C3): the platform binary is
+//     <platform-workdir>/bin/<base> while the daemon mesh workers sit directly in
+//     daemon-home (no bin segment). Both are signed focusd binaries under the same
+//     SupportRoot, so without this the reaper could not tell a platform from a
+//     daemon worker and would SIGKILL the mesh on a signed install (see
+//     underBinSegment). The candidate's exec path is resolved kernel-first via
+//     libproc proc_pidpath (disguise-proof) with lsof only as a fallback.
 //
 //  2. SIGNATURE tier (primary) — for a candidate under the root, sig.VerifyFile
 //     the executable. A VALID Ed25519 signature ⇒ a genuine focusd platform ⇒
@@ -86,11 +94,12 @@ type rawProc struct {
 // `ps`; tests inject a fake table.
 type procLister func() ([]rawProc, error)
 
-// execResolver maps every running pid to its main executable path (the process's
-// `txt` vnode). Real impl shells to a SINGLE system-wide `lsof`; tests inject a
-// fake map. macOS `ps comm=` reports argv0 (a bare token under HF4 disguise), NOT
-// the executable path, so the anchored+verifiable path must come from lsof.
-type execResolver func() (map[int]string, error)
+// execResolver maps the enumerated procs to each pid's main executable path.
+// Real impl (resolvePlatformExecs) proc_pidpath's the SAME procs the reaper
+// already listed — no second `ps` — with lsof as a fallback; tests inject a fake
+// map. macOS `ps comm=` reports argv0 (a bare token under HF4 disguise), NOT the
+// executable path, so the anchored+verifiable path must come from libproc/lsof.
+type execResolver func(procs []rawProc) (map[int]string, error)
 
 // procKiller SIGTERM→SIGKILLs a pid. Real impl signals the process; tests record
 // the pids asked to die.
@@ -128,11 +137,11 @@ func reapForeignPlatforms(
 	if err != nil {
 		return 0, err
 	}
-	// Best-effort exec-path map (one system-wide lsof). A resolve failure yields
-	// an empty map: the signature tier then finds no under-root path and only the
-	// deleted-binary fallback (kernel argv0) can still fire — fail-safe, never
-	// fail-open into over-matching.
-	execByPID, _ := resolveExecs()
+	// Best-effort exec-path map over the procs we just listed (libproc, lsof
+	// fallback). A resolve failure yields an empty map: the signature tier then
+	// finds no under-root path and only the deleted-binary fallback (kernel argv0)
+	// can still fire — fail-safe, never fail-open into over-matching.
+	execByPID, _ := resolveExecs(procs)
 	keepClean := ""
 	if keepPath != "" {
 		keepClean = filepath.Clean(keepPath)
@@ -159,9 +168,20 @@ func classifyReapCandidate(execPath, comm, supportRoot, keepClean string, verify
 	root := filepath.Clean(supportRoot) + string(filepath.Separator)
 
 	// ---- SIGNATURE tier (primary, naming-agnostic) ----
+	//
+	// Anchor: under this mode's SupportRoot AND under a `.../bin/...` PLATFORM
+	// layout. The bin-segment gate is the DAEMON/PLATFORM discriminator: the
+	// platform binary always lives at <platform-workdir>/bin/<base>
+	// (core.Store.BinPath), whereas the daemon mesh workers live DIRECTLY in
+	// daemon-home (<support-root>/.<hidden>/<base>, relocate.RelocateInto — no bin
+	// segment). Both are signed focusd binaries under SupportRoot, so signature +
+	// root anchor ALONE cannot tell them apart — without this gate the reaper
+	// would classify a signed daemon worker (self, peer, companion) as a reapable
+	// "platform" and SIGKILL the mesh on a real signed install. The gate makes the
+	// reaper structurally incapable of ever reaching a daemon binary.
 	if execPath != "" {
 		clean := filepath.Clean(execPath)
-		if strings.HasPrefix(clean, root) {
+		if strings.HasPrefix(clean, root) && underBinSegment(clean, root) {
 			ok, verr := verify(execPath)
 			switch {
 			case verr == nil && ok:
@@ -202,6 +222,22 @@ func classifyReapCandidate(execPath, comm, supportRoot, keepClean string, verify
 	return true
 }
 
+// underBinSegment reports whether cleanPath (already confirmed to be prefixed by
+// rootWithSep) sits under a `.../bin/...` segment — the PLATFORM binary layout
+// (<platform-workdir>/bin/<base>). The DAEMON binary lives directly in daemon-home
+// (<support-root>/.<hidden>/<base>, no bin segment), so this is the structural
+// discriminator that keeps a signed daemon mesh worker from ever being classified
+// as a reapable platform. The match is SEGMENT-exact (a leading + trailing
+// separator around "bin"), so a dir named "sbin"/"binary" never satisfies it; a
+// trailing component after "bin/" is required (a file literally named "bin"
+// directly under root is not a platform layout). The legacy ENOENT fallback keys
+// on platformSignatureRE, which already embeds the same `/bin/` requirement.
+func underBinSegment(cleanPath, rootWithSep string) bool {
+	rel := strings.TrimPrefix(cleanPath, rootWithSep)
+	sep := string(filepath.Separator)
+	return strings.Contains(sep+rel, sep+"bin"+sep)
+}
+
 // listPlatformProcs enumerates every process as (pid, argv0) via `ps`. `-axww` =
 // all processes, unlimited width (so a long argv0 path is not truncated); `-o
 // pid=,comm=` = no header, pid then argv0. On macOS `comm` is argv0 (a bare token
@@ -231,15 +267,45 @@ func listPlatformProcs() ([]rawProc, error) {
 	return procs, nil
 }
 
-// resolvePlatformExecs maps pid → main executable path for every process via a
-// SINGLE system-wide `lsof -d txt -Fpn`: `-d txt` restricts to text (executable)
-// fds, `-Fpn` emits parseable p(id) and n(ame) fields. The FIRST `n` after each
-// `p` is the process's own executable (dyld/dylibs follow). lsof commonly exits
-// non-zero when a few fds are unreadable while still emitting valid stdout, so we
-// PARSE the captured output regardless of exit status (best-effort). Even after
-// the binary is unlinked the vnode persists, so lsof still reports the (now
-// dangling) path — which sig.VerifyFile then classifies as fs.ErrNotExist.
-func resolvePlatformExecs() (map[int]string, error) {
+// resolvePlatformExecs maps each of the ALREADY-ENUMERATED procs to its main
+// executable path (the reaper hands us the same `ps` snapshot it listed, so we
+// never shell out to `ps` a second time).
+//
+// PRIMARY: libproc proc_pidpath per pid (see proc_exec_darwin.go) —
+// kernel-authoritative, no subprocess, and disguise-proof (it returns the real
+// exec path regardless of the HF4 bare-token argv0). This is the "enumerate by
+// exe" seam the reaper needs so the signature tier fires against a disguised
+// orphan the argv0 fallback could never anchor.
+//
+// FALLBACK: the legacy system-wide `lsof -d txt` scan, used only if libproc
+// resolves NOTHING for the whole set (e.g. a future SYS_proc_info ABI change, or
+// an empty proc list) — so the reaper never goes blind. A PARTIAL libproc failure
+// (some pids resolved, some not) deliberately does NOT trigger lsof: an
+// unresolved pid degrades to the ENOENT/argv0 tier, which can only UNDER-reap (a
+// disguised bare-token argv0 fails the anchored regex), never over-reap — a safe
+// default that avoids the heavy (~180ms) lsof scan on the common path.
+func resolvePlatformExecs(procs []rawProc) (map[int]string, error) {
+	m := make(map[int]string, len(procs))
+	for _, p := range procs {
+		if path, perr := procPidPath(p.pid); perr == nil && path != "" {
+			m[p.pid] = path
+		}
+	}
+	if len(m) == 0 {
+		return resolveExecsViaLsof(), nil
+	}
+	return m, nil
+}
+
+// resolveExecsViaLsof is the fallback pid → executable resolver: a SINGLE
+// system-wide `lsof -d txt -Fpn`: `-d txt` restricts to text (executable) fds,
+// `-Fpn` emits parseable p(id) and n(ame) fields. The FIRST `n` after each `p` is
+// the process's own executable (dyld/dylibs follow). lsof commonly exits non-zero
+// when a few fds are unreadable while still emitting valid stdout, so we PARSE the
+// captured output regardless of exit status (best-effort). Even after the binary
+// is unlinked the vnode persists, so lsof still reports the (now dangling) path —
+// which sig.VerifyFile then classifies as fs.ErrNotExist.
+func resolveExecsViaLsof() map[int]string {
 	out, _ := exec.Command("lsof", "-d", "txt", "-Fpn").Output()
 	m := make(map[int]string)
 	cur := 0
@@ -263,7 +329,7 @@ func resolvePlatformExecs() (map[int]string, error) {
 			}
 		}
 	}
-	return m, nil
+	return m
 }
 
 // killProc delivers SIGTERM then SIGKILL back-to-back with NO grace interval —
