@@ -6,58 +6,73 @@
 
 Modern apps are designed like slot machines - engineered to capture attention and create compulsive usage. FocusD creates multiple layers of protection to help you stay focused.
 
-## Multi-Layer Defense
+## Supervision + Enforcement Architecture
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
-│  Layer 1: DNS Blocking (NextDNS)                            │
-│  - Blocks gaming domains at network level                   │
-│  - Works on ALL devices (Mac, iPhone, iPad)                 │
-│  - Can't be bypassed without router access                  │
+│  Layer 1: Daemon (self-protecting supervisor)               │
+│  - Keeps platform running (mutually-respawning mesh)        │
+│  - Ed25519-verifies platform before execution               │
+│  - Out-of-band companion for recovery                       │
 └─────────────────────────────────────────────────────────────┘
                             │
 ┌─────────────────────────────────────────────────────────────┐
-│  Layer 2: App/Site Blocking (daemon + platform + plugins)   │
-│  - Kills Steam/Dota2 processes automatically                │
-│  - Host-file + pfctl packet blocking                        │
-│  - Self-protecting single launchd mesh                      │
+│  Layer 2: Platform (protection engine)                      │
+│  - Runs plugins on schedule (idempotent reconcile loop)     │
+│  - Ed25519-verifies plugins before execution                │
+│  - Enforces tighten-only config (can't disable protections) │
+└─────────────────────────────────────────────────────────────┘
+                            │
+┌─────────────────────────────────────────────────────────────┐
+│  Layer 3: Plugins (enforcement units)                       │
+│  - Kill Steam/Dota2 (kill-steam)                            │
+│  - Host-file blocking (dns-block)                           │
+│  - Packet filtering (network-block)                         │
+│  - Claude skill re-injection (skill-protector)              │
+│  - Browser tab blocking (browser-monitor)                   │
+│  - Freedom app auto-launch (freedom-protector)              │
 └─────────────────────────────────────────────────────────────┘
 ```
 
 ---
 
-## Layer 1: DNS Blocking (NextDNS)
+## How It Works
 
-Blocks gaming domains at the network level for all devices on your network.
+A **daemon** (Layer 1 supervisor) keeps a cross-platform **platform** engine (Layer 2) running and verifies it hasn't been tampered with. The **platform** runs **plugins** (Layer 3) on schedule, continuously re-verifying each plugin hasn't been swapped or deleted before execution. Each layer protects the one below it: if the platform is modified, the daemon restores it; if a plugin is tampered with, the platform restores it.
 
-**Blocked domains:**
-- `steampowered.com`, `steamcommunity.com`, `steamstatic.com`
-- All Steam CDN and authentication servers
+**Key properties:**
+- **Anti-tamper:** Every binary is Ed25519-signed; each supervisor re-verifies before execution
+- **Self-recovering:** Baked fallback version, out-of-band companion recovery, single-instance convergence
+- **Invisible:** Working directory derived from binary location (off argv/env), neutral process names
+- **Tighten-only:** Config can only add restrictions, never disable existing ones
+- **No stop command:** Intentional friction; only ritual-gated override path
 
-**Setup:** [NextDNS Setup Guide](artifacts/managed_dns/next_dns.md)
+**Setup:** Install requires an explicit version tag (`install -v vX.Y.Z`) so you choose when to adopt each release.
 
 ---
 
-## Layer 2: App/Site Blocking (daemon + platform + plugins)
+## Plugins
 
-A self-protecting **daemon** keeps a cross-platform **platform** engine running;
-the platform enforces policy through **plugins** (kill Steam/Dota2, host-file and
-pfctl blocking, Claude-skill re-injection, browser-tab guarding).
-
-**Features:**
-- Kills blocked processes on a schedule
-- Host-file + pfctl packet blocking of gaming domains
-- Self-protecting single launchd mesh with path-rotating self-update
-- Drives toward a signed desired state (enforcement is tighten-only)
-- No stop command (intentional friction)
+| Plugin | Purpose | Runs as |
+|--------|---------|---------|
+| **kill-steam** | Terminates Steam/Dota2 processes; removes app data each run | system/user |
+| **dns-block** | Writes `/etc/hosts` blocklist for gaming domains | system/user |
+| **network-block** | pfctl packet filtering (IP-level blocking) | system only |
+| **skill-protector** | Re-injects Claude refusal skill if removed | system/user |
+| **browser-monitor** | Quits browser windows on blocklisted sites | system/user |
+| **freedom-protector** | Keeps Freedom focus app running (optional, requires license) | user mode |
 
 **Quick Start:**
 ```bash
 # Build the platform (bundles plugins first)
 ./scripts/build-platform.sh
+
+# Run tests
+cd daemon   && go test -race ./...
+cd platform && go test -race ./...
 ```
 
-**Documentation:** see [`requirements/`](requirements/) (features, ADRs, register).
+**Documentation:** See [`requirements/`](requirements/) for features, decisions (ADRs), and acceptance test history.
 
 ---
 
@@ -75,15 +90,20 @@ pfctl blocking, Claude-skill re-injection, browser-tab guarding).
 
 ```
 focusd/
-├── daemon/                     # Layer-1 supervisor (Go) — keeps platform running
-├── platform/                   # Cross-platform protection engine (Go)
-├── plugins/                    # Enforcement plugins (Go)
-├── artifacts/
-│   └── managed_dns/
-│       └── next_dns.md         # NextDNS setup guide
-├── requirements/               # Product/BA docs: features, ADRs, register
-└── archive/                    # Deprecated tools
-    └── chrome/                 # Chrome extension enforcer (deprecated)
+├── daemon/                     # Layer-1 supervisor (Go) — keeps platform alive + verified
+├── platform/                   # Layer-2 protection engine (Go) — runs plugins + verifies them
+├── plugins/                    # Layer-3 plugins (Go) — enforcement units
+│   ├── kill-steam/
+│   ├── dns-block/
+│   ├── network-block/
+│   ├── skill-protector/
+│   ├── browser-monitor/
+│   └── freedom-protector/
+├── requirements/               # Product/BA docs: features, decisions (ADRs), test history
+├── artifacts/                  # Reference guides
+│   └── managed_dns/next_dns.md # Optional: NextDNS router-level blocking
+├── scripts/                    # Build and test helpers
+└── archive/                    # Deprecated tools (Chrome extension, etc.)
 ```
 
 ## License
