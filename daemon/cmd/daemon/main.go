@@ -406,6 +406,11 @@ func build(o opts) (*core.Executor, *slog.Logger) {
 	// HF4: set the disguised argv[0] for the platform child (empty in test mode /
 	// no-salt ⇒ ProcSvc keeps the legacy visible argv).
 	p.Argv0 = st.PlatformArgv0()
+	// HF4 (P3): publish the child's pid to a salt-independent liveness pidfile in
+	// the DAEMON-HOME (o.workdir survives a platform-workdir wipe; a `focusd
+	// status` discovers this same root). This is the primary up/down signal, so a
+	// pgrep miss after a salt divergence can never falsely report DOWN.
+	p.PidFile = filepath.Join(o.workdir, core.PlatformPidFile)
 	if o.healthy > 0 {
 		p.Healthy = o.healthy
 	}

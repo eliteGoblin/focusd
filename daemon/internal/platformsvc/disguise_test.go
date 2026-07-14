@@ -8,13 +8,14 @@ import (
 	"github.com/eliteGoblin/focusd/daemon/internal/relocate"
 )
 
-// TestPlatformStartCommandHasZeroLeaks is the HF4 (FEATURE 24) greppability
+// TestPlatformStartCommandHasZeroLeaks is the HF4 (FEATURE 24 / P0) greppability
 // guard for the PLATFORM child. It reconstructs exactly the command a real
-// disguised install launches (disguised argv[0] + version-bearing binary path +
-// disguised workdir) and asserts the RENDERED argv — the bytes `ps aux` shows —
-// contains NONE of the tokens a weak-moment `grep` would pivot on: the version,
-// the literal 'platform', 'focusd', or the workdir path. The workdir rides in the
-// environment (not argv), so it is asserted PRESENT in env but ABSENT from argv.
+// disguised install launches and asserts the RENDERED argv — the bytes `ps aux`
+// shows — plus the environment `ps -E` shows contain NONE of the tokens a
+// weak-moment `grep` would pivot on: the version, the literal 'platform',
+// 'focusd', or the workdir path. Post-P0 the workdir rides on NEITHER argv NOR
+// env — the disguised child self-derives it from its own binary location — and
+// the inherited mesh role marker (MeshEnvKey) is scrubbed too.
 func TestPlatformStartCommandHasZeroLeaks(t *testing.T) {
 	const (
 		salt    = "0123456789abcdef0123456789abcdef" // a realistic per-install salt
@@ -25,6 +26,12 @@ func TestPlatformStartCommandHasZeroLeaks(t *testing.T) {
 	workdir := "/Users/x/Library/Application Support/.com.apple.metadata.helper.9f3a2c/pw"
 	binBase := relocate.PlatformBinBase(salt, version)
 	binPath := filepath.Join(workdir, "bin", binBase)
+
+	// Simulate the daemon's OWN inherited environment: launchd hands it the mesh
+	// role marker, and (pre-P0) the workdir was appended for the child. BOTH must
+	// be scrubbed from the disguised child so neither surfaces in `ps -E`.
+	t.Setenv(MeshEnvKey, "run:a")
+	t.Setenv(WorkdirEnvKey, workdir)
 
 	p := &ProcSvc{Workdir: workdir, Argv0: relocate.PlatformArgv0(salt)}
 	args, env := p.childArgvEnv(binPath)
@@ -55,18 +62,21 @@ func TestPlatformStartCommandHasZeroLeaks(t *testing.T) {
 		t.Errorf("argv[0] token %q is not a clean single token", args[0])
 	}
 
-	// The workdir must still reach the child — via the environment, never argv.
-	wantEnv := WorkdirEnvKey + "=" + workdir
-	found := false
+	// The workdir must ride on NEITHER argv NOR env, and the mesh marker must be
+	// scrubbed — a live `ps -E` over the disguised child must show nothing tied
+	// to the install.
 	for _, kv := range env {
-		if kv == wantEnv {
-			found = true
+		if strings.HasPrefix(kv, WorkdirEnvKey+"=") {
+			t.Errorf("env still carries the workdir key %s (must be scrubbed): %q", WorkdirEnvKey, kv)
+		}
+		if strings.HasPrefix(kv, MeshEnvKey+"=") {
+			t.Errorf("env still carries the mesh role marker %s (must be scrubbed): %q", MeshEnvKey, kv)
+		}
+		if strings.Contains(kv, workdir) {
+			t.Errorf("env leaks the workdir path: %q", kv)
 		}
 	}
-	if !found {
-		t.Errorf("workdir not carried in env %q; env must deliver it since argv cannot", wantEnv)
-	}
-	t.Logf("disguised platform start argv = %q (env carries workdir off-argv)", argv)
+	t.Logf("disguised platform start argv = %q; workdir on neither argv nor env", argv)
 }
 
 // TestLegacyStartUnchangedWithoutSalt pins that a no-salt (dev/test/e2e) install

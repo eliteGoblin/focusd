@@ -10,7 +10,12 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
+	"strings"
+	"syscall"
 	"time"
+
+	"golang.org/x/sys/unix"
 
 	"github.com/eliteGoblin/focusd/daemon/internal/core"
 	"github.com/eliteGoblin/focusd/daemon/internal/mode"
@@ -191,43 +196,108 @@ func installAge(workdir redact.Token) (time.Duration, bool) {
 	})
 }
 
-// procCount counts live processes whose argv exactly matches the good
-// platform binary path. The pattern is built AND run inside the Use closure
-// so the path never escapes; pgrep's stderr/error is swallowed so it can
-// never echo the pattern into status output. Exact match (-x) so we never
-// match on a bare "platform" substring.
+// procCount counts live platform processes. The salt-independent pidfile (P3)
+// is the PRIMARY up/down signal; pgrep is the fallback AND the orphan counter.
+// Everything runs inside the Use closure so the disguised path never escapes.
+//
+// HF4 (P3): a pgrep pattern is reconstructed from the per-install salt to match
+// the disguised child's argv EXACTLY (-f -x). But if the salt on disk diverged
+// from the running child's argv (the F1 race — now fixed, but status must stay
+// correct regardless), that pattern MISSES and pgrep returns 0. So a live,
+// still-supervised child confirmed by the pidfile floors the count at 1 — a
+// pgrep miss can never falsely report DOWN. pgrep still runs, so a genuine >1
+// (orphan) anomaly (ADR-0013) is preserved: we take max(pgrep, pidfile), never
+// let the pidfile MASK an orphan nor let a pgrep miss MASK a live child.
 func procCount(workdir redact.Token, good string) int {
 	return redact.Use(workdir, func(raw string) int {
-		ctx, cancel := context.WithTimeout(context.Background(), platformStatusTimeout)
-		defer cancel()
 		st, platWD := platformStore(raw)
 		// pgrep -f -x: match the full argument vector EXACTLY.
 		//
 		// HF4 (FEATURE 24): the disguised platform child runs as `<argv0> run`
-		// (a generic token, workdir moved into the environment), so match that
-		// deterministic argv — reconstructed from the per-install salt, exactly
-		// what platformsvc.Start set. Legacy (no salt) installs still run as
-		// `<binPath> --workdir <platform-workdir>` (FEATURE 21 / HF1).
+		// (a generic token, workdir off argv/env), so match that deterministic
+		// argv. Legacy (no salt) installs still run as `<binPath> --workdir
+		// <platform-workdir>` (FEATURE 21 / HF1).
 		var pattern string
 		if argv0 := st.PlatformArgv0(); argv0 != "" {
 			pattern = argv0 + " run"
 		} else {
 			pattern = st.BinPath(good) + " --workdir " + platWD
 		}
-		out, err := exec.CommandContext(ctx, "pgrep", "-f", "-x", pattern).Output()
-		if err != nil {
-			// Exit status 1 = no match (count 0); any other error we also
-			// treat as 0 rather than leaking the pattern via an error string.
-			return 0
-		}
-		n := 0
-		for _, line := range bytes.Split(bytes.TrimSpace(out), []byte("\n")) {
-			if len(bytes.TrimSpace(line)) > 0 {
-				n++
-			}
+		n := pgrepCountExact(pattern)
+		// The pidfile is the salt-independent primary signal. Floor at 1 when it
+		// confirms a live supervised child, but NEVER below the pgrep count (so
+		// an orphan anomaly still surfaces).
+		if n < 1 && platformPidUp(st.Dir) {
+			return 1
 		}
 		return n
 	})
+}
+
+// pgrepCountExact returns how many live processes have argv EXACTLY equal to
+// pattern (`pgrep -f -x`). Any error — including exit 1 (no match) — counts as 0
+// rather than leaking the pattern through an error string. Time-boxed like the
+// other status probes.
+func pgrepCountExact(pattern string) int {
+	ctx, cancel := context.WithTimeout(context.Background(), platformStatusTimeout)
+	defer cancel()
+	out, err := exec.CommandContext(ctx, "pgrep", "-f", "-x", pattern).Output()
+	if err != nil {
+		return 0
+	}
+	n := 0
+	for _, line := range bytes.Split(bytes.TrimSpace(out), []byte("\n")) {
+		if len(bytes.TrimSpace(line)) > 0 {
+			n++
+		}
+	}
+	return n
+}
+
+// platformPidUp reports whether the daemon-home pidfile names a live, still-
+// SUPERVISED platform child: the pid is alive AND not reparented to launchd
+// (ppid != 1). It is the salt-INDEPENDENT primary liveness signal — a bare int,
+// so it survives a salt divergence that would desync the pgrep argv pattern.
+// Returns false ("no usable signal") when the pidfile is missing/stale or the
+// child is orphaned, so the caller falls back to pgrep (which also counts the
+// orphan). The path is never surfaced.
+func platformPidUp(daemonHome string) bool {
+	b, err := os.ReadFile(filepath.Join(daemonHome, core.PlatformPidFile))
+	if err != nil {
+		return false
+	}
+	pid, err := strconv.Atoi(strings.TrimSpace(string(b)))
+	if err != nil || pid <= 0 {
+		return false
+	}
+	if !processAlive(pid) {
+		return false
+	}
+	ppid, ok := processPpid(pid)
+	// ppid unknown (proc vanished mid-probe) or reparented to launchd (== 1) →
+	// no positive signal; the pgrep fallback + FEATURE 25 reaper handle orphans.
+	return ok && ppid != 1
+}
+
+// processAlive reports whether pid names a live process (signal-0 probe). EPERM
+// means the process exists but is owned by another user (e.g. a root platform
+// queried by a non-root `status`) — still alive.
+func processAlive(pid int) bool {
+	if pid <= 0 {
+		return false
+	}
+	err := syscall.Kill(pid, 0)
+	return err == nil || errors.Is(err, syscall.EPERM)
+}
+
+// processPpid returns pid's parent pid via sysctl (kern.proc.pid). ok=false when
+// the process is gone or the read fails.
+func processPpid(pid int) (int, bool) {
+	kp, err := unix.SysctlKinfoProc("kern.proc.pid", pid)
+	if err != nil || kp == nil {
+		return 0, false
+	}
+	return int(kp.Eproc.Ppid), true
 }
 
 // gatherPlatform execs `platform status` EXACTLY ONCE, in the single form the
@@ -254,7 +324,19 @@ func gatherPlatform(workdir redact.Token, jsonMode bool, verify sigVerifier) Pla
 		binPath := st.BinPath(good)
 		// FEATURE 21 (HF1): query the platform in its own disposable workdir
 		// (state.db lives there), not the daemon-home.
-		out, exitCode, ran := runPlatformStatus(binPath, platWD, jsonMode, verify)
+		//
+		// HF4 (P2): with a DISGUISED install the workdir must NOT ride on argv —
+		// a transient `platform status --workdir <wd>` would leak it to `ps` for
+		// the ~8s of the call. Pass "" so the disguised child self-derives its
+		// workdir from its own binary location, mirroring how it was launched.
+		// Legacy/e2e (no salt ⇒ PlatformArgv0()=="") still passes --workdir: that
+		// binary is built with -tags e2e and its bin/<v>/platform layout is NOT
+		// what the child's 2-levels-up self-derive resolves.
+		statusWD := platWD
+		if st.PlatformArgv0() != "" {
+			statusWD = ""
+		}
+		out, exitCode, ran := runPlatformStatus(binPath, statusWD, jsonMode, verify)
 
 		// The command itself failed to produce a health verdict (exec error,
 		// timeout, or exit >= 2) → unavailable. The daemon still reports its
@@ -288,9 +370,11 @@ func gatherPlatform(workdir redact.Token, jsonMode bool, verify sigVerifier) Pla
 	return pd
 }
 
-// runPlatformStatus execs `<binPath> status --workdir <wd> [--json]` with an
-// 8s timeout and captures stdout into a buffer. STDERR is discarded (it may
-// carry disguised paths). On timeout the child is killed via context
+// runPlatformStatus execs `<binPath> status [--workdir <wd>] [--json]` with an
+// 8s timeout and captures stdout into a buffer. HF4 (P2): --workdir is passed
+// ONLY when workdir != "" (legacy/e2e); a disguised install passes "" so the
+// child self-derives its workdir and nothing leaks to `ps`. STDERR is discarded
+// (it may carry disguised paths). On timeout the child is killed via context
 // cancellation.
 //
 // `platform status` is a HEALTH probe: it exits 0 (healthy/unknown) OR 1
@@ -319,7 +403,10 @@ func runPlatformStatus(binPath, workdir string, asJSON bool, verify sigVerifier)
 	ctx, cancel := context.WithTimeout(context.Background(), platformStatusTimeout)
 	defer cancel()
 
-	args := []string{"status", "--workdir", workdir, "--no-color"}
+	args := []string{"status", "--no-color"}
+	if workdir != "" {
+		args = append(args, "--workdir", workdir)
+	}
 	if asJSON {
 		args = append(args, "--json")
 	}

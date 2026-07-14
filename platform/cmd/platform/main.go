@@ -80,6 +80,23 @@ usage:
 `)
 }
 
+// resolveWorkdir returns the platform-workdir: a caller-supplied override
+// (honored ONLY in e2e builds via workdirOverride) else self-derived from the
+// running binary's own location (osadapter.DeriveWorkdir). A prod derive failure
+// is FATAL with a generic message — we must NEVER fall through to OS-layout
+// defaults, which would silently point protection at the wrong state directory.
+func resolveWorkdir(flag string) string {
+	if wd := workdirOverride(flag); wd != "" {
+		return wd
+	}
+	wd, err := osadapter.DeriveWorkdir()
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "cannot resolve state directory")
+		os.Exit(1)
+	}
+	return wd
+}
+
 func parseCommon(name string, args []string) app.Options {
 	fs := flag.NewFlagSet(name, flag.ExitOnError)
 	cfg := fs.String("config", "", "config.yaml path (default: <workdir>/config.yaml or OS layout)")
@@ -88,13 +105,15 @@ func parseCommon(name string, args []string) app.Options {
 	mode := fs.String("mode", "", "force run mode: user|system")
 	wd := fs.String("workdir", "", "daemon-managed workdir; derives config/state-db (default: empty = use OS layout)")
 	_ = fs.Parse(args)
-	// HF4 (FEATURE 24): the daemon now hands the workdir in the environment
-	// (WorkdirEnvKey) instead of on argv, so a live `ps` over the platform child
-	// shows no workdir path. Fall back to it when no explicit --workdir was given.
-	// An explicit flag still wins (direct CLI use, tests).
-	if *wd == "" {
-		*wd = os.Getenv(osadapter.WorkdirEnvKey)
-	}
+	// HF4 (FEATURE 24): resolve the workdir WITHOUT ever exposing it on argv or in
+	// the environment. In a RELEASE build workdirOverride() ignores both the
+	// --workdir flag and the WorkdirEnvKey env var (returns "") so the child
+	// self-derives from its own binary location — nothing for `ps`/`ps -E` to
+	// show. Only an e2e build honors a caller-supplied workdir (deterministic
+	// test-mode). A derive failure in prod is FATAL and generic: we must NEVER
+	// fall through to OS-layout defaults, which would silently point protection at
+	// the wrong state dir (protection off).
+	*wd = resolveWorkdir(*wd)
 	opts := app.Options{
 		ConfigPath:  *cfg,
 		StateDBPath: *db,
@@ -224,22 +243,16 @@ func runStatus(args []string) int {
 		mode = adapter.DetectRunMode()
 	}
 
+	// HF4 (FEATURE 24): resolve the workdir off the binary's own location (release)
+	// or the caller override (e2e) — never from an env var, so `status` leaks no
+	// workdir. config/state-db derive from it unless explicitly overridden.
 	configPath, dbPath := *cfgFlag, *dbFlag
-	if *wd != "" {
-		if configPath == "" {
-			configPath = filepath.Join(*wd, "config.yaml")
-		}
-		if dbPath == "" {
-			dbPath = filepath.Join(*wd, "state.db")
-		}
-	}
+	statusWd := resolveWorkdir(*wd)
 	if configPath == "" {
-		configPath, _ = adapter.DefaultConfigPath(mode)
+		configPath = filepath.Join(statusWd, "config.yaml")
 	}
 	if dbPath == "" {
-		if sd, err := adapter.DefaultStateDir(mode); err == nil {
-			dbPath = filepath.Join(sd, "state.db")
-		}
+		dbPath = filepath.Join(statusWd, "state.db")
 	}
 
 	// Config (embedded defaults merged with the optional on-disk override)

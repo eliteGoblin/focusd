@@ -8,6 +8,8 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -20,11 +22,20 @@ type ProcSvc struct {
 	Healthy   time.Duration // alive longer than this ⇒ "healthy for"
 	// Argv0 is the HF4 (FEATURE 24) disguised argv[0] for the platform child.
 	// When set, the child is launched with a GENERIC token as argv[0] (no path,
-	// no 'platform', no version) and its --workdir moves OFF the command line
-	// into WorkdirEnvKey — so `ps aux | grep` over the live process finds nothing
-	// tied to the install. Empty ⇒ the legacy argv (binPath + --workdir <wd>),
-	// keeping dev runs and the existing platformsvc tests unchanged.
+	// no 'platform', no version) and its workdir moves OFF the command line — the
+	// child self-derives it from its own binary location — so `ps aux`/`ps -E`
+	// over the live process finds nothing tied to the install. Empty ⇒ the legacy
+	// argv (binPath + --workdir <wd>), keeping dev runs and the existing
+	// platformsvc tests unchanged.
 	Argv0 string
+	// PidFile, when set, is the absolute path of the platform child's liveness
+	// pidfile (HF4 FEATURE 24, P3) — a fixed-basename, SALT-INDEPENDENT file in the
+	// daemon-home holding only the child's OS pid as a bare int. Start writes it
+	// after launch; the exit waiter removes it. A separate `focusd status` process
+	// reads it and probes the pid directly, so status is correct even if the
+	// disguise salt diverged from the running child's argv. Empty ⇒ no pidfile
+	// (dev runs / unit tests), preserving the legacy pgrep-only status path.
+	PidFile string
 
 	mu        sync.Mutex
 	cmd       *exec.Cmd
@@ -41,6 +52,15 @@ type ProcSvc struct {
 // boundary — like MeshEnvKey — because daemon and platform are separate modules.
 // The key is deliberately opaque and names neither focusd nor 'workdir'.
 const WorkdirEnvKey = "APP_STATE_DIR"
+
+// MeshEnvKey mirrors osadapter.MeshEnvKey — the launchd EnvironmentVariables key
+// that carries THIS daemon's mesh role marker ("run:a" etc.). The daemon
+// inherits it from launchd, so if we passed os.Environ() straight to the
+// disguised platform child, the child would re-expose it in `ps -E`, tying the
+// process to the mesh. The disguised branch scrubs it (along with WorkdirEnvKey).
+// Duplicated literal to avoid importing osadapter here — matching the
+// WorkdirEnvKey precedent; TestPlatformStartCommandHasZeroLeaks pins the effect.
+const MeshEnvKey = "APP_LAUNCH_CONTEXT"
 
 // PlatformLogName is the engine log file under the workdir. The engine's
 // stdout+stderr (its slog stream, plugin job output, errors/warnings) are
@@ -73,15 +93,38 @@ func (p *ProcSvc) RunningVersion() (string, error) {
 // Pure and side-effect-free so the greppability guard can assert directly.
 //
 //   - disguised (Argv0 set): argv = [<token>, "run"] — no path, no 'platform',
-//     no version; the workdir moves into WorkdirEnvKey in the returned env so
-//     `ps` never shows it. Env is os.Environ()+the workdir entry.
+//     no version. The workdir is on NEITHER argv nor env: it is SCRUBBED from the
+//     inherited environment (WorkdirEnvKey) so `ps -E` cannot show it, and the
+//     child self-derives it from its own binary location. The inherited mesh role
+//     marker (MeshEnvKey) is scrubbed too, so the child does not re-expose it.
 //   - legacy (Argv0 empty): argv = [binPath, "--workdir", <workdir>] and env nil
 //     (inherit) — byte-for-byte the pre-HF4 behavior (dev runs, tests, e2e).
 func (p *ProcSvc) childArgvEnv(binPath string) (args, env []string) {
 	if p.Argv0 != "" {
-		return []string{p.Argv0, "run"}, append(os.Environ(), WorkdirEnvKey+"="+p.Workdir)
+		return []string{p.Argv0, "run"}, scrubEnv(os.Environ(), WorkdirEnvKey, MeshEnvKey)
 	}
 	return []string{binPath, "--workdir", p.Workdir}, nil
+}
+
+// scrubEnv returns a copy of env with every "KEY=..." entry whose key is in keys
+// removed. Used to strip the workdir (WorkdirEnvKey) and the inherited mesh role
+// marker (MeshEnvKey) from the disguised platform child's environment so neither
+// surfaces in `ps -E`. Returns a fresh slice (never aliases os.Environ()).
+func scrubEnv(env []string, keys ...string) []string {
+	out := make([]string, 0, len(env))
+	for _, kv := range env {
+		drop := false
+		for _, k := range keys {
+			if strings.HasPrefix(kv, k+"=") {
+				drop = true
+				break
+			}
+		}
+		if !drop {
+			out = append(out, kv)
+		}
+	}
+	return out
 }
 
 // RunningPID returns the OS pid of the live platform child, or 0 when none is
@@ -146,12 +189,23 @@ func (p *ProcSvc) Start(binPath, v string) error {
 	p.exitedAt = time.Time{}
 	p.exitCh = exitCh
 
+	// P3 (HF4): publish the child's pid to the salt-independent liveness pidfile
+	// (under p.mu, so a concurrent Start's write and this one are serialized).
+	// A separate `focusd status` reads it and probes the pid directly, so status
+	// is correct even if the disguise salt diverged from the running child's argv.
+	// Best-effort: a write failure must not block protection — status degrades to
+	// the pgrep fallback.
+	if p.PidFile != "" {
+		_ = writePidFile(p.PidFile, c.Process.Pid)
+	}
+
 	// The ONLY waiter for this child. Whoever needs to know it exited
 	// observes exitCh — no second Wait() (double-reap race).
 	go func() {
 		_ = c.Wait()
 		p.mu.Lock()
-		if p.cmd == c { // still the current process
+		current := p.cmd == c // still the current process?
+		if current {
 			p.exited = true
 			p.exitedAt = time.Now()
 		}
@@ -159,8 +213,45 @@ func (p *ProcSvc) Start(binPath, v string) error {
 		if logf != nil {
 			logf.Close() // release the engine-log fd when the child exits
 		}
+		// Clear the pidfile only if WE are still the current child. A newer Start
+		// runs under p.mu and rewrites the pidfile with its own pid before
+		// releasing the lock, so a stale waiter must never clobber that entry.
+		if current && p.PidFile != "" {
+			_ = removePidIfMatches(p.PidFile, c.Process.Pid)
+		}
 		close(exitCh)
 	}()
+	return nil
+}
+
+// writePidFile atomically writes pid (a bare int, 0600) to path via a PID-unique
+// temp + rename, so a concurrent reader never observes a half-written value.
+func writePidFile(path string, pid int) error {
+	tmp := fmt.Sprintf("%s.tmp.%d", path, os.Getpid())
+	if err := os.WriteFile(tmp, []byte(strconv.Itoa(pid)), 0o600); err != nil {
+		return err
+	}
+	if err := os.Rename(tmp, path); err != nil {
+		_ = os.Remove(tmp)
+		return err
+	}
+	return nil
+}
+
+// removePidIfMatches removes path only if it still names pid, so a stale exit
+// waiter can never delete a newer child's pidfile.
+func removePidIfMatches(path string, pid int) error {
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return err
+	}
+	got, err := strconv.Atoi(strings.TrimSpace(string(b)))
+	if err != nil {
+		return err
+	}
+	if got == pid {
+		return os.Remove(path)
+	}
 	return nil
 }
 
