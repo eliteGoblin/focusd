@@ -64,9 +64,14 @@ type fakePlat struct {
 	// happened so a test can assert exact ordering (e.g. "v2 was tried,
 	// then rollback v1"). Always recorded; existing tests don't read it.
 	callLog []string
+	// pid is the value RunningPID reports — the survivor PID the FEATURE 25
+	// reap exempts. 0 (the default) means "no live platform to exempt", which
+	// makes the executor skip reaping entirely.
+	pid int
 }
 
 func (p *fakePlat) RunningVersion() (string, error) { return p.running, nil }
+func (p *fakePlat) RunningPID() int                 { return p.pid }
 func (p *fakePlat) Start(_, v string) error {
 	p.callLog = append(p.callLog, "start:"+v)
 	if err, ok := p.startErr[v]; ok {
@@ -673,5 +678,91 @@ func TestExecutorLockAcquireErrorPropagates(t *testing.T) {
 	}
 	if len(p.started) != 0 {
 		t.Fatalf("lock error ⇒ platform must not start, started=%v", p.started)
+	}
+}
+
+// --- FEATURE 25: continuous foreign-platform reap wiring ------------------
+
+// TestExecutorWinnerReapsForeign: the lock WINNER reaps foreign platforms on its
+// first winning tick (prompt) and then every reapEveryTicks (throttled), always
+// exempting its own live survivor PID.
+func TestExecutorWinnerReapsForeign(t *testing.T) {
+	e, st, _, p := newExec(t) // lock wins by default
+	if err := st.WriteDesired("v1"); err != nil {
+		t.Fatal(err)
+	}
+	p.pid = 4242 // the survivor PID the reap must exempt
+	var keepPIDs []int
+	e.ReapForeign = func(keepPID int) (int, error) {
+		keepPIDs = append(keepPIDs, keepPID)
+		return 0, nil
+	}
+	ctx := context.Background()
+
+	// Tick 1: acquire lock + start platform + reap (first winning tick).
+	if _, err := e.Tick(ctx); err != nil {
+		t.Fatalf("tick 1: %v", err)
+	}
+	if len(keepPIDs) != 1 || keepPIDs[0] != 4242 {
+		t.Fatalf("winner must reap on first tick exempting survivor PID, got %v", keepPIDs)
+	}
+	// Ticks 2..5: throttled — no further reap.
+	for i := 0; i < 4; i++ {
+		if _, err := e.Tick(ctx); err != nil {
+			t.Fatalf("throttle tick: %v", err)
+		}
+	}
+	if len(keepPIDs) != 1 {
+		t.Fatalf("reap must be throttled within reapEveryTicks, got %d calls", len(keepPIDs))
+	}
+	// Tick 6: reaps again.
+	if _, err := e.Tick(ctx); err != nil {
+		t.Fatalf("tick 6: %v", err)
+	}
+	if len(keepPIDs) != 2 {
+		t.Fatalf("reap must fire again after reapEveryTicks, got %d calls", len(keepPIDs))
+	}
+}
+
+// TestExecutorLoserNeverReaps: a standby (lock loser) yields and NEVER reaps, so
+// two daemons never fight over the process table.
+func TestExecutorLoserNeverReaps(t *testing.T) {
+	st := &Store{Dir: t.TempDir()}
+	if err := st.WriteDesired("v1"); err != nil {
+		t.Fatal(err)
+	}
+	p := &fakePlat{pid: 4242}
+	e := NewExecutor(st, &fakeFetch{}, p, &fakeLock{acquireOK: false}, nil)
+	called := 0
+	e.ReapForeign = func(int) (int, error) { called++; return 0, nil }
+	ctx := context.Background()
+	for i := 0; i < 10; i++ {
+		if _, err := e.Tick(ctx); err != nil {
+			t.Fatalf("tick: %v", err)
+		}
+	}
+	if called != 0 {
+		t.Fatalf("lock loser must never reap, got %d calls", called)
+	}
+}
+
+// TestExecutorSkipsReapWithoutSurvivor: without a live survivor PID to exempt,
+// the winner does NOT reap — it can never risk reaching zero platforms.
+func TestExecutorSkipsReapWithoutSurvivor(t *testing.T) {
+	e, st, _, p := newExec(t)
+	if err := st.WriteDesired("v1"); err != nil {
+		t.Fatal(err)
+	}
+	p.pid = 0 // no live platform to exempt
+	called := 0
+	e.ReapForeign = func(int) (int, error) { called++; return 0, nil }
+	ctx := context.Background()
+	for i := 0; i < 6; i++ {
+		if _, err := e.Tick(ctx); err != nil {
+			t.Fatalf("tick: %v", err)
+		}
+	}
+	if called != 0 {
+		t.Fatalf("reap must be skipped when survivor PID is unknown, got %d calls", called)
 	}
 }

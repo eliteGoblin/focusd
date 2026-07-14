@@ -91,6 +91,17 @@ type Executor struct {
 	// (reset to false) the moment a real desired version is present on disk
 	// again — so a later recurrence is logged afresh.
 	fallbackWarned bool
+	// ReapForeign, when set, SIGTERM→SIGKILLs any FOREIGN platform process (an
+	// orphan that reparented to launchd after a daemon death) EXCEPT the passed
+	// survivor PID. FEATURE 25: the daemon flock only ELECTS one platform, it
+	// never REAPS the extras a crash/self-update cycle leaves behind. Only the
+	// lock WINNER reaps (a loser yields and never fights over the process table),
+	// throttled to once per reapEveryTicks. Injected as a seam because the reaper
+	// is darwin/launchd-specific (osadapter) while core stays cross-platform and
+	// import-cycle-free. nil ⇒ no reap (tests, non-darwin, test-mode, non-mesh).
+	ReapForeign func(keepPID int) (int, error)
+	// reapTick counts ticks for the reap throttle (see reapEveryTicks).
+	reapTick int
 }
 
 // New builds an Executor.
@@ -191,7 +202,47 @@ func (e *Executor) Tick(ctx context.Context) (Action, error) {
 	if act.Kind == EnsureRunning || act.Kind == Rollback {
 		e.lastTarget = act.Target
 	}
-	return act, e.apply(ctx, act)
+	applyErr := e.apply(ctx, act)
+	// FEATURE 25: after acting, the lock WINNER continuously reaps orphaned
+	// platform processes so the "elect one, never reap the rest" hole can't let
+	// extras accrete across crash/self-update cycles.
+	e.maybeReapForeign()
+	return act, applyErr
+}
+
+// reapEveryTicks throttles the continuous foreign-platform reap so the winner
+// scans the process table roughly once per this many reconcile ticks rather than
+// every tick. At the ~2s worker cadence this is ~10s.
+const reapEveryTicks = 5
+
+// maybeReapForeign reaps orphaned platform processes when this executor is the
+// lock WINNER and has a live platform to exempt. Structurally incapable of
+// reaching zero platforms: it only runs when a survivor PID is known, always
+// exempts it, and the daemon keeps + restarts that survivor. A standby (lock
+// loser) never reaps, so two daemons never fight over the process table.
+func (e *Executor) maybeReapForeign() {
+	if e.ReapForeign == nil || !e.holdsLock {
+		return
+	}
+	e.reapTick++
+	// Reap on the first winning tick, then every reapEveryTicks after — prompt
+	// on startup, throttled thereafter.
+	if (e.reapTick-1)%reapEveryTicks != 0 {
+		return
+	}
+	pl, ok := e.Plat.(interface{ RunningPID() int })
+	if !ok {
+		return // platform impl can't report a PID → cannot exempt → do not reap
+	}
+	keepPID := pl.RunningPID()
+	if keepPID <= 0 {
+		return // no live survivor to exempt → never risk reaping the last one
+	}
+	if n, err := e.ReapForeign(keepPID); err != nil {
+		e.logf("reap foreign platforms failed (best-effort)")
+	} else if n > 0 {
+		e.logf("reaped %d foreign platform process(es)", n)
+	}
 }
 
 func (e *Executor) apply(ctx context.Context, a Action) error {

@@ -84,6 +84,18 @@ func (p *ProcSvc) childArgvEnv(binPath string) (args, env []string) {
 	return []string{binPath, "--workdir", p.Workdir}, nil
 }
 
+// RunningPID returns the OS pid of the live platform child, or 0 when none is
+// running. FEATURE 25: the reconcile-loop winner exempts THIS pid when it reaps
+// foreign platform processes, so it can never kill its own survivor.
+func (p *ProcSvc) RunningPID() int {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.cmd == nil || p.exited || p.cmd.Process == nil {
+		return 0
+	}
+	return p.cmd.Process.Pid
+}
+
 // Start launches binPath as the platform for version v.
 func (p *ProcSvc) Start(binPath, v string) error {
 	p.mu.Lock()

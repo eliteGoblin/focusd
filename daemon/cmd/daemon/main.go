@@ -426,6 +426,21 @@ func build(o opts) (*core.Executor, *slog.Logger) {
 	// FEATURE 17 Item 2: elect one platform across path-rotating generations
 	// via a fixed, mode-keyed lock path (test mode stays per-workdir).
 	e.LockFilePath = singletonLockPath(o.modeVal(), o.workdir)
+	// FEATURE 25 (Element 3): only a REAL installed mesh worker reaps orphaned
+	// platform processes. Gated OFF for test mode (the reaper anchors on
+	// mode.Resolve()'s SupportRoot, which for a HOME-overridden e2e sandbox is
+	// safe, but there is no launchd-reparent orphan class to chase there) and for
+	// non-mesh foreground runs (dev/e2e `daemon run`), so a stray foreground
+	// daemon never scans/kills real user platforms. On non-darwin
+	// osadapter.ReapForeignPlatforms is a no-op stub.
+	//
+	// HF4 (FEATURE 24) reconciliation: the reaper is NAMING-AGNOSTIC — it
+	// classifies orphans by Ed25519 signature verification of the executable
+	// under this mode's SupportRoot (not by the platform basename), so HF4's
+	// disguised basename needs no coupling here.
+	if o.mesh && o.modeVal() != mode.Test {
+		e.ReapForeign = osadapter.ReapForeignPlatforms
+	}
 	return e, log
 }
 
@@ -797,42 +812,28 @@ func installMesh(self string, spec *osadapter.Spec, desired string) error {
 	if err := osadapter.Install(*spec); err != nil {
 		return fmt.Errorf("install mesh: %w", err)
 	}
-	// FEATURE 17 Item 3: the new generation is up FIRST (above); now retire any
-	// OLDER generations left behind by a wiped-state reinstall (distinct
-	// Ed25519-verified binary path ≠ the one we just installed). Best-effort —
-	// a retire failure must NOT fail an otherwise-successful install, and the
-	// retired labels/paths are never surfaced (count is logged at the call
-	// site if at all). Idempotent: with no older generation present it is a
-	// no-op. NOT called from the self-update path (in-place rotation transiently
-	// looks like two generations).
-	if n, rerr := osadapter.RetireOtherGenerations(spec.Mode, spec.SelfPath, supportRoot); rerr != nil {
-		// Generic message only: rerr could embed a disguised path.
-		fmt.Fprintln(os.Stderr, "install: retire prior generations (best-effort) failed")
-	} else if n > 0 {
-		fmt.Printf("retired %d prior generation(s)\n", n)
-	}
-	// FEATURE 17 follow-up (TC-21): retirement only catches generations still
-	// visible to a plist scan. A teardown/recovery/re-install cycle can also
-	// leave ORPHANED generation workdirs on disk — hidden-dot dirs with a stale
-	// state.db but NO plist/process backing them — invisible to retirement.
-	// Sweep them now (keep = the new install's workdir = Dir(relocated binary))
-	// so exactly ONE state.db survives and status reads a single source. Best-
-	// effort: a sweep failure must NOT fail an otherwise-successful install, and
-	// the swept paths are never surfaced.
-	if n, serr := osadapter.SweepOrphanWorkdirs(supportRoot, daemonHome); serr != nil {
-		fmt.Fprintln(os.Stderr, "install: sweep orphan workdirs (best-effort) failed")
-	} else if n > 0 {
-		fmt.Printf("swept %d orphan workdir(s)\n", n)
-	}
-	// FEATURE 21 (HF1): the daemon-home sweep above leaves platform-workdirs
-	// alone (they carry the platform sentinel). Sweep any STALE platform-workdir
-	// left by a prior generation — every sentinel-marked hidden dir under the
-	// support root except the one this install's pointer references. Best-effort;
-	// the swept paths are never surfaced.
-	if n, serr := osadapter.SweepStalePlatformWorkdirs(supportRoot, platformWorkdir); serr != nil {
-		fmt.Fprintln(os.Stderr, "install: sweep stale platform-workdirs (best-effort) failed")
-	} else if n > 0 {
-		fmt.Printf("swept %d stale platform-workdir(s)\n", n)
+	// FEATURE 25: the new generation is up FIRST (above); now CONVERGE to exactly
+	// one daemon + one platform across BOTH domains. This supersedes the FEATURE
+	// 17/21 mode-scoped retire + sweep calls (which only ever touched spec.Mode,
+	// so a sudo install never retired the user generations and vice-versa).
+	// ConvergeSingleInstance retires every OTHER generation in the user AND system
+	// domains, kills each retired generation's platform, reaps orphaned platform
+	// processes, and sweeps stale daemon-home + platform-workdirs. Best-effort: a
+	// convergence failure must NEVER fail an otherwise-successful install, and the
+	// retired/reaped labels/paths are never surfaced (counts only). The survivor
+	// platform is not running yet (the first tick starts it), so keepPlatformPID
+	// is 0 — the survivor is exempted by its (path) binary instead.
+	keepPlatformBin := (&core.Store{Dir: daemonHome, PlatformDir: platformWorkdir}).BinPath(desired)
+	if retired, reaped, cerr := osadapter.ConvergeSingleInstance(spec.Mode, spec.SelfPath, keepPlatformBin, 0); cerr != nil {
+		// Generic message only: cerr could embed a disguised path.
+		fmt.Fprintln(os.Stderr, "install: converge single-instance (best-effort) failed")
+	} else {
+		if retired > 0 {
+			fmt.Printf("retired %d prior generation(s)\n", retired)
+		}
+		if reaped > 0 {
+			fmt.Printf("reaped %d orphan platform process(es)\n", reaped)
+		}
 	}
 	return nil
 }
