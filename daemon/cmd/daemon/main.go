@@ -793,7 +793,7 @@ func installMesh(self string, spec *osadapter.Spec, desired string) error {
 	// site if at all). Idempotent: with no older generation present it is a
 	// no-op. NOT called from the self-update path (in-place rotation transiently
 	// looks like two generations).
-	if n, rerr := osadapter.RetireOtherGenerations(spec.Mode, spec.SelfPath); rerr != nil {
+	if n, rerr := osadapter.RetireOtherGenerations(spec.Mode, spec.SelfPath, supportRoot); rerr != nil {
 		// Generic message only: rerr could embed a disguised path.
 		fmt.Fprintln(os.Stderr, "install: retire prior generations (best-effort) failed")
 	} else if n > 0 {
@@ -807,7 +807,7 @@ func installMesh(self string, spec *osadapter.Spec, desired string) error {
 	// so exactly ONE state.db survives and status reads a single source. Best-
 	// effort: a sweep failure must NOT fail an otherwise-successful install, and
 	// the swept paths are never surfaced.
-	if n, serr := osadapter.SweepOrphanWorkdirs(spec.Mode, daemonHome); serr != nil {
+	if n, serr := osadapter.SweepOrphanWorkdirs(supportRoot, daemonHome); serr != nil {
 		fmt.Fprintln(os.Stderr, "install: sweep orphan workdirs (best-effort) failed")
 	} else if n > 0 {
 		fmt.Printf("swept %d orphan workdir(s)\n", n)

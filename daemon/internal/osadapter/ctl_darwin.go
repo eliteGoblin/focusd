@@ -499,7 +499,15 @@ func DiscoverAllGenerations(m mode.Mode, verify Verifier) (live []Generation, de
 // and orphan platform/daemon processes persist invisibly otherwise (the old
 // "retired 1 while ≥2 live generations remain" bug). pkill -f against the
 // dangling binary path matches the orphans' argv and reaps them.
-func RetireOtherGenerations(m mode.Mode, keepBinaryPath string) (int, error) {
+//
+// supportRoot is the containment root for the os.RemoveAll blast radius: a
+// workdir is only deleted when it is strictly nested under it (safeToRemoveWorkdir).
+// It is an EXPLICIT param — NOT recomputed from mode.SupportRoot(m, home) — so a
+// test-mode install (whose SupportRoot(Test, …) would otherwise resolve to the
+// REAL ~/Library/Application Support and let a sandbox install delete real
+// generation workdirs) passes its sandbox root and can never escape it. The
+// caller (installMesh) passes the same sandboxed local it hands the platform sweep.
+func RetireOtherGenerations(m mode.Mode, keepBinaryPath, supportRoot string) (int, error) {
 	// Refuse to retire ANYTHING without a surviving generation to keep: an
 	// empty keepBinaryPath would make every discovered generation "other" and
 	// tear the whole mesh down (the bootout + os.RemoveAll blast radius). A
@@ -511,10 +519,8 @@ func RetireOtherGenerations(m mode.Mode, keepBinaryPath string) (int, error) {
 	if err != nil {
 		return 0, err
 	}
-	home, _ := os.UserHomeDir()
-	root := mode.SupportRoot(m, home)
 	c := launchctlCtl{m: m}
-	return retireGenerations(gens, dead, keepBinaryPath, root,
+	return retireGenerations(gens, dead, keepBinaryPath, supportRoot,
 		c.bootout, os.Remove, pkillBinary, os.RemoveAll), nil
 }
 
@@ -547,10 +553,16 @@ const stateDBFile = "state.db"
 // so far with the error for optional logging.
 //
 // keepWorkdir is the new install's workdir (Dir of the relocated binary).
-func SweepOrphanWorkdirs(m mode.Mode, keepWorkdir string) (removed int, err error) {
-	home, _ := os.UserHomeDir()
-	root := mode.SupportRoot(m, home)
-	entries, rerr := os.ReadDir(root)
+//
+// supportRoot is the scan root AND the containment root for os.RemoveAll — an
+// EXPLICIT param (mirroring SweepStalePlatformWorkdirs), NOT recomputed from
+// mode.SupportRoot(m, home). That recompute was the storage-separation defect:
+// SupportRoot(Test, …) resolves to the REAL ~/Library/Application Support, so a
+// test-mode install would scan and delete REAL generation workdirs. The caller
+// (installMesh) passes the sandboxed local it already computed, so a test-mode
+// sweep is confined to the sandbox.
+func SweepOrphanWorkdirs(supportRoot, keepWorkdir string) (removed int, err error) {
+	entries, rerr := os.ReadDir(supportRoot)
 	if rerr != nil {
 		if os.IsNotExist(rerr) {
 			return 0, nil
@@ -562,7 +574,7 @@ func SweepOrphanWorkdirs(m mode.Mode, keepWorkdir string) (removed int, err erro
 		if !e.IsDir() || !strings.HasPrefix(e.Name(), ".") {
 			continue // only hidden-dot directories are generation workdirs
 		}
-		dir := filepath.Join(root, e.Name())
+		dir := filepath.Join(supportRoot, e.Name())
 		if filepath.Clean(dir) == keep {
 			continue // the surviving generation — never sweep it
 		}
@@ -584,7 +596,7 @@ func SweepOrphanWorkdirs(m mode.Mode, keepWorkdir string) (removed int, err erro
 		// GUARD: only RemoveAll a dir strictly under the support root that is
 		// neither the keep nor an ancestor of it (the same belt the generation
 		// retirement uses). Best-effort: a remove failure is skipped, not fatal.
-		if safeToRemoveWorkdir(dir, root, keepWorkdir) {
+		if safeToRemoveWorkdir(dir, supportRoot, keepWorkdir) {
 			if rmErr := os.RemoveAll(dir); rmErr == nil {
 				removed++
 			}

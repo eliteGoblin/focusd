@@ -49,7 +49,7 @@ func TestSweepOrphanWorkdirsRemovesOrphanKeepsKeep(t *testing.T) {
 	keep := mkWorkdir(t, root, ".keep.gen", true)
 	orphan := mkWorkdir(t, root, ".orphan.gen", true)
 
-	removed, err := SweepOrphanWorkdirs(mode.User, keep)
+	removed, err := SweepOrphanWorkdirs(root, keep)
 	if err != nil {
 		t.Fatalf("SweepOrphanWorkdirs: unexpected error %v", err)
 	}
@@ -76,7 +76,7 @@ func TestSweepOrphanWorkdirsSkipsNonSignatureDirs(t *testing.T) {
 	plainApp := mkWorkdir(t, root, "SomeVendorApp", true)   // state.db but not hidden-dot
 	orphan := mkWorkdir(t, root, ".orphan.gen", true)
 
-	removed, err := SweepOrphanWorkdirs(mode.User, keep)
+	removed, err := SweepOrphanWorkdirs(root, keep)
 	if err != nil {
 		t.Fatalf("SweepOrphanWorkdirs: unexpected error %v", err)
 	}
@@ -100,7 +100,8 @@ func TestSweepOrphanWorkdirsNoSupportRoot(t *testing.T) {
 	t.Setenv("HOME", home)
 	// Do NOT create ~/Library/Application Support.
 
-	removed, err := SweepOrphanWorkdirs(mode.User, filepath.Join(mode.SupportRoot(mode.User, home), ".keep"))
+	root := mode.SupportRoot(mode.User, home)
+	removed, err := SweepOrphanWorkdirs(root, filepath.Join(root, ".keep"))
 	if err != nil {
 		t.Fatalf("missing support root should be (0,nil), got err %v", err)
 	}
@@ -123,7 +124,7 @@ func TestSweepOrphanWorkdirsGateAllowsNestedOrphan(t *testing.T) {
 	// not the keep, not an ancestor → safeToRemoveWorkdir permits removal.
 	keep := filepath.Join(root, ".keep.gen")
 
-	removed, err := SweepOrphanWorkdirs(mode.User, keep)
+	removed, err := SweepOrphanWorkdirs(root, keep)
 	if err != nil {
 		t.Fatalf("unexpected error %v", err)
 	}
@@ -132,6 +133,56 @@ func TestSweepOrphanWorkdirsGateAllowsNestedOrphan(t *testing.T) {
 	}
 	if _, err := os.Stat(orphan); !os.IsNotExist(err) {
 		t.Fatalf("nested orphan should be removed, stat err = %v", err)
+	}
+}
+
+// TestSweepOrphanWorkdirsTestModeCannotDeleteRealDir is the HF1 CRITICAL
+// storage-separation regression. BEFORE the fix, SweepOrphanWorkdirs recomputed
+// its scan root as mode.SupportRoot(m, home) — and mode.SupportRoot(mode.Test, …)
+// resolves to the REAL ~/Library/Application Support (mode.go only special-cases
+// System). So a `daemon install --test-mode` swept and DELETED real-install
+// generation workdirs under the operator's actual HOME. The scan root is now an
+// EXPLICIT param the caller (installMesh) fills with its sandbox local, so a
+// test-mode sweep can never even SEE the real tree.
+//
+// The test plants a decoy "real install" generation-workdir (hidden-dot +
+// state.db) under mode.SupportRoot(mode.Test, HOME) — the exact directory the old
+// bug scanned — and runs the sweep scoped to a SEPARATE sandbox root. The decoy
+// must SURVIVE; only the sandbox orphan is swept.
+func TestSweepOrphanWorkdirsTestModeCannotDeleteRealDir(t *testing.T) {
+	// HOME points at a decoy tree. mode.SupportRoot(mode.Test, HOME) resolves
+	// HERE — the real-install location the pre-fix sweep would have scanned.
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	realRoot := mode.SupportRoot(mode.Test, home)
+	if err := os.MkdirAll(realRoot, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	realGen := mkWorkdir(t, realRoot, ".real.install.gen", true) // decoy real generation-workdir
+
+	// The test-mode install lives in a SEPARATE sandbox root (spec.Workdir),
+	// with its own daemon-home + a genuine orphan generation-workdir.
+	sandbox := t.TempDir()
+	sandboxDaemonHome := mkWorkdir(t, sandbox, ".daemon-home", false)
+	sandboxOrphan := mkWorkdir(t, sandbox, ".sandbox.orphan.gen", true)
+
+	// installMesh now passes its sandboxed supportRoot local — NOT mode.SupportRoot.
+	removed, err := SweepOrphanWorkdirs(sandbox, sandboxDaemonHome)
+	if err != nil {
+		t.Fatalf("SweepOrphanWorkdirs: %v", err)
+	}
+
+	// THE REGRESSION ASSERTION: the decoy real-install workdir must SURVIVE.
+	if _, serr := os.Stat(realGen); serr != nil {
+		t.Fatalf("REGRESSION: real-install generation workdir under %q was deleted by a "+
+			"test-mode sweep (stat err = %v)", realRoot, serr)
+	}
+	// The sandbox orphan is the only thing swept.
+	if _, serr := os.Stat(sandboxOrphan); !os.IsNotExist(serr) {
+		t.Fatalf("sandbox orphan should be swept, stat err = %v", serr)
+	}
+	if removed != 1 {
+		t.Fatalf("removed = %d, want 1 (only the sandbox orphan)", removed)
 	}
 }
 

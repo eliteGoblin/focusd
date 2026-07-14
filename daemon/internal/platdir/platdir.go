@@ -128,6 +128,15 @@ func SafeTarget(target, supportRoot, daemonHome string) bool {
 			r != ".." && !strings.HasPrefix(r, ".."+string(filepath.Separator)) {
 			return false
 		}
+		// Reject the reverse nesting too: daemon-home being an ancestor of the
+		// target (target strictly INSIDE daemon-home). A platform-workdir nested
+		// under daemon-home re-couples their lifetimes — the very shared-fate
+		// defect this feature closes — so the disposable engine storage must live
+		// as a SIBLING under the support root, never a child of daemon-home.
+		if r, rerr := filepath.Rel(home, target); rerr == nil &&
+			r != ".." && !strings.HasPrefix(r, ".."+string(filepath.Separator)) {
+			return false
+		}
 	}
 	return true
 }
@@ -155,10 +164,27 @@ func Create(supportRoot string) (string, error) {
 // created under supportRoot and the pointer is rewritten to it — this is the
 // reliable re-establishment, and it relies on nothing left inside the deleted
 // folder.
+//
+// The guard is TWO-LAYERED against a symlinked target. SafeTarget is a purely
+// LEXICAL pre-check: it treats the pointer string as text and so cannot see a
+// symlink whose text is under supportRoot but whose real target escapes (e.g.
+// <root>/pwd -> /outside, or -> daemonHome). We therefore also EvalSymlinks the
+// target and re-run containment on the RESOLVED path (target-vs-root and
+// target-vs-daemonHome) — mirroring osadapter.safeToRemoveWorkdir, so a caller
+// that later os.RemoveAll's this workdir cannot be sent outside the root. A
+// target that fails either layer is discarded and a fresh workdir is created.
+//
+// ACCEPTED TOCTOU: the resolved-containment check races the caller's later use
+// of the path — an attacker with write access to the pointer's parent could
+// swap the symlink after this returns. In practice daemonHome is a hidden,
+// 0700 dir owned by the daemon; an adversary with write access there already
+// owns the install. The re-check closes the realistic accidental/relative-link
+// case; the residual race is out of this feature's threat model.
 func Resolve(daemonHome, supportRoot string) (string, error) {
 	if target := Read(daemonHome); target != "" &&
 		SafeTarget(target, supportRoot, daemonHome) {
-		if fi, err := os.Stat(target); err == nil && fi.IsDir() {
+		if fi, err := os.Stat(target); err == nil && fi.IsDir() &&
+			resolvedTargetContained(target, supportRoot, daemonHome) {
 			return target, nil // healthy pointer → keep the existing platform-workdir
 		}
 	}
@@ -170,4 +196,32 @@ func Resolve(daemonHome, supportRoot string) (string, error) {
 		return "", err
 	}
 	return fresh, nil
+}
+
+// resolvedTargetContained re-runs SafeTarget's containment on the SYMLINK-
+// RESOLVED target (and, when it exists, the resolved supportRoot / daemonHome)
+// so a symlinked pointer target that is lexically-safe but really escapes the
+// support root — or points at daemonHome — is rejected. It mirrors the
+// EvalSymlinks discipline in osadapter.safeToRemoveWorkdir. EvalSymlinks failure
+// (a target we cannot stat through) → not contained → discard the pointer.
+func resolvedTargetContained(target, supportRoot, daemonHome string) bool {
+	rtarget, err := filepath.EvalSymlinks(target)
+	if err != nil {
+		return false
+	}
+	// Resolve the root/home too so the comparison is real-path vs real-path.
+	// Best-effort: an unresolvable root/home falls back to its cleaned form
+	// (SafeTarget already proved the lexical relationship), so this only ever
+	// ADDS the symlink-escape rejection, never loosens the earlier check.
+	rroot := supportRoot
+	if r, rerr := filepath.EvalSymlinks(supportRoot); rerr == nil {
+		rroot = r
+	}
+	rhome := daemonHome
+	if daemonHome != "" {
+		if h, herr := filepath.EvalSymlinks(daemonHome); herr == nil {
+			rhome = h
+		}
+	}
+	return SafeTarget(rtarget, rroot, rhome)
 }

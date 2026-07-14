@@ -21,10 +21,12 @@ func TestSafeTargetRejectsBadTargets(t *testing.T) {
 		{"outside support root", "/other/pw", false},
 		{"support root itself", "/s", false},
 		{"escape via ..", "/s/../pw", false},
-		{"ancestor of daemon-home", "/s/a", false},      // wiping this would take dh
-		{"daemon-home itself", "/s/a/dh", false},        // never place platform ON dh
-		{"valid sibling under root", "/s/a/pw", true},   // strictly under, not an ancestor
-		{"valid nested elsewhere", "/s/other/pw", true}, // strictly under, unrelated to dh
+		{"ancestor of daemon-home", "/s/a", false},          // wiping this would take dh
+		{"daemon-home itself", "/s/a/dh", false},            // never place platform ON dh
+		{"nested inside daemon-home", "/s/a/dh/pw", false},  // reverse nesting re-couples lifetimes
+		{"deeper inside daemon-home", "/s/a/dh/x/y", false}, // still under dh → rejected
+		{"valid sibling under root", "/s/a/pw", true},       // strictly under, not an ancestor
+		{"valid nested elsewhere", "/s/other/pw", true},     // strictly under, unrelated to dh
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -150,6 +152,77 @@ func TestResolveRecreatesWhenTargetUnsafe(t *testing.T) {
 	}
 	if !SafeTarget(pw, root, daemonHome) {
 		t.Fatal("the recreated target must pass the containment guard")
+	}
+}
+
+// TestResolveRejectsSymlinkEscape is the HF1 HIGH regression: a pointer target
+// that is a SYMLINK whose text is lexically under the support root but whose real
+// destination ESCAPES it. SafeTarget is lexical (+ os.Stat follows the link, so it
+// sees a valid dir), so only the EvalSymlinks re-check in Resolve can catch this.
+// Resolve must refuse the escaping symlink and recreate a fresh, real workdir.
+func TestResolveRejectsSymlinkEscape(t *testing.T) {
+	root := t.TempDir()
+	outside := t.TempDir() // a REAL directory OUTSIDE the support root
+	daemonHome := filepath.Join(root, "daemon-home")
+	if err := os.MkdirAll(daemonHome, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(root, ".escape-link")
+	if err := os.Symlink(outside, link); err != nil {
+		t.Fatal(err)
+	}
+	if err := Write(daemonHome, link); err != nil {
+		t.Fatal(err)
+	}
+
+	pw, err := Resolve(daemonHome, root)
+	if err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+	if filepath.Clean(pw) == filepath.Clean(link) {
+		t.Fatal("a symlink whose real target escapes the support root must NOT be trusted")
+	}
+	// The recreated workdir resolves strictly under the support root.
+	rpw, _ := filepath.EvalSymlinks(pw)
+	rout, _ := filepath.EvalSymlinks(outside)
+	if rpw == rout {
+		t.Fatal("Resolve must recreate a fresh workdir, never the escaping target")
+	}
+	if fi, serr := os.Stat(pw); serr != nil || !fi.IsDir() {
+		t.Fatalf("fresh platform-workdir not created: %v", serr)
+	}
+}
+
+// TestResolveRejectsSymlinkToDaemonHome is the HF1 HIGH regression's second face:
+// a pointer that is a symlink resolving to the DAEMON-HOME itself. Trusting it
+// would re-couple the platform-workdir and daemon-home lifetimes (a platform wipe
+// would take the daemon down). The EvalSymlinks re-check must reject it and
+// recreate a separate workdir.
+func TestResolveRejectsSymlinkToDaemonHome(t *testing.T) {
+	root := t.TempDir()
+	daemonHome := filepath.Join(root, "daemon-home")
+	if err := os.MkdirAll(daemonHome, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(root, ".dh-link")
+	if err := os.Symlink(daemonHome, link); err != nil {
+		t.Fatal(err)
+	}
+	if err := Write(daemonHome, link); err != nil {
+		t.Fatal(err)
+	}
+
+	pw, err := Resolve(daemonHome, root)
+	if err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+	rpw, _ := filepath.EvalSymlinks(pw)
+	rdh, _ := filepath.EvalSymlinks(daemonHome)
+	if rpw == rdh {
+		t.Fatal("a symlink resolving to daemon-home must NOT be trusted (shared-fate defect)")
+	}
+	if fi, serr := os.Stat(pw); serr != nil || !fi.IsDir() {
+		t.Fatalf("fresh platform-workdir not created: %v", serr)
 	}
 }
 
