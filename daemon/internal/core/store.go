@@ -244,6 +244,18 @@ func (s *Store) MarkBad(v string) error {
 	return atomicWrite(filepath.Join(s.badDir(), safe(v)), []byte(v))
 }
 
+// ClearBad removes v's crash-looped marker, if present. Idempotent — a
+// missing marker is not an error. This is the tamper-recovery primitive:
+// once a genuine, signature-verified binary for v is back on disk, any prior
+// "bad" verdict was about the TAMPERED bytes that have now been reverted, so
+// v must become runnable again WITHOUT requiring a daemon process restart.
+func (s *Store) ClearBad(v string) error {
+	if err := os.Remove(filepath.Join(s.badDir(), safe(v))); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	return nil
+}
+
 // BadSet returns the exact versions marked bad (read from file
 // content, so lookups by the original version string always match).
 func (s *Store) BadSet() map[string]bool {

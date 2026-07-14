@@ -292,3 +292,23 @@ func (p *ProcSvc) HealthyFor(v string) bool {
 	return !p.exited && p.cmd != nil && p.version == v &&
 		time.Since(p.startedAt) > p.Healthy
 }
+
+// ClearExit forgets a DEAD child's exit record so a stale fast-exit is not
+// re-counted as a crash by the daemon's crash-loop detector. It is a no-op
+// while a child is live (exited == false) — it can never disturb a running
+// platform. The daemon calls this from its tamper-recovery path so reverting
+// an in-place fake binary does not leave the just-replaced version wrongly
+// suspected of crash-looping (the wedge stays recoverable without a daemon
+// process restart). A subsequent Start re-establishes liveness/version truth.
+func (p *ProcSvc) ClearExit() {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if !p.exited {
+		return
+	}
+	p.cmd = nil
+	p.version = ""
+	p.exited = false
+	p.exitedAt = time.Time{}
+	p.startedAt = time.Time{}
+}

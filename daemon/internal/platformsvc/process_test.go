@@ -213,3 +213,60 @@ func TestStartWritesAndClearsPidFile(t *testing.T) {
 		t.Fatal("exit waiter must remove the pidfile")
 	}
 }
+
+// TestClearExitForgetsDeadChildCrash proves ClearExit resets the crash-loop
+// latch: a fast-exiting child leaves CrashedQuickly(v)==true, and after
+// ClearExit the daemon no longer sees a crash to re-count (nor a live child).
+// This is the FIX 1 defense-in-depth seam — reverting an in-place tamper must
+// not leave the just-replaced version wrongly suspected of crash-looping.
+func TestClearExitForgetsDeadChildCrash(t *testing.T) {
+	wd := t.TempDir()
+	script := filepath.Join(wd, "fast-exit")
+	if err := os.WriteFile(script, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	p := New(wd)
+	p.Unhealthy = 3 * time.Second // exit sooner than this ⇒ "crashed quickly"
+	if err := p.Start(script, "v1"); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	select {
+	case <-p.exitCh:
+	case <-time.After(3 * time.Second):
+		t.Fatal("fast-exit child did not exit in time")
+	}
+	if !p.CrashedQuickly("v1") {
+		t.Fatal("pre-condition: a fast-exiting child must read as CrashedQuickly")
+	}
+
+	p.ClearExit()
+
+	if p.CrashedQuickly("v1") {
+		t.Fatal("ClearExit must clear the crash latch: CrashedQuickly still true")
+	}
+	if v, _ := p.RunningVersion(); v != "" {
+		t.Fatalf("ClearExit must not claim a live child, RunningVersion=%q", v)
+	}
+}
+
+// TestClearExitNoopWhileLive proves ClearExit never disturbs a RUNNING child:
+// while a child is alive it is a no-op, so it can never be used to blind the
+// daemon to a live platform.
+func TestClearExitNoopWhileLive(t *testing.T) {
+	wd := t.TempDir()
+	script := filepath.Join(wd, "long-lived")
+	if err := os.WriteFile(script, []byte("#!/bin/sh\nsleep 5\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	p := New(wd)
+	if err := p.Start(script, "v1"); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	defer p.Stop()
+
+	p.ClearExit() // no-op: child is live
+
+	if v, _ := p.RunningVersion(); v != "v1" {
+		t.Fatalf("ClearExit must not disturb a live child, RunningVersion=%q", v)
+	}
+}

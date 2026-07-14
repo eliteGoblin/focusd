@@ -59,6 +59,7 @@ func TestUpgradePath_ExecutorReapsOrphan_NoDuplicate(t *testing.T) {
 	}
 	p := &runningPlat{pid: survivorPID} // running == "" initially → first tick EnsureRunning
 	e := core.NewExecutor(st, noopFetch{}, p, core.NewFileLock(), nil)
+	e.VerifyBin = func(string) (bool, error) { return true, nil } // noopFetch writes no real binary
 	e.LockFilePath = filepath.Join(root, "singleton.lock")
 	e.ReapForeign = func(keepPID int) (int, error) {
 		return reapForeignPlatforms(root, keepPID, "", listPlatformProcs, resolvePlatformExecs, signedVerify(), killProc)

@@ -92,6 +92,248 @@ func (p *fakePlat) Stop() error {
 func (p *fakePlat) CrashedQuickly(v string) bool { return v == p.crashV }
 func (p *fakePlat) HealthyFor(v string) bool     { return v == p.healthyV }
 
+// --- FIX 1 fakes: content-addressed genuine-vs-tampered binary ---
+//
+// The daemon's real fetcher Ed25519-verifies a release before placing it and
+// the real VerifyBin is sig.VerifyFile. Here a known-good byte marker stands
+// in for "genuine": genuineFetch always lays down the marker (a verified
+// install), and contentVerify declares a binary genuine iff its bytes are
+// exactly the marker — so a fake or empty (in-place-tampered) binary fails,
+// exactly as a real signature check would.
+const genuineBin = "GENUINE-PLATFORM-BINARY"
+
+type genuineFetch struct{ calls int }
+
+func (genuineFetch) ResolveLatest(context.Context) (string, error) { return "", nil }
+func (g *genuineFetch) EnsureBinary(_ context.Context, st *Store, v string) error {
+	g.calls++
+	p := st.BinPath(v)
+	if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+		return err
+	}
+	return os.WriteFile(p, []byte(genuineBin), 0o755)
+}
+
+func contentVerify(path string) (bool, error) {
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return false, err
+	}
+	return string(b) == genuineBin, nil
+}
+
+// capturePlat records the on-disk CONTENT of the binary at the instant of each
+// Start, so a test can prove the GENUINE bytes were exec'd and the fake never.
+type capturePlat struct {
+	running     string
+	startedWith []string
+}
+
+func (p *capturePlat) RunningVersion() (string, error) { return p.running, nil }
+func (p *capturePlat) Start(binPath, v string) error {
+	b, _ := os.ReadFile(binPath)
+	p.startedWith = append(p.startedWith, string(b))
+	p.running = v
+	return nil
+}
+func (p *capturePlat) Stop() error                { p.running = ""; return nil }
+func (p *capturePlat) CrashedQuickly(string) bool { return false }
+func (p *capturePlat) HealthyFor(string) bool     { return false }
+
+func mustReadFile(t *testing.T, path string) string {
+	t.Helper()
+	b, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read %s: %v", path, err)
+	}
+	return string(b)
+}
+
+// TestExecutorRevertsInPlaceTamperedBinaryBeforeExec is the FIX 1 must-hold:
+// an in-place-tampered platform binary (fake script OR empty file, path kept)
+// is REVERTED to the genuine signed release and the fake NEVER runs. This
+// closes the confirmed gap — HaveBin was a bare os.Stat, so a tampered binary
+// was exec'd unverified; now the on-disk binary is signature-re-verified
+// before every start and a mismatch is dropped + re-fetched (verify-before-exec).
+func TestExecutorRevertsInPlaceTamperedBinaryBeforeExec(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		tamper func(path string) error
+	}{
+		{"fake-script", func(p string) error { return os.WriteFile(p, []byte("#!/bin/sh\necho pwned\nexit 0\n"), 0o755) }},
+		{"empty", func(p string) error { return os.WriteFile(p, nil, 0o755) }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			st := &Store{Dir: t.TempDir()}
+			if err := st.WriteDesired("v1"); err != nil {
+				t.Fatal(err)
+			}
+			f := &genuineFetch{}
+			p := &capturePlat{}
+			e := NewExecutor(st, f, p, &fakeLock{acquireOK: true}, nil)
+			e.VerifyBin = contentVerify // stand-in for sig.VerifyFile
+
+			// Tick 1: bring v1 up from nothing — one fetch + start the genuine binary.
+			if _, err := e.Tick(context.Background()); err != nil {
+				t.Fatalf("tick 1: %v", err)
+			}
+			if p.running != "v1" || f.calls != 1 {
+				t.Fatalf("v1 must start via exactly one fetch: running=%q calls=%d", p.running, f.calls)
+			}
+			if got := mustReadFile(t, st.BinPath("v1")); got != genuineBin {
+				t.Fatalf("on-disk binary must be genuine after install, got %q", got)
+			}
+
+			// TAMPER in place: swap the bytes, keep the path; child dies.
+			if err := tc.tamper(st.BinPath("v1")); err != nil {
+				t.Fatal(err)
+			}
+			p.running = ""
+			if mustReadFile(t, st.BinPath("v1")) == genuineBin {
+				t.Fatal("pre-condition: tamper must have changed the on-disk bytes")
+			}
+
+			// Tick 2: the tampered binary must be REVERTED (re-fetched + verified)
+			// and the GENUINE binary started — the fake is never exec'd.
+			a, err := e.Tick(context.Background())
+			if err != nil {
+				t.Fatalf("tick 2: %v", err)
+			}
+			if a.Kind != EnsureRunning || a.Target != "v1" {
+				t.Fatalf("tampered binary ⇒ EnsureRunning v1, got %+v", a)
+			}
+			if f.calls != 2 {
+				t.Fatalf("tampered binary must trigger a re-fetch: fetch calls=%d (want 2)", f.calls)
+			}
+			if got := mustReadFile(t, st.BinPath("v1")); got != genuineBin {
+				t.Fatalf("tampered binary must be reverted to genuine, got %q", got)
+			}
+			// The crux: every Start ever exec'd the GENUINE bytes — the fake never ran.
+			for i, c := range p.startedWith {
+				if c != genuineBin {
+					t.Fatalf("Start #%d exec'd non-genuine bytes %q — the fake RAN", i, c)
+				}
+			}
+			if p.running != "v1" {
+				t.Fatalf("genuine v1 must be running after revert, got %q", p.running)
+			}
+		})
+	}
+}
+
+// TestExecutorRefusesTamperedRollbackTarget (FIX 1, verified rollback): when
+// Start(target) fails, the executor must NOT roll back onto a prevRunning
+// binary that fails its signature check — a tampered idle binary must never be
+// exec'd via the rollback path.
+func TestExecutorRefusesTamperedRollbackTarget(t *testing.T) {
+	st := &Store{Dir: t.TempDir()}
+	if err := st.WriteDesired("v2"); err != nil {
+		t.Fatal(err)
+	}
+	// v1 (prev) present but TAMPERED; v2 present + genuine but its Start fails.
+	for _, v := range []string{"v1", "v2"} {
+		if err := os.MkdirAll(filepath.Dir(st.BinPath(v)), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		content := genuineBin
+		if v == "v1" {
+			content = "TAMPERED-v1"
+		}
+		if err := os.WriteFile(st.BinPath(v), []byte(content), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	startV2Err := errors.New("v2 start exec error")
+	p := &fakePlat{running: "v1", startErr: map[string]error{"v2": startV2Err}}
+	e := NewExecutor(st, &genuineFetch{}, p, &fakeLock{acquireOK: true}, nil)
+	e.VerifyBin = contentVerify // v1 tampered ⇒ not genuine; v2 genuine
+
+	_, err := e.Tick(context.Background())
+	if err == nil || !errors.Is(err, startV2Err) {
+		t.Fatalf("Tick must return the v2 start error, got %v", err)
+	}
+	// The tampered v1 must NEVER be started via rollback — call order stops at
+	// stop → start:v2 (no start:v1).
+	if !reflect.DeepEqual(p.callLog, []string{"stop", "start:v2"}) {
+		t.Fatalf("rollback to tampered v1 must be refused, callLog=%v", p.callLog)
+	}
+}
+
+// TestExecutorReVerifiesImmediatelyBeforeExec (FIX 1, TOCTOU): a binary that
+// passes the Step-1 check but is swapped to a fake before exec must NOT be
+// started — the pre-exec re-check (Step 3.5) catches the swap.
+func TestExecutorReVerifiesImmediatelyBeforeExec(t *testing.T) {
+	st := &Store{Dir: t.TempDir()}
+	if err := st.WriteDesired("v1"); err != nil {
+		t.Fatal(err)
+	}
+	// v1 present + genuine so Step 1 passes without a fetch.
+	if err := os.MkdirAll(filepath.Dir(st.BinPath("v1")), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(st.BinPath("v1"), []byte(genuineBin), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	p := &fakePlat{}
+	e := NewExecutor(st, &genuineFetch{}, p, &fakeLock{acquireOK: true}, nil)
+	// Genuine on the FIRST check (Step 1), NOT genuine on the SECOND
+	// (Step 3.5) — simulating a swap inside the TOCTOU window.
+	calls := 0
+	e.VerifyBin = func(string) (bool, error) { calls++; return calls == 1, nil }
+
+	if _, err := e.Tick(context.Background()); err == nil {
+		t.Fatal("a binary swapped after the Step-1 check must fail the pre-exec re-check")
+	}
+	if len(p.started) != 0 {
+		t.Fatalf("swapped binary must NOT be exec'd, started=%v", p.started)
+	}
+	if calls < 2 {
+		t.Fatalf("expected a second (pre-exec) check call, got %d", calls)
+	}
+}
+
+// TestExecutorClearingBadSetRecoversWithoutProcessRestart is the FIX 1
+// defense-in-depth: clearing the on-disk bad set must also clear the in-memory
+// crash state so a wedged version recovers WITHOUT a daemon process restart.
+func TestExecutorClearingBadSetRecoversWithoutProcessRestart(t *testing.T) {
+	e, st, _, p := newExec(t)
+	st.WriteDesired("v2")
+	st.WriteGood("v1")
+	p.running = "v2"
+	p.crashV = "v2" // v2 crash-loops
+
+	// Drive the crash loop → v2 marked bad, rolled back to good v1, crashHit latched.
+	for i := 0; i < crashThreshold; i++ {
+		if _, err := e.Tick(context.Background()); err != nil {
+			t.Fatalf("crash tick %d: %v", i, err)
+		}
+	}
+	if !st.BadSet()["v2"] || e.crashHit["v2"] < crashThreshold {
+		t.Fatalf("pre-condition: v2 bad with latched crashHit, bad=%v hits=%d",
+			st.BadSet()["v2"], e.crashHit["v2"])
+	}
+
+	// Genuine v2 restored: clear the on-disk bad marker + stop crashing. SAME
+	// executor instance — NO process restart.
+	if err := st.ClearBad("v2"); err != nil {
+		t.Fatal(err)
+	}
+	p.crashV = ""
+
+	a, err := e.Tick(context.Background())
+	if err != nil {
+		t.Fatalf("recovery tick: %v", err)
+	}
+	// In-memory crash state mirrored the on-disk clear...
+	if e.crashHit["v2"] != 0 {
+		t.Fatalf("crashHit[v2] must reset when the bad set is cleared, got %d", e.crashHit["v2"])
+	}
+	// ...and the daemon drives v2 again instead of staying wedged on good v1.
+	if a.Kind != EnsureRunning || a.Target != "v2" || p.running != "v2" {
+		t.Fatalf("cleared v2 must be driven again: act=%+v running=%q", a, p.running)
+	}
+}
+
 // fakeLock is a ProcessLock stub. acquireOK/acquireErr are the canned
 // TryAcquire result; calls counts how many times TryAcquire was invoked so a
 // test can assert the lock is acquired exactly once and then held.
@@ -107,13 +349,21 @@ func (l *fakeLock) TryAcquire(string) (bool, error) {
 }
 func (l *fakeLock) Release() error { return nil }
 
+// allowVerify is the permissive signature-verify stub for tests whose fake
+// fetcher writes UNSIGNED stand-in binaries: it declares every on-disk binary
+// genuine so the anti-tamper re-fetch gate does not fire spuriously. The
+// dedicated anti-tamper tests inject their own content-aware verifier instead.
+func allowVerify(string) (bool, error) { return true, nil }
+
 func newExec(t *testing.T) (*Executor, *Store, *fakeFetch, *fakePlat) {
 	t.Helper()
 	st := &Store{Dir: t.TempDir()}
 	f := &fakeFetch{}
 	p := &fakePlat{}
 	// Default lock wins (ok=true) so existing tests behave exactly as before.
-	return NewExecutor(st, f, p, &fakeLock{acquireOK: true}, nil), st, f, p
+	e := NewExecutor(st, f, p, &fakeLock{acquireOK: true}, nil)
+	e.VerifyBin = allowVerify // unsigned fake binaries are treated as genuine
+	return e, st, f, p
 }
 
 // With no version config, the reconcile loop must be Blocked — NOT
@@ -498,6 +748,7 @@ func TestExecutorStartFailureRollsBackToPrevRunning(t *testing.T) {
 		startErr: map[string]error{"v2": startV2Err},
 	}
 	e := NewExecutor(st, f, p, &fakeLock{acquireOK: true}, nil)
+	e.VerifyBin = allowVerify // pre-placed bins are unsigned stand-ins → genuine
 
 	_, err := e.Tick(context.Background())
 	if err == nil || !errors.Is(err, startV2Err) {
@@ -545,6 +796,7 @@ func TestExecutorStartFailureRollbackAlsoFailsLeavesNothingRunning(t *testing.T)
 		},
 	}
 	e := NewExecutor(st, f, p, &fakeLock{acquireOK: true}, nil)
+	e.VerifyBin = allowVerify // pre-placed bins are unsigned stand-ins → genuine
 
 	_, err := e.Tick(context.Background())
 	// The contract: the ORIGINAL Start error is what bubbles up — the
@@ -581,6 +833,7 @@ func TestExecutorLockWonStartsPlatform(t *testing.T) {
 	p := &fakePlat{}
 	lk := &fakeLock{acquireOK: true}
 	e := NewExecutor(st, f, p, lk, nil)
+	e.VerifyBin = allowVerify // unsigned fake binaries are treated as genuine
 
 	a, err := e.Tick(context.Background())
 	if err != nil || a.Kind != EnsureRunning {
@@ -649,6 +902,7 @@ func TestExecutorLockHeldAfterFirstAcquire(t *testing.T) {
 	p := &fakePlat{}
 	lk := &fakeLock{acquireOK: true}
 	e := NewExecutor(st, f, p, lk, nil)
+	e.VerifyBin = allowVerify // unsigned fake binaries are treated as genuine
 
 	for i := 0; i < 3; i++ {
 		if _, err := e.Tick(context.Background()); err != nil {
