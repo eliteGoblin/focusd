@@ -28,7 +28,7 @@ func withStdin(t *testing.T, data string, fn func()) {
 	}
 	go func() { _, _ = w.Write([]byte(data)); _ = w.Close() }()
 	os.Stdin = r
-	defer func() { os.Stdin = old }()
+	defer func() { os.Stdin = old; _ = r.Close() }()
 	fn()
 }
 

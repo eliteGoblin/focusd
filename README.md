@@ -67,9 +67,9 @@ A **daemon** (Layer 1 supervisor) keeps a cross-platform **platform** engine (La
 # Build the platform (bundles plugins first)
 ./scripts/build-platform.sh
 
-# Run tests
-cd daemon   && go test -race ./...
-cd platform && go test -race ./...
+# Run tests (each in a subshell so the cd doesn't compound)
+(cd daemon   && go test -race ./...)
+(cd platform && go test -race ./...)
 ```
 
 **Documentation:** See [`requirements/`](requirements/) for features, decisions (ADRs), and acceptance test history.
