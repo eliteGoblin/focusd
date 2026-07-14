@@ -20,9 +20,13 @@ const WorkdirEnvKey = "APP_STATE_DIR"
 // `worker run` instead of `.../kill-steam run --config /tmp/focusd-job-...`. The
 // tokens carry no plugin id, no 'focusd', no path. Generic worker/helper nouns
 // that read as any background helper.
+// NOTE: "daemon" is deliberately EXCLUDED (HF4 F2). A plugin child rendering
+// argv[0]=="daemon" both reads oddly for a helper AND ties the process back to
+// focusd's own daemon — so it is banned from this pool (see the banned-fragment
+// audit in disguise_test.go).
 var pluginProcTokens = []string{
 	"worker", "helper", "agent", "runner", "task", "job",
-	"service", "handler", "daemon", "monitor", "broker", "dispatcher",
+	"service", "handler", "monitor", "broker", "dispatcher",
 	"scanner", "reconciler", "sweeper", "probe", "sentinel", "guard",
 }
 

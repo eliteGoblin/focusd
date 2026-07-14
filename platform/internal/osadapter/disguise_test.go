@@ -48,9 +48,10 @@ func TestRandomPluginArgv0ZeroLeak(t *testing.T) {
 }
 
 // TestPluginProcTokensNoIDSubstring: no pool token may itself contain a plugin id
-// fragment ('steam', 'dns', 'block', 'kill', 'browser', 'skill', 'freedom').
+// fragment ('steam', 'dns', 'block', 'kill', 'browser', 'skill', 'freedom') nor
+// any focusd-architecture token ('daemon', 'platform', 'focusd') — HF4 F2 audit.
 func TestPluginProcTokensNoIDSubstring(t *testing.T) {
-	frags := []string{"steam", "dns", "block", "kill", "browser", "skill", "freedom", "focusd", "platform"}
+	frags := []string{"steam", "dns", "block", "kill", "browser", "skill", "freedom", "focusd", "platform", "daemon", "github", "version"}
 	for _, tok := range pluginProcTokens {
 		low := strings.ToLower(tok)
 		for _, f := range frags {

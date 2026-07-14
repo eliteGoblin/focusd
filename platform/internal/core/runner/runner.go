@@ -2,10 +2,17 @@
 //
 // Contract (spec §Plugin execution contract):
 //
-//	platform writes resolved job config -> temp JSON file
-//	exec: <binary> run --config <tmp.json>
+//	platform marshals the resolved job config -> plugin STDIN (HF4 FEATURE 24)
+//	exec: <disguised-argv0> run          (argv[0] spoofed; no path/id/version)
+//	stdin  = resolved job config JSON
 //	stdout = structured JSON result, stderr = diagnostics
 //	exit 0 = success, 1 = controlled failure, 2+ = runtime error
+//
+// HF4 moved the config OFF argv (it used to be `run --config <tmp.json>`, which
+// leaked the temp path + plugin id to `ps`) onto stdin — an inherited pipe fd
+// the setuid child reads with no widened file permissions. A `--config <path>`
+// flag is retained on each plugin as a CLI-only fallback for manual invocation;
+// the scheduler always uses stdin.
 //
 // The runner owns timeout (kill on expiry), retry, exit-code mapping,
 // and persistence to job_runs (including last success/failure history).
