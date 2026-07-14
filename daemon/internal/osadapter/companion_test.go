@@ -164,7 +164,7 @@ func TestCompanionFolderNotSwept(t *testing.T) {
 		}
 	}
 
-	removed, err := SweepOrphanWorkdirs(mode.User, keep)
+	removed, err := SweepOrphanWorkdirs(root, keep)
 	if err != nil {
 		t.Fatalf("SweepOrphanWorkdirs: %v", err)
 	}

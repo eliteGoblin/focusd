@@ -1,21 +1,50 @@
 package core
 
 import (
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
+
+	"github.com/eliteGoblin/focusd/daemon/internal/relocate"
 )
 
 // Store is the daemon's tiny on-disk state under the workdir. The
 // daemon process is stateless; durable facts live in these files and
 // are re-read every tick (kubelet : etcd shape).
 //
-//	<workdir>/version.json   {"desired":"v1"}      desired version
-//	<workdir>/good           "v1"                  last-known-good
-//	<workdir>/bad/<v>        (marker file)         crash-looped versions
-//	<workdir>/bin/<v>/platform                     platform binaries
-type Store struct{ Dir string }
+// FEATURE 21 (HF1): the daemon's own state and the platform's disposable
+// binaries now live under SEPARATE roots so a platform-workdir wipe can't take
+// the daemon's identity/state down with it. Dir is the daemon-home (survives a
+// wipe); PlatformDir, when set, is the disposable platform-workdir where the
+// platform binaries live. PlatformDir empty ⇒ BinPath falls back to Dir (the
+// legacy single-root layout, still used by unit/e2e tests and non-mesh runs).
+//
+//	<Dir>/version.json         {"desired":"v1"}   desired version   (daemon-home)
+//	<Dir>/good                 "v1"               last-known-good   (daemon-home)
+//	<Dir>/bad/<v>              (marker file)      crash-looped      (daemon-home)
+//	<Dir>/.roster              (masked labels)    mesh roster       (daemon-home)
+//	<platformRoot>/bin/<v>/platform               platform binaries (platform-workdir)
+type Store struct {
+	Dir string
+	// PlatformDir is the disposable platform-workdir root for platform
+	// binaries (bin/<v>/platform). Empty ⇒ use Dir (legacy single root).
+	PlatformDir string
+}
+
+// platformRoot is where the platform binaries live: the separate
+// platform-workdir when set, else the daemon-home (legacy single-root).
+func (s *Store) platformRoot() string {
+	if s.PlatformDir != "" {
+		return s.PlatformDir
+	}
+	return s.Dir
+}
 
 // VersionFile is the basename of the desired-version config under the workdir.
 // Exported so callers that must locate it (e.g. status install-age) reference
@@ -28,6 +57,25 @@ const VersionFile = "version.json"
 // freshly relaunched survivor reads it to recover the roster on a cold
 // start. In-memory roster is authoritative; this file self-heals from it.
 const RosterFile = ".roster"
+
+// InstallSaltFile is the basename (in the daemon-home) of the per-install salt
+// that seeds every HF4 (FEATURE 24) disguise derivation: the platform binary's
+// on-disk basename (BinPath) and the platform child's argv[0] (PlatformArgv0).
+// It IS the "version→path index the daemon reads": salt + version → path,
+// deterministically, so status/procCount reconstructs the exact running argv
+// without a second lookup table. Neutral, dot-hidden basename; lives 0700 in the
+// disguised daemon-home. Absent ⇒ the legacy non-disguised layout (dev/tests).
+const InstallSaltFile = ".idx"
+
+// PlatformPidFile is the basename (in the daemon-home) of the platform child's
+// liveness pidfile (HF4 FEATURE 24, P3). It holds ONLY the child's OS pid as a
+// bare integer — no path, no version, no greppable word — so status liveness is
+// SALT-INDEPENDENT: a `focusd status` CLI reads it and probes the pid directly,
+// correct even if the disguise salt diverged from the running child's argv (the
+// old pgrep pattern could then miss and falsely report DOWN). Written by the
+// singleton-lock holder (platformsvc.Start) and removed by its exit waiter.
+// Neutral dot-hidden basename, like .roster/.idx.
+const PlatformPidFile = ".seq"
 
 type versionConfig struct {
 	Desired string `json:"desired"`
@@ -42,9 +90,91 @@ func (s *Store) badDir() string      { return filepath.Join(s.Dir, "bad") }
 // it via the core roster helpers.
 func (s *Store) RosterPath() string { return filepath.Join(s.Dir, RosterFile) }
 
-// BinPath is where the platform binary for version v lives.
+// saltPath is the absolute path of the per-install disguise salt (daemon-home).
+func (s *Store) saltPath() string { return filepath.Join(s.Dir, InstallSaltFile) }
+
+// InstallSalt returns the per-install disguise salt, or "" if none has been
+// written yet (dev runs and the whole existing unit/e2e test corpus, which never
+// seed it — so they keep the legacy bin/<v>/platform layout unchanged).
+func (s *Store) InstallSalt() string {
+	b, err := os.ReadFile(s.saltPath())
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(b))
+}
+
+// EnsureInstallSalt returns the per-install salt, generating + persisting a fresh
+// 16-byte random one on first call (atomic write, 0600). Idempotent: once written
+// it is stable for the install's lifetime, so every daemon role and the status
+// subcommand derive the SAME disguised platform paths/argv. Called by the
+// reconcile-loop composition root; a write failure degrades to "" (legacy layout)
+// rather than blocking protection.
+func (s *Store) EnsureInstallSalt() (string, error) {
+	if v := s.InstallSalt(); v != "" {
+		return v, nil
+	}
+	if err := os.MkdirAll(s.Dir, 0o700); err != nil {
+		return "", err
+	}
+	buf := make([]byte, 16)
+	if _, err := rand.Read(buf); err != nil {
+		return "", err
+	}
+	salt := hex.EncodeToString(buf)
+	// HF4 F1: ATOMIC claim. Both mesh roles (A and B) call this UNSYNCHRONIZED in
+	// build() before the singleton lock is held, so the old check-then-act let A
+	// launch the platform under saltA while B's later write overwrote disk with
+	// saltB — every later derivation (BinPath / PlatformArgv0 / status pgrep) then
+	// used saltB != the running child's argv, so a live platform silently reported
+	// DOWN. O_CREATE|O_EXCL makes EXACTLY ONE caller create the file and persist
+	// ITS salt; the losers get EEXIST and adopt the winner's. Born 0600 (the salt
+	// seeds every disguise derivation and must not be world-readable) — no
+	// separate chmod (F4: a chmod that failed left the secret 0644 with no log).
+	f, err := os.OpenFile(s.saltPath(), os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
+	if err != nil {
+		if errors.Is(err, os.ErrExist) {
+			// Lost the race: discard our value and adopt the winner's. The winner
+			// creates the file (briefly empty) then writes; retry the read to
+			// bridge that sub-millisecond window so we never adopt an empty salt.
+			for i := 0; i < 100; i++ {
+				if v := s.InstallSalt(); v != "" {
+					return v, nil
+				}
+				time.Sleep(time.Millisecond)
+			}
+			return "", errors.New("ensure salt: peer claimed the salt but it did not materialize")
+		}
+		return "", fmt.Errorf("ensure salt: open: %w", err)
+	}
+	defer f.Close()
+	if _, err := f.Write([]byte(salt)); err != nil {
+		return "", fmt.Errorf("ensure salt: write: %w", err)
+	}
+	return salt, nil
+}
+
+// BinPath is where the platform binary for version v lives — under the
+// platform-workdir (disposable) when PlatformDir is set, else under Dir.
+//
+// HF4 (FEATURE 24): with a per-install salt present the binary lives at
+// bin/<disguised-basename> (relocate.PlatformBinBase) — no 'platform' literal, no
+// version in the path. Without a salt (dev/tests) it falls back to the legacy
+// bin/<v>/platform. Both are pure functions of (salt, v), so every caller —
+// executor, fetch, status, watchdog — agrees on the path with no shared index.
 func (s *Store) BinPath(v string) string {
-	return filepath.Join(s.Dir, "bin", v, "platform")
+	if base := relocate.PlatformBinBase(s.InstallSalt(), v); base != "" {
+		return filepath.Join(s.platformRoot(), "bin", base)
+	}
+	return filepath.Join(s.platformRoot(), "bin", v, "platform")
+}
+
+// PlatformArgv0 is the deterministic disguised argv[0] the daemon sets on the
+// platform child (HF4). Empty when no salt is present (legacy: the child keeps
+// its binary path as argv[0]). Derived from the salt so status/procCount can
+// rebuild the exact argv to match the running process.
+func (s *Store) PlatformArgv0() string {
+	return relocate.PlatformArgv0(s.InstallSalt())
 }
 
 // LockPath is the singleton-lock file the winning daemon holds for the
@@ -112,6 +242,18 @@ func (s *Store) MarkBad(v string) error {
 	// executor's s.Bad[desired] lookup is symmetric (no silent miss
 	// for versions containing sanitised characters).
 	return atomicWrite(filepath.Join(s.badDir(), safe(v)), []byte(v))
+}
+
+// ClearBad removes v's crash-looped marker, if present. Idempotent — a
+// missing marker is not an error. This is the tamper-recovery primitive:
+// once a genuine, signature-verified binary for v is back on disk, any prior
+// "bad" verdict was about the TAMPERED bytes that have now been reverted, so
+// v must become runnable again WITHOUT requiring a daemon process restart.
+func (s *Store) ClearBad(v string) error {
+	if err := os.Remove(filepath.Join(s.badDir(), safe(v))); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	return nil
 }
 
 // BadSet returns the exact versions marked bad (read from file

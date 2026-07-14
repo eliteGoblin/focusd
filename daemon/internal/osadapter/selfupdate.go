@@ -57,11 +57,19 @@ type binPlacer interface {
 //
 // Returns nil only when the new mesh is loaded AND health-poll
 // passed AND old mesh entries are no longer registered with launchd.
+// afterSwap, when non-nil, runs a BOUNDED same-mode convergence AFTER the new
+// mesh is healthy and the old mesh is booted out (FEATURE 25, Element 2): reap
+// the old platform child that reparented to launchd + survived our bootout, and
+// sweep stale platform-workdirs. It is deliberately NOT a full both-modes
+// RetireOtherGenerations — self-update's in-place rotation transiently looks
+// like two generations, and retiring the "other" one here would tear down the
+// install mid-swap. Injected as a seam so the post-swap hook is unit-testable.
 func SelfUpdate(
 	cur CurInstall, newSpec Spec, newBin []byte,
 	c controller, fs fsio, p prober, b binPlacer, rs rosterIO,
 	healthyTimeout, probeInterval time.Duration,
 	keepOld bool,
+	afterSwap func(),
 ) error {
 	// Pre-flight: the caller's FindCurrentInstall must have found a
 	// COMPLETE install. Bail loudly if not — silently bootstrapping
@@ -182,6 +190,14 @@ func SelfUpdate(
 	// follow-up if log-noise tolerance demands one.
 	for i := len(cur.Labels) - 1; i >= 0; i-- {
 		_ = c.bootout(cur.Labels[i]) // see comment above re: discarded err
+	}
+
+	// G.5 FEATURE 25 (Element 2): the old daemon is booted out, but its platform
+	// child reparented to launchd and SURVIVES — so reap it (bounded, same-mode)
+	// before it lingers as an orphan a standby would double. Best-effort: a
+	// reap/sweep failure must never fail the (already-healthy) swap.
+	if afterSwap != nil {
+		afterSwap()
 	}
 
 	// H. Best-effort cleanup of old plists + old binary. Errors are

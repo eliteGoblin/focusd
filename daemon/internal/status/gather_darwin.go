@@ -10,14 +10,54 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
+	"strings"
+	"syscall"
 	"time"
+
+	"golang.org/x/sys/unix"
 
 	"github.com/eliteGoblin/focusd/daemon/internal/core"
 	"github.com/eliteGoblin/focusd/daemon/internal/mode"
 	"github.com/eliteGoblin/focusd/daemon/internal/osadapter"
+	"github.com/eliteGoblin/focusd/daemon/internal/platdir"
 	"github.com/eliteGoblin/focusd/daemon/internal/sig"
 	"github.com/eliteGoblin/focusd/daemon/internal/status/redact"
 )
+
+// sigVerifier is the signature-check seam for the platform binary about to be
+// exec'd (go-review HIGH). Production wires sig.VerifyFile (real Ed25519 against
+// the embedded key); tests inject a fake because the offline signing key is not
+// available in CI. Threaded as a param (never a package global) so parallel
+// tests can't race on it — mirroring osadapter.Verifier.
+type sigVerifier func(path string) (bool, error)
+
+// platformStore builds a Store rooted at the discovered daemon-home whose
+// platform binaries resolve to the disposable platform-workdir (FEATURE 21 /
+// HF1), read from the pointer file. Status only READS the pointer — it must
+// never create a platform-workdir — so a missing pointer falls back to the
+// daemon-home (legacy single-root). Returns the store and the platform-workdir
+// path (both derived from the already-tokenised daemon-home; neither escapes
+// the caller's redact.Use closure).
+func platformStore(daemonHome string) (*core.Store, string) {
+	platWD := platdir.Read(daemonHome)
+	// go-review HIGH: the pointer target is attacker-writable and flows into an
+	// exec below, so status must not trust it blindly. Run it through the
+	// read-only containment guard (platdir.SafeTarget) and fall back to the
+	// daemon-home (legacy single-root) on ANY failure. supportRoot is the
+	// daemon-home's parent — a hidden daemon-home sits directly under the mode's
+	// Application Support root, so its parent IS that root. Status NEVER creates
+	// a platform-workdir (read-only), so an unsafe pointer simply degrades to
+	// reading the daemon-home rather than steering an exec off a hostile path.
+	if platWD == "" || !platdir.SafeTarget(platWD, filepath.Dir(daemonHome), daemonHome) {
+		platWD = daemonHome
+	}
+	st := &core.Store{Dir: daemonHome}
+	if platWD != daemonHome {
+		st.PlatformDir = platWD
+	}
+	return st, platWD
+}
 
 // warmupWindow is how young an install (by version.json mtime) may be, with
 // no good version yet, and still read HEALTHY — warming up rather than DOWN.
@@ -114,7 +154,7 @@ func Gather(workdirOverride string, jsonMode bool) (Snapshot, PlatformDetail) {
 	}
 
 	// --- Delegate plugin detail to `platform status` ---
-	pd := gatherPlatform(workdirTok, jsonMode)
+	pd := gatherPlatform(workdirTok, jsonMode, sig.VerifyFile)
 	s.PlatformUnavailable = !pd.Available
 
 	return s, pd
@@ -156,33 +196,117 @@ func installAge(workdir redact.Token) (time.Duration, bool) {
 	})
 }
 
-// procCount counts live processes whose argv exactly matches the good
-// platform binary path. The pattern is built AND run inside the Use closure
-// so the path never escapes; pgrep's stderr/error is swallowed so it can
-// never echo the pattern into status output. Exact match (-x) so we never
-// match on a bare "platform" substring.
+// procCount counts live platform processes. The salt-independent pidfile (P3)
+// is the PRIMARY up/down signal; pgrep is the fallback AND the orphan counter.
+// Everything runs inside the Use closure so the disguised path never escapes.
+//
+// HF4 (P3): a pgrep pattern is reconstructed from the per-install salt to match
+// the disguised child's argv EXACTLY (-f -x). But if the salt on disk diverged
+// from the running child's argv (the F1 race — now fixed, but status must stay
+// correct regardless), that pattern MISSES and pgrep returns 0. So a live,
+// still-supervised child confirmed by the pidfile floors the count at 1 — a
+// pgrep miss can never falsely report DOWN. pgrep still runs, so a genuine >1
+// (orphan) anomaly (ADR-0013) is preserved: we take max(pgrep, pidfile), never
+// let the pidfile MASK an orphan nor let a pgrep miss MASK a live child.
 func procCount(workdir redact.Token, good string) int {
 	return redact.Use(workdir, func(raw string) int {
-		ctx, cancel := context.WithTimeout(context.Background(), platformStatusTimeout)
-		defer cancel()
-		binPath := (&core.Store{Dir: raw}).BinPath(good)
-		// pgrep -f -x: match the full argument vector exactly. The platform
-		// is started as `<binPath> --workdir <wd>`, so match that exact argv.
-		pattern := binPath + " --workdir " + raw
-		out, err := exec.CommandContext(ctx, "pgrep", "-f", "-x", pattern).Output()
-		if err != nil {
-			// Exit status 1 = no match (count 0); any other error we also
-			// treat as 0 rather than leaking the pattern via an error string.
-			return 0
+		st, platWD := platformStore(raw)
+		// pgrep -f -x: match the full argument vector EXACTLY.
+		//
+		// HF4 (FEATURE 24): the disguised platform child runs as `<argv0> run`
+		// (a generic token, workdir off argv/env), so match that deterministic
+		// argv. Legacy (no salt) installs still run as `<binPath> --workdir
+		// <platform-workdir>` (FEATURE 21 / HF1).
+		var pattern string
+		if argv0 := st.PlatformArgv0(); argv0 != "" {
+			pattern = argv0 + " run"
+		} else {
+			pattern = st.BinPath(good) + " --workdir " + platWD
 		}
-		n := 0
-		for _, line := range bytes.Split(bytes.TrimSpace(out), []byte("\n")) {
-			if len(bytes.TrimSpace(line)) > 0 {
-				n++
-			}
-		}
-		return n
+		return countPlatformProcs(pattern, st.Dir, pgrepCountExact, platformPidUp)
 	})
+}
+
+// countPlatformProcs applies the salt-independent pidfile floor to the pgrep
+// count: pgrep is the primary signal AND the orphan counter, and a live
+// supervised child (pidUp) floors the count at 1 ONLY when pgrep missed (n<1) —
+// never below the pgrep count, so an orphan anomaly (n>1) still surfaces and a
+// pgrep miss can never falsely report DOWN. pidUp is consulted lazily (only when
+// n<1), matching the inline short-circuit it replaces. The pgrepCount and pidUp
+// seams are injected so the floor logic is unit-testable without live processes;
+// production wires pgrepCountExact + platformPidUp.
+func countPlatformProcs(pattern, daemonHome string, pgrepCount func(string) int, pidUp func(string) bool) int {
+	n := pgrepCount(pattern)
+	if n < 1 && pidUp(daemonHome) {
+		return 1
+	}
+	return n
+}
+
+// pgrepCountExact returns how many live processes have argv EXACTLY equal to
+// pattern (`pgrep -f -x`). Any error — including exit 1 (no match) — counts as 0
+// rather than leaking the pattern through an error string. Time-boxed like the
+// other status probes.
+func pgrepCountExact(pattern string) int {
+	ctx, cancel := context.WithTimeout(context.Background(), platformStatusTimeout)
+	defer cancel()
+	out, err := exec.CommandContext(ctx, "pgrep", "-f", "-x", pattern).Output()
+	if err != nil {
+		return 0
+	}
+	n := 0
+	for _, line := range bytes.Split(bytes.TrimSpace(out), []byte("\n")) {
+		if len(bytes.TrimSpace(line)) > 0 {
+			n++
+		}
+	}
+	return n
+}
+
+// platformPidUp reports whether the daemon-home pidfile names a live, still-
+// SUPERVISED platform child: the pid is alive AND not reparented to launchd
+// (ppid != 1). It is the salt-INDEPENDENT primary liveness signal — a bare int,
+// so it survives a salt divergence that would desync the pgrep argv pattern.
+// Returns false ("no usable signal") when the pidfile is missing/stale or the
+// child is orphaned, so the caller falls back to pgrep (which also counts the
+// orphan). The path is never surfaced.
+func platformPidUp(daemonHome string) bool {
+	b, err := os.ReadFile(filepath.Join(daemonHome, core.PlatformPidFile))
+	if err != nil {
+		return false
+	}
+	pid, err := strconv.Atoi(strings.TrimSpace(string(b)))
+	if err != nil || pid <= 0 {
+		return false
+	}
+	if !processAlive(pid) {
+		return false
+	}
+	ppid, ok := processPpid(pid)
+	// ppid unknown (proc vanished mid-probe) or reparented to launchd (== 1) →
+	// no positive signal; the pgrep fallback + FEATURE 25 reaper handle orphans.
+	return ok && ppid != 1
+}
+
+// processAlive reports whether pid names a live process (signal-0 probe). EPERM
+// means the process exists but is owned by another user (e.g. a root platform
+// queried by a non-root `status`) — still alive.
+func processAlive(pid int) bool {
+	if pid <= 0 {
+		return false
+	}
+	err := syscall.Kill(pid, 0)
+	return err == nil || errors.Is(err, syscall.EPERM)
+}
+
+// processPpid returns pid's parent pid via sysctl (kern.proc.pid). ok=false when
+// the process is gone or the read fails.
+func processPpid(pid int) (int, bool) {
+	kp, err := unix.SysctlKinfoProc("kern.proc.pid", pid)
+	if err != nil || kp == nil {
+		return 0, false
+	}
+	return int(kp.Eproc.Ppid), true
 }
 
 // gatherPlatform execs `platform status` EXACTLY ONCE, in the single form the
@@ -192,7 +316,7 @@ func procCount(workdir redact.Token, good string) int {
 // never fails on this. Platform STDERR is SWALLOWED (never forwarded, never
 // interpolated into any error): it can contain disguised paths the platform
 // logs about itself.
-func gatherPlatform(workdir redact.Token, jsonMode bool) PlatformDetail {
+func gatherPlatform(workdir redact.Token, jsonMode bool, verify sigVerifier) PlatformDetail {
 	if !workdir.Present() {
 		return PlatformDetail{Available: false}
 	}
@@ -200,14 +324,28 @@ func gatherPlatform(workdir redact.Token, jsonMode bool) PlatformDetail {
 	// discovered workdir. The binary path and the workdir both stay inside
 	// the Use closure — they never escape into the returned detail.
 	pd := redact.Use(workdir, func(raw string) PlatformDetail {
-		st := &core.Store{Dir: raw}
+		st, platWD := platformStore(raw)
 		good := st.Good()
 		if good == "" {
 			// No good version → no platform process to query.
 			return PlatformDetail{Available: false}
 		}
 		binPath := st.BinPath(good)
-		out, exitCode, ran := runPlatformStatus(binPath, raw, jsonMode)
+		// FEATURE 21 (HF1): query the platform in its own disposable workdir
+		// (state.db lives there), not the daemon-home.
+		//
+		// HF4 (P2): with a DISGUISED install the workdir must NOT ride on argv —
+		// a transient `platform status --workdir <wd>` would leak it to `ps` for
+		// the ~8s of the call. Pass "" so the disguised child self-derives its
+		// workdir from its own binary location, mirroring how it was launched.
+		// Legacy/e2e (no salt ⇒ PlatformArgv0()=="") still passes --workdir: that
+		// binary is built with -tags e2e and its bin/<v>/platform layout is NOT
+		// what the child's 2-levels-up self-derive resolves.
+		statusWD := platWD
+		if st.PlatformArgv0() != "" {
+			statusWD = ""
+		}
+		out, exitCode, ran := runPlatformStatus(binPath, statusWD, jsonMode, verify)
 
 		// The command itself failed to produce a health verdict (exec error,
 		// timeout, or exit >= 2) → unavailable. The daemon still reports its
@@ -241,9 +379,11 @@ func gatherPlatform(workdir redact.Token, jsonMode bool) PlatformDetail {
 	return pd
 }
 
-// runPlatformStatus execs `<binPath> status --workdir <wd> [--json]` with an
-// 8s timeout and captures stdout into a buffer. STDERR is discarded (it may
-// carry disguised paths). On timeout the child is killed via context
+// runPlatformStatus execs `<binPath> status [--workdir <wd>] [--json]` with an
+// 8s timeout and captures stdout into a buffer. HF4 (P2): --workdir is passed
+// ONLY when workdir != "" (legacy/e2e); a disguised install passes "" so the
+// child self-derives its workdir and nothing leaks to `ps`. STDERR is discarded
+// (it may carry disguised paths). On timeout the child is killed via context
 // cancellation.
 //
 // `platform status` is a HEALTH probe: it exits 0 (healthy/unknown) OR 1
@@ -256,11 +396,26 @@ func gatherPlatform(workdir redact.Token, jsonMode bool) PlatformDetail {
 // ran=false (=> unavailable) only on: exec error, context timeout, or any exit
 // code >= 2 (an internal-error/usage failure of the platform itself, not a
 // health verdict). Empty/invalid output is judged by the caller per mode.
-func runPlatformStatus(binPath, workdir string, asJSON bool) (out string, exitCode int, ran bool) {
+func runPlatformStatus(binPath, workdir string, asJSON bool, verify sigVerifier) (out string, exitCode int, ran bool) {
+	// go-review HIGH: binPath is resolved via the (attacker-writable) pointer
+	// file, so verify its Ed25519 signature against the embedded key BEFORE
+	// executing it. A tampered/planted binary at the pointed path fails the
+	// check and is treated as unavailable — never run. sig.VerifyFile also
+	// errors (→ unavailable) when the file is absent/unreadable. verify is a
+	// seam (production: sig.VerifyFile; tests inject a fake, since the offline
+	// signing key is not in CI) — mirrors osadapter.Verifier, NOT a package
+	// global, so parallel tests can't race on it.
+	if ok, verr := verify(binPath); verr != nil || !ok {
+		return "", 0, false
+	}
+
 	ctx, cancel := context.WithTimeout(context.Background(), platformStatusTimeout)
 	defer cancel()
 
-	args := []string{"status", "--workdir", workdir, "--no-color"}
+	args := []string{"status", "--no-color"}
+	if workdir != "" {
+		args = append(args, "--workdir", workdir)
+	}
 	if asJSON {
 		args = append(args, "--json")
 	}

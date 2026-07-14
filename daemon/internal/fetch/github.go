@@ -97,7 +97,11 @@ func (g *GitHub) EnsureBinary(ctx context.Context, st *core.Store, version strin
 func (g *GitHub) DownloadVerified(ctx context.Context, tag, asset, dstPath string) error {
 	dlURL := fmt.Sprintf("https://github.com/%s/releases/download/%s/%s", g.Repo, tag, asset)
 
-	tmp, err := os.CreateTemp("", "focusd-dl-*")
+	// HF4 (FEATURE 24, C2): neutral temp-file prefix. The download temp is the
+	// only runtime disk path that would otherwise carry a literal "focusd" token
+	// (greppable via `ls /tmp` or `lsof` during the fetch window). "app-dl-" names
+	// neither focusd nor the platform.
+	tmp, err := os.CreateTemp("", "app-dl-*")
 	if err != nil {
 		return err
 	}

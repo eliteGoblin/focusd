@@ -18,10 +18,12 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"flag"
 	"fmt"
+	"io"
 	"os"
 	"time"
 
@@ -70,7 +72,13 @@ func run(args []string) int {
 		return 2
 	}
 
-	opts, err := loadOptions(*cfgPath)
+	raw, err := readJobConfig(*cfgPath)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "config error:", err)
+		emit(result{Status: "error", Message: err.Error()})
+		return 2
+	}
+	opts, err := loadOptions(raw)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "config error:", err)
 		emit(result{Status: "error", Message: err.Error()})
@@ -123,15 +131,29 @@ func run(args []string) int {
 	return 0
 }
 
-// loadOptions reads the optional config knobs from the job config JSON.
-// "" path => all defaults.
-func loadOptions(path string) (reconciler.Options, error) {
-	if path == "" {
-		return reconciler.Options{}, nil
+// readJobConfig returns the job-config JSON bytes: from --config <path>
+// (compat) when set, else drained from stdin (the disguised path — the
+// config path never appears in this process's argv). Empty/absent => nil
+// (grounded defaults). HF4 (FEATURE 24).
+func readJobConfig(cfgPath string) ([]byte, error) {
+	if cfgPath != "" {
+		return os.ReadFile(cfgPath)
 	}
-	raw, err := os.ReadFile(path)
+	b, err := io.ReadAll(os.Stdin)
 	if err != nil {
-		return reconciler.Options{}, fmt.Errorf("read config: %w", err)
+		return nil, fmt.Errorf("read stdin config: %w", err)
+	}
+	if len(bytes.TrimSpace(b)) == 0 {
+		return nil, nil // no config → defaults
+	}
+	return b, nil
+}
+
+// loadOptions reads the optional config knobs from the job-config JSON
+// bytes. Empty/nil raw => all defaults.
+func loadOptions(raw []byte) (reconciler.Options, error) {
+	if len(raw) == 0 {
+		return reconciler.Options{}, nil
 	}
 	var in jobInput
 	if err := json.Unmarshal(raw, &in); err != nil {

@@ -16,6 +16,13 @@ platform:
   log_level: info
   # run_mode is left unset: the platform picks user|system based on
   # whether the agent process has root.
+  #
+  # integrity_sweep_interval is the cadence of the whole-bundle plugin
+  # integrity sweep — the IDLE BACKSTOP (FEATURE 23 / ADR-0019). The runner's
+  # point-of-use verify is the per-scheduled-run guarantee (checked before
+  # every job that runs); this sweep re-reconciles idle/disabled plugin
+  # binaries the point-of-use check never reaches. Omit for the 1m default.
+  # integrity_sweep_interval: 1m
 
 jobs:
   - id: dns-block-reconcile

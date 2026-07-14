@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"log/slog"
 	"time"
+
+	"github.com/eliteGoblin/focusd/daemon/internal/sig"
 )
 
 // Seams — real implementations hit GitHub / launchd / processes; tests
@@ -37,12 +39,20 @@ type (
 
 // Executor runs one reconcile tick: observe → core.Decide → act.
 type Executor struct {
-	Store    *Store
-	Fetch    Fetcher
-	Plat     Platform
-	Lock     ProcessLock
-	Log      *slog.Logger
-	crashHit map[string]int // in-memory consecutive fast-exits per version
+	Store *Store
+	Fetch Fetcher
+	Plat  Platform
+	Lock  ProcessLock
+	Log   *slog.Logger
+	// VerifyBin verifies that the on-disk platform binary at path is a
+	// genuine, Ed25519-signed release. nil ⇒ the daemon's real trust root
+	// (sig.VerifyFile) — secure by default. Injected as a seam only so unit
+	// tests, whose fake fetcher writes UNSIGNED stand-in binaries, can supply
+	// a permissive or content-aware stub; production never overrides it. This
+	// is the daemon→platform anti-tamper check: the on-disk binary is
+	// re-verified before EVERY start, never trusted for mere existence.
+	VerifyBin func(path string) (bool, error)
+	crashHit  map[string]int // in-memory consecutive fast-exits per version
 	// lastTarget is the version this executor last drove the platform
 	// to (EnsureRunning/Rollback target). Crash detection keys off this
 	// so a version that crashes instantly is still caught.
@@ -91,6 +101,17 @@ type Executor struct {
 	// (reset to false) the moment a real desired version is present on disk
 	// again — so a later recurrence is logged afresh.
 	fallbackWarned bool
+	// ReapForeign, when set, SIGTERM→SIGKILLs any FOREIGN platform process (an
+	// orphan that reparented to launchd after a daemon death) EXCEPT the passed
+	// survivor PID. FEATURE 25: the daemon flock only ELECTS one platform, it
+	// never REAPS the extras a crash/self-update cycle leaves behind. Only the
+	// lock WINNER reaps (a loser yields and never fights over the process table),
+	// throttled to once per reapEveryTicks. Injected as a seam because the reaper
+	// is darwin/launchd-specific (osadapter) while core stays cross-platform and
+	// import-cycle-free. nil ⇒ no reap (tests, non-darwin, test-mode, non-mesh).
+	ReapForeign func(keepPID int) (int, error)
+	// reapTick counts ticks for the reap throttle (see reapEveryTicks).
+	reapTick int
 }
 
 // New builds an Executor.
@@ -120,6 +141,24 @@ func (e *Executor) Tick(ctx context.Context) (Action, error) {
 	running, err := e.Plat.RunningVersion()
 	if err != nil {
 		return Action{}, fmt.Errorf("observe running: %w", err)
+	}
+
+	// Defense-in-depth for the crash-loop wedge: if a version we drove to the
+	// crash threshold is no longer marked bad on disk — an operator (or the
+	// tamper-recovery path) cleared it — mirror that clear into memory. Reset
+	// the in-memory crash counter AND the ProcSvc exit latch so the daemon
+	// does not immediately re-mark it bad; otherwise clearing the on-disk bad
+	// set alone would not recover without a daemon PROCESS restart. Only
+	// versions past the threshold (i.e. ones we actually marked bad) are
+	// eligible, so normal crash accumulation toward the threshold — and this
+	// tick's own MarkBad below — are never disturbed. (State.Bad is re-read
+	// fresh after crash detection so Decide sees this tick's MarkBad.)
+	preBad := e.Store.BadSet()
+	for v, hits := range e.crashHit {
+		if hits >= crashThreshold && !preBad[v] {
+			delete(e.crashHit, v)
+			e.resetPlatExit()
+		}
 	}
 
 	// Crash-loop detection. Check the version we last drove (lastTarget)
@@ -191,7 +230,47 @@ func (e *Executor) Tick(ctx context.Context) (Action, error) {
 	if act.Kind == EnsureRunning || act.Kind == Rollback {
 		e.lastTarget = act.Target
 	}
-	return act, e.apply(ctx, act)
+	applyErr := e.apply(ctx, act)
+	// FEATURE 25: after acting, the lock WINNER continuously reaps orphaned
+	// platform processes so the "elect one, never reap the rest" hole can't let
+	// extras accrete across crash/self-update cycles.
+	e.maybeReapForeign()
+	return act, applyErr
+}
+
+// reapEveryTicks throttles the continuous foreign-platform reap so the winner
+// scans the process table roughly once per this many reconcile ticks rather than
+// every tick. At the ~2s worker cadence this is ~10s.
+const reapEveryTicks = 5
+
+// maybeReapForeign reaps orphaned platform processes when this executor is the
+// lock WINNER and has a live platform to exempt. Structurally incapable of
+// reaching zero platforms: it only runs when a survivor PID is known, always
+// exempts it, and the daemon keeps + restarts that survivor. A standby (lock
+// loser) never reaps, so two daemons never fight over the process table.
+func (e *Executor) maybeReapForeign() {
+	if e.ReapForeign == nil || !e.holdsLock {
+		return
+	}
+	e.reapTick++
+	// Reap on the first winning tick, then every reapEveryTicks after — prompt
+	// on startup, throttled thereafter.
+	if (e.reapTick-1)%reapEveryTicks != 0 {
+		return
+	}
+	pl, ok := e.Plat.(interface{ RunningPID() int })
+	if !ok {
+		return // platform impl can't report a PID → cannot exempt → do not reap
+	}
+	keepPID := pl.RunningPID()
+	if keepPID <= 0 {
+		return // no live survivor to exempt → never risk reaping the last one
+	}
+	if n, err := e.ReapForeign(keepPID); err != nil {
+		e.logf("reap foreign platforms failed (best-effort)")
+	} else if n > 0 {
+		e.logf("reaped %d foreign platform process(es)", n)
+	}
 }
 
 func (e *Executor) apply(ctx context.Context, a Action) error {
@@ -229,12 +308,21 @@ func (e *Executor) apply(ctx context.Context, a Action) error {
 			e.holdsLock = true
 		}
 
-		// Step 1 — ensure the new binary is on disk AND Ed25519-verified
-		// BEFORE we touch the running platform. If the fetch fails (e.g.
-		// network outage, a bad release on GitHub), we return the error
-		// WITHOUT having stopped anything — the old platform keeps
-		// running uninterrupted. Replacement-running invariant first.
-		if !e.Store.HaveBin(v) {
+		// Step 1 — ensure the new binary is on disk, PRESENT AND Ed25519-
+		// verified, BEFORE we touch the running platform. A bare existence
+		// check (HaveBin ⇒ os.Stat) is not enough: an in-place-tampered
+		// platform binary (an attacker with workdir write swaps the bytes but
+		// keeps the path) would otherwise be exec'd unverified. So we re-verify
+		// the on-disk binary's signature on EVERY start and treat a MISSING
+		// binary OR a verify FAILURE identically — drop it and re-fetch (which
+		// downloads + Ed25519-verifies the genuine release before placing it).
+		// This is the daemon→platform mirror of the plugin runner's
+		// point-of-use VerifyOrRestore one layer up: verify-before-exec, so a
+		// fake platform binary is reverted to the genuine one and NEVER runs.
+		// If the fetch fails (network outage, a bad release on GitHub) we
+		// return the error WITHOUT having stopped anything — the old platform
+		// keeps running uninterrupted. Replacement-running invariant first.
+		if !e.Store.HaveBin(v) || !e.binGenuine(v) {
 			// ADR-0015 fetch-retry cooldown: a fetch that failed recently is
 			// not re-attempted until fetchRetryAfter, so a persistent failure
 			// (network down, CDN hiccup) is retried ~once/30s instead of every
@@ -249,6 +337,11 @@ func (e *Executor) apply(ctx context.Context, a Action) error {
 			}
 			e.fetchRetryAfter = time.Time{} // success: clear the cooldown
 			e.fetchRetryVersion = ""
+			// A genuine, signature-verified binary for v is now on disk (freshly
+			// fetched, or reverted from an in-place tamper). Wipe any stale
+			// "bad"/crash verdict about v — it was about the reverted bytes, not
+			// this binary — so a wedge needs no daemon process restart.
+			e.clearTamperSuspicion(v)
 		}
 
 		// Step 2 — snapshot the current running version BEFORE stopping
@@ -262,10 +355,25 @@ func (e *Executor) apply(ctx context.Context, a Action) error {
 			}
 		}
 
+		// Step 3.5 — final anti-tamper re-check IMMEDIATELY before exec.
+		// Step 1's verify and this Start are separated by Stop() (up to ~2s),
+		// during which a workdir-writer could swap the just-verified bytes back
+		// to a fake (TOCTOU). Re-check here to shrink that window to a few
+		// syscalls. On mismatch we refuse to exec the tampered bytes and return
+		// — the next tick's Step 1 re-fetches the genuine binary and starts it.
+		if !e.binGenuine(v) {
+			return fmt.Errorf("start %s: on-disk binary failed signature re-check at exec time (tamper?)", v)
+		}
+
 		// Step 4 — start the new. If this fails AND we just stopped a
 		// previously-running version, roll back to it (its binary is
-		// still on disk). Best-effort: even a failed rollback is
-		// preferable to silently leaving focusd in a stopped state.
+		// still on disk) — but ONLY if that binary is itself signature-genuine.
+		// The rollback is an exec too, so it must obey verify-before-exec: an
+		// attacker could tamper the idle prevRunning binary and induce a
+		// Start(v) failure to get the fake exec'd. A tampered rollback target
+		// is refused (focusd is left down; the next tick re-fetches genuine).
+		// Best-effort otherwise: a failed rollback is preferable to silently
+		// leaving focusd stopped.
 		//
 		// Architect-review #3: after a successful rollback the crash
 		// detector must track the actually-running version (prev), not
@@ -274,7 +382,8 @@ func (e *Executor) apply(ctx context.Context, a Action) error {
 		// (otherwise a crashing prev would never be detected because
 		// the detector would still be watching the dead target).
 		if err := e.Plat.Start(e.Store.BinPath(v), v); err != nil {
-			if prevRunning != "" && prevRunning != v && e.Store.HaveBin(prevRunning) {
+			switch {
+			case prevRunning != "" && prevRunning != v && e.Store.HaveBin(prevRunning) && e.binGenuine(prevRunning):
 				if rbErr := e.Plat.Start(e.Store.BinPath(prevRunning), prevRunning); rbErr == nil {
 					e.lastTarget = prevRunning
 					if e.Log != nil {
@@ -287,6 +396,13 @@ func (e *Executor) apply(ctx context.Context, a Action) error {
 							"target", v, "rollback_target", prevRunning,
 							"err", err, "rollback_err", rbErr)
 					}
+				}
+			case prevRunning != "" && prevRunning != v && e.Store.HaveBin(prevRunning):
+				// prevRunning present on disk but FAILS signature re-check —
+				// refuse to exec a tampered rollback target.
+				if e.Log != nil {
+					e.Log.Error("start failed; refused tampered rollback target — focusd is down",
+						"target", v, "rollback_target", prevRunning, "err", err)
 				}
 			}
 			return fmt.Errorf("start %s: %w", v, err)
@@ -301,6 +417,47 @@ func (e *Executor) apply(ctx context.Context, a Action) error {
 		return nil
 	}
 	return nil
+}
+
+// binGenuine reports whether the on-disk platform binary for v passes
+// Ed25519 signature verification against the daemon's compiled-in trust root.
+// A verify ERROR (unreadable / too-short / truncated file) counts as NOT
+// genuine — fail closed: a binary we cannot PROVE is authentic must be
+// treated exactly like a missing one and re-fetched before exec. Uses
+// e.VerifyBin (the injected seam) or, when nil, the real sig.VerifyFile.
+func (e *Executor) binGenuine(v string) bool {
+	verify := e.VerifyBin
+	if verify == nil {
+		verify = sig.VerifyFile
+	}
+	ok, err := verify(e.Store.BinPath(v))
+	return err == nil && ok
+}
+
+// clearTamperSuspicion drops every stale crash/bad verdict about v once a
+// genuine binary for it is confirmed on disk: the on-disk bad marker, the
+// in-memory crash counter, and the ProcSvc exit latch. Clearing the on-disk
+// bad set alone would not suffice — an in-memory crashHit + a latched
+// fast-exit would re-mark v bad on the next tick — so all three are cleared
+// together, keeping the wedge recoverable without a daemon process restart.
+func (e *Executor) clearTamperSuspicion(v string) {
+	// Never swallow a real ClearBad failure: if the on-disk marker can't be
+	// removed (e.g. permission), the in-memory clear below would desync from
+	// disk and Decide would keep routing v to Rollback/Blocked with no trail.
+	if err := e.Store.ClearBad(v); err != nil {
+		e.logf("clear bad marker for %s failed (will retry next tick): %v", v, err)
+	}
+	delete(e.crashHit, v)
+	e.resetPlatExit()
+}
+
+// resetPlatExit forgets a dead platform child's exit record when the Platform
+// implementation supports it (ProcSvc does; the test/reap fakes do not). A
+// no-op while a child is live, so it can never disturb a running platform.
+func (e *Executor) resetPlatExit() {
+	if c, ok := e.Plat.(interface{ ClearExit() }); ok {
+		c.ClearExit()
+	}
 }
 
 func (e *Executor) logf(format string, args ...any) {

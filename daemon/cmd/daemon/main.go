@@ -28,6 +28,7 @@ import (
 	"github.com/eliteGoblin/focusd/daemon/internal/fetch"
 	"github.com/eliteGoblin/focusd/daemon/internal/mode"
 	"github.com/eliteGoblin/focusd/daemon/internal/osadapter"
+	"github.com/eliteGoblin/focusd/daemon/internal/platdir"
 	"github.com/eliteGoblin/focusd/daemon/internal/platformsvc"
 	"github.com/eliteGoblin/focusd/daemon/internal/relocate"
 	"github.com/eliteGoblin/focusd/daemon/internal/uninstallgate"
@@ -118,17 +119,27 @@ func usage() {
 }
 
 type opts struct {
-	workdir    string
-	interval   time.Duration
-	github     string
-	asset      string
-	releaseDir string
-	healthy    time.Duration
-	unhealthy  time.Duration
-	role       string
-	testMode   bool
-	mesh       bool
-	roster     []string
+	// workdir is the DAEMON-HOME (FEATURE 21 / HF1): the daemon binary +
+	// daemon-owned state (version.json, good, bad/, .roster, daemon.log). It
+	// survives a platform-workdir wipe. Derived for a mesh role from the
+	// binary's parent dir; explicit via --workdir for CLI/test.
+	workdir string
+	// platformWorkdir is the disposable platform-workdir (bin/<v>/platform,
+	// plugins, state.db, platform.log), resolved from the pointer file in
+	// daemon-home (see platdir.Resolve). Empty ⇒ legacy single-root: the
+	// platform state lives under workdir (unit/e2e tests, non-mesh runs, and
+	// the non-ticking `daemon update`).
+	platformWorkdir string
+	interval        time.Duration
+	github          string
+	asset           string
+	releaseDir      string
+	healthy         time.Duration
+	unhealthy       time.Duration
+	role            string
+	testMode        bool
+	mesh            bool
+	roster          []string
 }
 
 func (o opts) spec(self string) osadapter.Spec {
@@ -223,7 +234,11 @@ func parse(name string, args []string) opts {
 		}
 	}
 
-	return opts{workdir, *iv, *gh, platformAsset(), *rd, *hd, *ud, *rl, testMode, *mesh, roster}
+	return opts{
+		workdir: workdir, interval: *iv, github: *gh, asset: platformAsset(),
+		releaseDir: *rd, healthy: *hd, unhealthy: *ud, role: *rl,
+		testMode: testMode, mesh: *mesh, roster: roster,
+	}
 }
 
 // isMeshRole reports whether a parsed invocation is a mesh member that
@@ -246,6 +261,34 @@ func deriveMeshWorkdir() string {
 		return wd
 	}
 	return defaultWorkdir()
+}
+
+// supportRootForDaemonHome returns the Application-Support root under which the
+// disposable platform-workdir is (re)created for a mode (FEATURE 21 / HF1).
+// user/system → the mode's real support root; test → the daemon-home's PARENT
+// (the e2e sandbox) so a test platform-workdir stays a sibling of daemon-home
+// inside the sandbox and a fresh recreate never escapes it.
+func supportRootForDaemonHome(m mode.Mode, daemonHome string) string {
+	if m != mode.Test {
+		if home, err := os.UserHomeDir(); err == nil {
+			return mode.SupportRoot(m, home)
+		}
+	}
+	return filepath.Dir(daemonHome)
+}
+
+// resolvePlatformWorkdir resolves — and self-heals — the disposable
+// platform-workdir for a daemon-home via the pointer file (FEATURE 21 / HF1).
+// When the pointer is missing or its target was wiped, platdir.Resolve creates
+// a FRESH platform-workdir and rewrites the pointer. A resolve failure is
+// non-fatal: return "" so build() degrades to the legacy single-root (platform
+// state under daemon-home) rather than refusing to run.
+func resolvePlatformWorkdir(m mode.Mode, daemonHome string) string {
+	pw, err := platdir.Resolve(daemonHome, supportRootForDaemonHome(m, daemonHome))
+	if err != nil {
+		return ""
+	}
+	return pw
 }
 
 // workerHealInterval is the fast in-process worker reconcile cadence
@@ -331,14 +374,43 @@ func defaultWorkdir() string {
 
 func build(o opts) (*core.Executor, *slog.Logger) {
 	log := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo}))
+	// FEATURE 21 (HF1): the daemon's durable state lives under the daemon-home
+	// (o.workdir); the platform's disposable binaries + process live under the
+	// separate platform-workdir when one has been resolved (loop/install). An
+	// empty platformWorkdir keeps the legacy single-root layout (unit/e2e
+	// tests, non-mesh runs, and the non-ticking `daemon update`).
+	platWD := o.platformWorkdir
+	if platWD == "" {
+		platWD = o.workdir
+	}
 	st := &core.Store{Dir: o.workdir}
+	if platWD != o.workdir {
+		st.PlatformDir = platWD
+	}
+	// HF4 (FEATURE 24): outside test mode, seed the per-install disguise salt so
+	// the platform binary lands under a disguised basename and the child runs
+	// under a generic argv[0] (no version/'platform'/workdir in `ps`). Test mode
+	// deliberately stays on the legacy, deterministic layout so e2e is
+	// self-contained. Best-effort: a write failure degrades to the legacy layout
+	// (empty salt ⇒ PlatformArgv0/BinPath fall back) rather than blocking.
+	if o.modeVal() != mode.Test {
+		_, _ = st.EnsureInstallSalt()
+	}
 	var f core.Fetcher
 	if o.releaseDir != "" {
 		f = &fetch.Local{Dir: o.releaseDir}
 	} else {
 		f = &fetch.GitHub{Repo: o.github, Asset: o.asset}
 	}
-	p := platformsvc.New(o.workdir)
+	p := platformsvc.New(platWD)
+	// HF4: set the disguised argv[0] for the platform child (empty in test mode /
+	// no-salt ⇒ ProcSvc keeps the legacy visible argv).
+	p.Argv0 = st.PlatformArgv0()
+	// HF4 (P3): publish the child's pid to a salt-independent liveness pidfile in
+	// the DAEMON-HOME (o.workdir survives a platform-workdir wipe; a `focusd
+	// status` discovers this same root). This is the primary up/down signal, so a
+	// pgrep miss after a salt divergence can never falsely report DOWN.
+	p.PidFile = filepath.Join(o.workdir, core.PlatformPidFile)
 	if o.healthy > 0 {
 		p.Healthy = o.healthy
 	}
@@ -359,11 +431,32 @@ func build(o opts) (*core.Executor, *slog.Logger) {
 	// FEATURE 17 Item 2: elect one platform across path-rotating generations
 	// via a fixed, mode-keyed lock path (test mode stays per-workdir).
 	e.LockFilePath = singletonLockPath(o.modeVal(), o.workdir)
+	// FEATURE 25 (Element 3): only a REAL installed mesh worker reaps orphaned
+	// platform processes. Gated OFF for test mode (the reaper anchors on
+	// mode.Resolve()'s SupportRoot, which for a HOME-overridden e2e sandbox is
+	// safe, but there is no launchd-reparent orphan class to chase there) and for
+	// non-mesh foreground runs (dev/e2e `daemon run`), so a stray foreground
+	// daemon never scans/kills real user platforms. On non-darwin
+	// osadapter.ReapForeignPlatforms is a no-op stub.
+	//
+	// HF4 (FEATURE 24) reconciliation: the reaper is NAMING-AGNOSTIC — it
+	// classifies orphans by Ed25519 signature verification of the executable
+	// under this mode's SupportRoot (not by the platform basename), so HF4's
+	// disguised basename needs no coupling here.
+	if o.mesh && o.modeVal() != mode.Test {
+		e.ReapForeign = osadapter.ReapForeignPlatforms
+	}
 	return e, log
 }
 
 func loop(args []string, once bool) int {
 	o := parse("run", args)
+	// FEATURE 21 (HF1): resolve — and self-heal — the disposable
+	// platform-workdir from the pointer in daemon-home BEFORE building the
+	// executor. A wiped platform-workdir (pointer target gone) is re-created
+	// fresh here, so the very next tick re-fetches + restarts the platform
+	// while the daemon-home (binary + state) is untouched.
+	o.platformWorkdir = resolvePlatformWorkdir(o.modeVal(), o.workdir)
 	e, log := build(o)
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
@@ -657,67 +750,95 @@ func doInstall(args []string) int {
 // Roster in place for the user/system relocation.
 func installMesh(self string, spec *osadapter.Spec, desired string) error {
 	m := spec.Mode
-	if m != mode.Test {
-		// user/system: self-relocate into a hidden random workdir under
-		// this mode's Application Support root (user → ~/Library,
-		// system → /Library) + three INDEPENDENT disguised mesh labels
-		// (FEATURE 10 / ADR-0014: distinct vendor families, no shared
-		// base, no role token). Test mode stays fixed/deterministic + uses
-		// the given workdir so e2e is safe & removable.
+
+	// FEATURE 21 (HF1): establish TWO roots with distinct lifetimes.
+	//   - daemon-home: the daemon binary + daemon-owned state (version.json,
+	//     good, bad/, .roster, daemon.log). The mesh plists point at the binary
+	//     HERE, so deleting the platform-workdir cannot disable the daemon.
+	//   - platform-workdir: the disposable engine storage (bin/<v>/platform,
+	//     plugins, state.db, platform.log), recorded via a pointer file in
+	//     daemon-home. spec.Workdir carries the DAEMON-HOME (plist daemon.log +
+	//     the store both key off it); the platform-workdir is resolved at
+	//     runtime from the pointer (see resolvePlatformWorkdir).
+	var daemonHome, supportRoot string
+	if m == mode.Test {
+		// e2e sandbox: daemon-home + platform-workdir are SIBLINGS under the
+		// caller-supplied workdir, so deleting one leaves the other and both
+		// tear down with the sandbox. The binary is NOT relocated (test bakes an
+		// explicit --workdir), so daemon-home is a fixed sandbox subdir.
+		supportRoot = spec.Workdir
+		daemonHome = filepath.Join(spec.Workdir, "daemon-home")
+		if err := os.MkdirAll(daemonHome, 0o700); err != nil {
+			return fmt.Errorf("mkdir daemon-home: %w", err)
+		}
+		spec.Workdir = daemonHome
+	} else {
+		// user/system: relocate the daemon binary into a hidden daemon-home
+		// under this mode's Application Support root (user → ~/Library, system →
+		// /Library) + three INDEPENDENT disguised mesh labels (FEATURE 10 /
+		// ADR-0014: distinct vendor families, no shared base, no role token).
 		home, _ := os.UserHomeDir()
-		wd := relocate.HiddenWorkdir(mode.SupportRoot(m, home))
-		reloc, rerr := relocate.RelocateInto(self, wd)
+		supportRoot = mode.SupportRoot(m, home)
+		daemonHome = relocate.HiddenWorkdir(supportRoot)
+		reloc, rerr := relocate.RelocateInto(self, daemonHome)
 		if rerr != nil {
 			return fmt.Errorf("relocate: %w", rerr)
 		}
 		spec.SelfPath = reloc
-		spec.Workdir = wd
+		spec.Workdir = daemonHome
 		spec.Roster = relocate.GenerateRoster()
-		// Do NOT print the disguised roster labels OR the relocated binary
-		// PATH — both are strings a weak-moment self needs for a targeted
-		// bootout / rm. (This line also runs in the watchdog rebuild context.)
-		// Print only the relocation FACT + mode, never the path.
+		// Do NOT print the disguised daemon-home PATH OR the roster labels —
+		// both are strings a weak-moment self needs for a targeted bootout / rm.
+		// Print only the relocation FACT + mode, never the path. (This line also
+		// runs in the watchdog rebuild context.)
 		fmt.Printf("relocated (mode %s)\n", m)
 	}
-	// Pin the desired platform version BEFORE calling Install so the
-	// launchd mesh comes up with version.json already in place. If we
-	// wrote it AFTER osadapter.Install, the first reconcile tick can
-	// race in, observe no desired, and log a spurious "Blocked" — fine
-	// in steady state but cosmetically alarming on first install. Go-
-	// review HIGH #3.
-	st := &core.Store{Dir: spec.Workdir}
+
+	// Create the disposable platform-workdir (a SEPARATE hidden dir, sentinel-
+	// marked) and record it in daemon-home's pointer file, so the first launch
+	// resolves it — and a later `rm -rf` of it is re-created fresh from the
+	// pointer while daemon-home stays intact.
+	platformWorkdir, perr := platdir.Create(supportRoot)
+	if perr != nil {
+		return fmt.Errorf("create platform-workdir: %w", perr)
+	}
+	if err := platdir.Write(daemonHome, platformWorkdir); err != nil {
+		return fmt.Errorf("write platform pointer: %w", err)
+	}
+
+	// Pin the desired platform version into the DAEMON-HOME store BEFORE calling
+	// Install so the launchd mesh comes up with version.json already in place.
+	// If we wrote it AFTER osadapter.Install, the first reconcile tick can race
+	// in, observe no desired, and log a spurious "Blocked". Go-review HIGH #3.
+	st := &core.Store{Dir: daemonHome}
 	if err := st.WriteDesired(desired); err != nil {
 		return fmt.Errorf("write desired: %w", err)
 	}
 	if err := osadapter.Install(*spec); err != nil {
 		return fmt.Errorf("install mesh: %w", err)
 	}
-	// FEATURE 17 Item 3: the new generation is up FIRST (above); now retire any
-	// OLDER generations left behind by a wiped-state reinstall (distinct
-	// Ed25519-verified binary path ≠ the one we just installed). Best-effort —
-	// a retire failure must NOT fail an otherwise-successful install, and the
-	// retired labels/paths are never surfaced (count is logged at the call
-	// site if at all). Idempotent: with no older generation present it is a
-	// no-op. NOT called from the self-update path (in-place rotation transiently
-	// looks like two generations).
-	if n, rerr := osadapter.RetireOtherGenerations(spec.Mode, spec.SelfPath); rerr != nil {
-		// Generic message only: rerr could embed a disguised path.
-		fmt.Fprintln(os.Stderr, "install: retire prior generations (best-effort) failed")
-	} else if n > 0 {
-		fmt.Printf("retired %d prior generation(s)\n", n)
-	}
-	// FEATURE 17 follow-up (TC-21): retirement only catches generations still
-	// visible to a plist scan. A teardown/recovery/re-install cycle can also
-	// leave ORPHANED generation workdirs on disk — hidden-dot dirs with a stale
-	// state.db but NO plist/process backing them — invisible to retirement.
-	// Sweep them now (keep = the new install's workdir = Dir(relocated binary))
-	// so exactly ONE state.db survives and status reads a single source. Best-
-	// effort: a sweep failure must NOT fail an otherwise-successful install, and
-	// the swept paths are never surfaced.
-	if n, serr := osadapter.SweepOrphanWorkdirs(spec.Mode, filepath.Dir(spec.SelfPath)); serr != nil {
-		fmt.Fprintln(os.Stderr, "install: sweep orphan workdirs (best-effort) failed")
-	} else if n > 0 {
-		fmt.Printf("swept %d orphan workdir(s)\n", n)
+	// FEATURE 25: the new generation is up FIRST (above); now CONVERGE to exactly
+	// one daemon + one platform across BOTH domains. This supersedes the FEATURE
+	// 17/21 mode-scoped retire + sweep calls (which only ever touched spec.Mode,
+	// so a sudo install never retired the user generations and vice-versa).
+	// ConvergeSingleInstance retires every OTHER generation in the user AND system
+	// domains, kills each retired generation's platform, reaps orphaned platform
+	// processes, and sweeps stale daemon-home + platform-workdirs. Best-effort: a
+	// convergence failure must NEVER fail an otherwise-successful install, and the
+	// retired/reaped labels/paths are never surfaced (counts only). The survivor
+	// platform is not running yet (the first tick starts it), so keepPlatformPID
+	// is 0 — the survivor is exempted by its (path) binary instead.
+	keepPlatformBin := (&core.Store{Dir: daemonHome, PlatformDir: platformWorkdir}).BinPath(desired)
+	if retired, reaped, cerr := osadapter.ConvergeSingleInstance(spec.Mode, spec.SelfPath, keepPlatformBin, 0); cerr != nil {
+		// Generic message only: cerr could embed a disguised path.
+		fmt.Fprintln(os.Stderr, "install: converge single-instance (best-effort) failed")
+	} else {
+		if retired > 0 {
+			fmt.Printf("retired %d prior generation(s)\n", retired)
+		}
+		if reaped > 0 {
+			fmt.Printf("reaped %d orphan platform process(es)\n", reaped)
+		}
 	}
 	return nil
 }

@@ -1,6 +1,7 @@
 package core
 
 import (
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -42,6 +43,42 @@ func TestStoreBinPath(t *testing.T) {
 	}
 	if s.HaveBin("v3") {
 		t.Fatal("no bin should exist")
+	}
+}
+
+// TestStorePlatformDirRoutesBinPath pins FEATURE 21 (HF1): with a distinct
+// PlatformDir, the platform BINARY resolves under the disposable platform-workdir
+// while the daemon's own STATE (version.json/good) stays under the daemon-home
+// (Dir) — i.e. daemon-state and platform-state resolve to DIFFERENT roots.
+func TestStorePlatformDirRoutesBinPath(t *testing.T) {
+	daemonHome := t.TempDir()
+	platformWorkdir := t.TempDir()
+	s := &Store{Dir: daemonHome, PlatformDir: platformWorkdir}
+
+	// Platform binary lives under the platform-workdir, NOT the daemon-home.
+	bin := s.BinPath("v3")
+	if want := filepath.Join(platformWorkdir, "bin", "v3", "platform"); bin != want {
+		t.Fatalf("BinPath = %q, want under platform-workdir %q", bin, want)
+	}
+	if strings.HasPrefix(bin, daemonHome+string(filepath.Separator)) {
+		t.Fatalf("platform binary %q must NOT live under the daemon-home %q", bin, daemonHome)
+	}
+
+	// Daemon-owned state (version.json / good) lives under the daemon-home.
+	if err := s.WriteDesired("v3"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(daemonHome, VersionFile)); err != nil {
+		t.Fatalf("version.json must live under the daemon-home: %v", err)
+	}
+	if s.Desired() != "v3" {
+		t.Fatalf("desired roundtrip under daemon-home failed: %q", s.Desired())
+	}
+
+	// Empty PlatformDir keeps the legacy single-root layout (BinPath under Dir).
+	legacy := &Store{Dir: daemonHome}
+	if got, want := legacy.BinPath("v3"), filepath.Join(daemonHome, "bin", "v3", "platform"); got != want {
+		t.Fatalf("legacy BinPath = %q, want %q", got, want)
 	}
 }
 

@@ -17,6 +17,7 @@ import (
 
 	"github.com/eliteGoblin/focusd/daemon/internal/core"
 	"github.com/eliteGoblin/focusd/daemon/internal/mode"
+	"github.com/eliteGoblin/focusd/daemon/internal/platdir"
 	"github.com/eliteGoblin/focusd/daemon/internal/sig"
 )
 
@@ -498,7 +499,15 @@ func DiscoverAllGenerations(m mode.Mode, verify Verifier) (live []Generation, de
 // and orphan platform/daemon processes persist invisibly otherwise (the old
 // "retired 1 while ≥2 live generations remain" bug). pkill -f against the
 // dangling binary path matches the orphans' argv and reaps them.
-func RetireOtherGenerations(m mode.Mode, keepBinaryPath string) (int, error) {
+//
+// supportRoot is the containment root for the os.RemoveAll blast radius: a
+// workdir is only deleted when it is strictly nested under it (safeToRemoveWorkdir).
+// It is an EXPLICIT param — NOT recomputed from mode.SupportRoot(m, home) — so a
+// test-mode install (whose SupportRoot(Test, …) would otherwise resolve to the
+// REAL ~/Library/Application Support and let a sandbox install delete real
+// generation workdirs) passes its sandbox root and can never escape it. The
+// caller (installMesh) passes the same sandboxed local it hands the platform sweep.
+func RetireOtherGenerations(m mode.Mode, keepBinaryPath, supportRoot string) (int, error) {
 	// Refuse to retire ANYTHING without a surviving generation to keep: an
 	// empty keepBinaryPath would make every discovered generation "other" and
 	// tear the whole mesh down (the bootout + os.RemoveAll blast radius). A
@@ -510,11 +519,12 @@ func RetireOtherGenerations(m mode.Mode, keepBinaryPath string) (int, error) {
 	if err != nil {
 		return 0, err
 	}
-	home, _ := os.UserHomeDir()
-	root := mode.SupportRoot(m, home)
 	c := launchctlCtl{m: m}
-	return retireGenerations(gens, dead, keepBinaryPath, root,
-		c.bootout, os.Remove, pkillBinary, os.RemoveAll), nil
+	// f0593fb (HF1 fix) supplies the containment root as an EXPLICIT param;
+	// FEATURE 25 adds killGenerationPlatform so a retired generation's PLATFORM
+	// child is torn down too (not just its daemon binary). Combine both.
+	return retireGenerations(gens, dead, keepBinaryPath, supportRoot,
+		c.bootout, os.Remove, pkillBinary, killGenerationPlatform(supportRoot), os.RemoveAll), nil
 }
 
 // stateDBFile is the SQLite state file a platform writes into its generation
@@ -546,10 +556,16 @@ const stateDBFile = "state.db"
 // so far with the error for optional logging.
 //
 // keepWorkdir is the new install's workdir (Dir of the relocated binary).
-func SweepOrphanWorkdirs(m mode.Mode, keepWorkdir string) (removed int, err error) {
-	home, _ := os.UserHomeDir()
-	root := mode.SupportRoot(m, home)
-	entries, rerr := os.ReadDir(root)
+//
+// supportRoot is the scan root AND the containment root for os.RemoveAll — an
+// EXPLICIT param (mirroring SweepStalePlatformWorkdirs), NOT recomputed from
+// mode.SupportRoot(m, home). That recompute was the storage-separation defect:
+// SupportRoot(Test, …) resolves to the REAL ~/Library/Application Support, so a
+// test-mode install would scan and delete REAL generation workdirs. The caller
+// (installMesh) passes the sandboxed local it already computed, so a test-mode
+// sweep is confined to the sandbox.
+func SweepOrphanWorkdirs(supportRoot, keepWorkdir string) (removed int, err error) {
+	entries, rerr := os.ReadDir(supportRoot)
 	if rerr != nil {
 		if os.IsNotExist(rerr) {
 			return 0, nil
@@ -561,9 +577,17 @@ func SweepOrphanWorkdirs(m mode.Mode, keepWorkdir string) (removed int, err erro
 		if !e.IsDir() || !strings.HasPrefix(e.Name(), ".") {
 			continue // only hidden-dot directories are generation workdirs
 		}
-		dir := filepath.Join(root, e.Name())
+		dir := filepath.Join(supportRoot, e.Name())
 		if filepath.Clean(dir) == keep {
 			continue // the surviving generation — never sweep it
+		}
+		// FEATURE 21 (HF1): a disposable platform-workdir now holds the state.db
+		// (the daemon-home does not). Skip sentinel-marked platform-workdirs here
+		// so this daemon-home orphan sweep never deletes the LIVE platform
+		// storage; stale platform-workdirs are handled by
+		// SweepStalePlatformWorkdirs.
+		if platdir.IsPlatformWorkdir(dir) {
+			continue
 		}
 		// The generation signature: a state.db file. The watchdog copy dir (a
 		// hidden-dot sibling) has none, so it is naturally excluded; a legit
@@ -575,7 +599,7 @@ func SweepOrphanWorkdirs(m mode.Mode, keepWorkdir string) (removed int, err erro
 		// GUARD: only RemoveAll a dir strictly under the support root that is
 		// neither the keep nor an ancestor of it (the same belt the generation
 		// retirement uses). Best-effort: a remove failure is skipped, not fatal.
-		if safeToRemoveWorkdir(dir, root, keepWorkdir) {
+		if safeToRemoveWorkdir(dir, supportRoot, keepWorkdir) {
 			if rmErr := os.RemoveAll(dir); rmErr == nil {
 				removed++
 			}
@@ -596,11 +620,20 @@ const minBinPathLen = 20 // shorter than any real disguised install path
 // killBin/removeAll are the side-effecting seams. Returns the number of
 // generations retired (live others whose BinaryPath != keepBinaryPath, PLUS
 // every dead/zombie generation).
+//
+// FEATURE 25: killGenPlatform is the platform-kill seam — for every retired
+// generation it is called with that generation's daemon-home (workdir) so the
+// generation's PLATFORM process (a separate binary under a separate
+// platform-workdir, HF1) is torn down too. killBin only reaps the DAEMON binary
+// path; without this, a retired generation's orphaned platform child survived
+// and accreted (the root-cause hole). The keep generation is skipped entirely,
+// so its platform is never touched here.
 func retireGenerations(
 	gens []Generation, dead []DeadGeneration, keepBinaryPath, supportRoot string,
 	bootout func(string) error,
 	removePlist func(string) error,
 	killBin func(string),
+	killGenPlatform func(daemonHome string),
 	removeAll func(string) error,
 ) int {
 	// Defense in depth (mirrors RetireOtherGenerations): with no keep target
@@ -627,6 +660,14 @@ func retireGenerations(
 		// install paths are far longer than minBinPathLen.
 		if len(bin) > minBinPathLen {
 			killBin(bin) // best-effort; no surviving daemon shares this path
+		}
+		// FEATURE 25: also tear down this generation's PLATFORM process (a
+		// separate binary under its own platform-workdir, HF1). killBin above only
+		// matched the DAEMON binary; a retired generation's orphaned platform must
+		// die too or it survives + accretes. Keyed on the daemon-home so the seam
+		// resolves the platform-workdir pointer itself (best-effort, guarded).
+		if killGenPlatform != nil && workdir != "" {
+			killGenPlatform(workdir)
 		}
 		// GUARD: only RemoveAll a workdir that is strictly under the mode's
 		// support root, is not the keep workdir, and is not an ancestor of it.
@@ -869,8 +910,21 @@ func SelfUpdateProd(
 	if newSpec.Workdir != "" {
 		rs = newWorkdirRoster(newSpec.Workdir)
 	}
+	// FEATURE 25 (Element 2): after the swap, reap the OLD platform orphan
+	// (bounded to the invoke mode) + sweep stale platform-workdirs. The new
+	// platform PID is not known here (the new daemon starts it on its next tick),
+	// so keepPID=0 = no PID exemption — the reaper kills same-mode orphans and the
+	// new daemon self-heals its own platform if it was already up. NOT a
+	// both-modes converge (that would break the transient two-generation swap).
+	afterSwap := func() {
+		home, _ := os.UserHomeDir()
+		root := mode.SupportRoot(newSpec.Mode, home)
+		_, _ = reapForeignPlatforms(root, 0, "", listPlatformProcs, resolvePlatformExecs, sig.VerifyFile, killProc)
+		keepPW := platdir.Read(newSpec.Workdir) // survivor platform-workdir pointer
+		_, _ = SweepStalePlatformWorkdirs(root, keepPW)
+	}
 	return SelfUpdate(cur, newSpec, newBin, c, fs, p, binPlacerFS{}, rs,
-		healthyTimeout, probeInterval, keepOld)
+		healthyTimeout, probeInterval, keepOld, afterSwap)
 }
 
 func between(s, a, b string) string {

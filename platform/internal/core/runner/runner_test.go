@@ -140,9 +140,10 @@ func TestRunNotRunnablePlugin(t *testing.T) {
 
 func TestRunPassesJobConfigToPlugin(t *testing.T) {
 	r := newRunner(t)
-	// Plugin echoes back the config file it was given.
+	// Plugin echoes back the config it was given ON STDIN (HF4: no --config path
+	// in argv; the resolved job config arrives via stdin).
 	p := testutil.ScriptPlugin(t, "echocfg",
-		`shift; shift; cat "$1"; echo '{"status":"ok"}'`)
+		`cat; echo '{"status":"ok"}'`)
 	job := Job{ID: "j1", Config: map[string]any{"process_names": []any{"Steam"}}}
 	out, err := r.Run(context.Background(), job, p, "manual")
 	if err != nil {

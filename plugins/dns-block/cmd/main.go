@@ -14,9 +14,11 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
 	"flag"
 	"fmt"
+	"io"
 	"os"
 
 	"github.com/eliteGoblin/focusd/plugins/dns-block/internal/reconciler"
@@ -54,7 +56,13 @@ func run(args []string) int {
 		return 2
 	}
 
-	hosts, err := loadHostsOverride(*cfgPath)
+	raw, err := readJobConfig(*cfgPath)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "config:", err)
+		emit(result{Status: "error", Message: err.Error()})
+		return 2
+	}
+	hosts, err := loadHostsOverride(raw)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "config:", err)
 		emit(result{Status: "error", Message: err.Error()})
@@ -80,20 +88,34 @@ func run(args []string) int {
 	return 0
 }
 
+// readJobConfig returns the job-config JSON bytes: from --config <path>
+// (compat) when set, else drained from stdin (the disguised path — the
+// config path never appears in this process's argv). Empty/absent => nil
+// (grounded defaults). HF4 (FEATURE 24).
+func readJobConfig(cfgPath string) ([]byte, error) {
+	if cfgPath != "" {
+		return os.ReadFile(cfgPath)
+	}
+	b, err := io.ReadAll(os.Stdin)
+	if err != nil {
+		return nil, fmt.Errorf("read stdin config: %w", err)
+	}
+	if len(bytes.TrimSpace(b)) == 0 {
+		return nil, nil // no config → defaults
+	}
+	return b, nil
+}
+
 // loadHostsOverride returns the "hosts" list from the job config if
 // present, otherwise nil (which makes the reconciler use the embedded
-// blocklist). Empty path is tolerated (run with no config = embedded).
-func loadHostsOverride(path string) ([]string, error) {
-	if path == "" {
+// blocklist). Empty/nil raw is tolerated (run with no config = embedded).
+func loadHostsOverride(raw []byte) ([]string, error) {
+	if len(raw) == 0 {
 		return nil, nil
-	}
-	raw, err := os.ReadFile(path)
-	if err != nil {
-		return nil, fmt.Errorf("read %s: %w", path, err)
 	}
 	var in jobInput
 	if err := json.Unmarshal(raw, &in); err != nil {
-		return nil, fmt.Errorf("parse %s: %w", path, err)
+		return nil, fmt.Errorf("parse config JSON: %w", err)
 	}
 	v, ok := in.Config["hosts"]
 	if !ok {

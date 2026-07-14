@@ -25,6 +25,21 @@ func writeCfg(t *testing.T, dir string, body string) string {
 	return p
 }
 
+// withStdin swaps os.Stdin for a pipe carrying data for the duration of
+// fn, then restores it. Exercises the disguised (stdin) config path.
+func withStdin(t *testing.T, data string, fn func()) {
+	t.Helper()
+	old := os.Stdin
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	go func() { _, _ = w.Write([]byte(data)); _ = w.Close() }()
+	os.Stdin = r
+	defer func() { os.Stdin = old; _ = r.Close() }()
+	fn()
+}
+
 // captureStdout redirects os.Stdout, runs fn, and returns whatever it
 // printed. Necessary because emit() prints the success-path JSON and
 // the E2E test wants to assert its shape.
@@ -84,8 +99,13 @@ func TestRun_UsageAndVersion(t *testing.T) {
 }
 
 func TestRun_MissingConfigFlag(t *testing.T) {
-	if code := run([]string{"run"}); code != 2 {
-		t.Errorf("missing --config exit = %d, want 2", code)
+	// No --config and empty stdin => "config is required" => exit 2.
+	// Stdin is swapped to an empty pipe so the test never blocks on the
+	// inherited terminal/pipe.
+	code := 0
+	withStdin(t, "", func() { code = run([]string{"run"}) })
+	if code != 2 {
+		t.Errorf("missing config exit = %d, want 2", code)
 	}
 }
 
@@ -96,19 +116,22 @@ func TestRun_MissingConfigFile(t *testing.T) {
 	}
 }
 
-// --- config validation ---
+// --- config validation (bytes helper) ---
+
+func TestLoadConfig_EmptyRawIsError(t *testing.T) {
+	if _, err := loadConfig(nil); err == nil {
+		t.Error("nil raw (no --config, no stdin) should be an error: config is required")
+	}
+}
 
 func TestLoadConfig_RejectsHTTPResolver(t *testing.T) {
-	dir := t.TempDir()
-	p := writeCfg(t, dir, `{"config":{"anchor":"a","table":"t","domains":["x"],"resolver":"http://insecure/"}}`)
-	_, err := loadConfig(p)
+	_, err := loadConfig([]byte(`{"config":{"anchor":"a","table":"t","domains":["x"],"resolver":"http://insecure/"}}`))
 	if err == nil || !strings.Contains(err.Error(), "https://") {
 		t.Errorf("HTTP resolver should be rejected, got err=%v", err)
 	}
 }
 
 func TestLoadConfig_MissingFields(t *testing.T) {
-	dir := t.TempDir()
 	cases := map[string]string{
 		"missing anchor":   `{"config":{"table":"t","domains":["x"],"resolver":"https://r/"}}`,
 		"missing table":    `{"config":{"anchor":"a","domains":["x"],"resolver":"https://r/"}}`,
@@ -118,8 +141,7 @@ func TestLoadConfig_MissingFields(t *testing.T) {
 	}
 	for name, body := range cases {
 		t.Run(name, func(t *testing.T) {
-			p := writeCfg(t, dir, body)
-			if _, err := loadConfig(p); err == nil {
+			if _, err := loadConfig([]byte(body)); err == nil {
 				t.Errorf("%s should be rejected", name)
 			}
 		})
@@ -127,14 +149,12 @@ func TestLoadConfig_MissingFields(t *testing.T) {
 }
 
 func TestLoadConfig_HappyPath(t *testing.T) {
-	dir := t.TempDir()
-	p := writeCfg(t, dir, `{"job_id":"j","plugin_id":"network-block","config":{
+	cfg, err := loadConfig([]byte(`{"job_id":"j","plugin_id":"network-block","config":{
 		"anchor":"focusd-block-steam",
 		"table":"steam_ips",
 		"domains":["a.com","b.com"],
 		"resolver":"https://cloudflare-dns.com/dns-query"
-	}}`)
-	cfg, err := loadConfig(p)
+	}}`))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -147,18 +167,59 @@ func TestLoadConfig_HappyPath(t *testing.T) {
 }
 
 func TestLoadConfig_BadDomainsShape(t *testing.T) {
-	dir := t.TempDir()
-	p := writeCfg(t, dir, `{"config":{"anchor":"a","table":"t","domains":[123],"resolver":"https://r/"}}`)
-	if _, err := loadConfig(p); err == nil {
+	if _, err := loadConfig([]byte(`{"config":{"anchor":"a","table":"t","domains":[123],"resolver":"https://r/"}}`)); err == nil {
 		t.Error("non-string domain should be rejected")
 	}
 }
 
 func TestLoadConfig_MalformedJSON(t *testing.T) {
-	dir := t.TempDir()
-	p := writeCfg(t, dir, `{not json`)
-	if _, err := loadConfig(p); err == nil {
+	if _, err := loadConfig([]byte(`{not json`)); err == nil {
 		t.Error("malformed JSON should be rejected")
+	}
+}
+
+// --- readJobConfig: --config (compat) vs stdin (disguised) ---
+
+// TestReadJobConfig_StdinMatchesFile proves a config supplied via STDIN
+// parses to an identical pluginConfig as the same JSON via --config <file>.
+func TestReadJobConfig_StdinMatchesFile(t *testing.T) {
+	body := `{"config":{"anchor":"a","table":"t","domains":["x.com"],"resolver":"https://r/"}}`
+
+	dir := t.TempDir()
+	p := writeCfg(t, dir, body)
+	fromFileRaw, err := readJobConfig(p)
+	if err != nil {
+		t.Fatalf("readJobConfig(path): %v", err)
+	}
+	fromFile, err := loadConfig(fromFileRaw)
+	if err != nil {
+		t.Fatalf("loadConfig(file): %v", err)
+	}
+
+	var fromStdinRaw []byte
+	withStdin(t, body, func() { fromStdinRaw, err = readJobConfig("") })
+	if err != nil {
+		t.Fatalf("readJobConfig(stdin): %v", err)
+	}
+	fromStdin, err := loadConfig(fromStdinRaw)
+	if err != nil {
+		t.Fatalf("loadConfig(stdin): %v", err)
+	}
+
+	if fromFile.Anchor != fromStdin.Anchor ||
+		fromFile.Table != fromStdin.Table ||
+		fromFile.Resolver != fromStdin.Resolver ||
+		len(fromFile.Domains) != len(fromStdin.Domains) {
+		t.Errorf("stdin cfg %+v != file cfg %+v", fromStdin, fromFile)
+	}
+}
+
+func TestReadJobConfig_EmptyStdinIsNil(t *testing.T) {
+	var raw []byte
+	var err error
+	withStdin(t, "  \n", func() { raw, err = readJobConfig("") })
+	if err != nil || raw != nil {
+		t.Errorf("empty/whitespace stdin => nil,nil; got %v,%v", raw, err)
 	}
 }
 
