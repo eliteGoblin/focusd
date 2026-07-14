@@ -38,6 +38,11 @@ func args(s Spec, r Role) []string {
 	return append([]string{"run", "--r", string(r), "--mesh"}, tail...)
 }
 
+// DaemonLogName is the neutral basename of the daemon's launchd stdout/stderr
+// log under the workdir (HF4 / FEATURE 24). Neutral ("run.log", not "daemon.log")
+// so a filesystem grep for 'daemon' finds nothing tied to the supervisor.
+const DaemonLogName = "run.log"
+
 // envKV is one launchd EnvironmentVariables entry.
 type envKV struct{ Key, Value string }
 
@@ -112,8 +117,10 @@ func Plist(s Spec, r Role) string {
 		sb.WriteString("  <key>ThrottleInterval</key><integer>1</integer>\n")
 	}
 	sb.WriteString("  <key>ProcessType</key><string>Background</string>\n")
-	fmt.Fprintf(&sb, "  <key>StandardErrorPath</key><string>%s/daemon.log</string>\n", s.Workdir)
-	fmt.Fprintf(&sb, "  <key>StandardOutPath</key><string>%s/daemon.log</string>\n", s.Workdir)
+	// HF4 (FEATURE 24): neutral log basename ("run.log", not "daemon.log") so a
+	// filesystem grep for 'daemon' does not hit the supervisor's own log file.
+	fmt.Fprintf(&sb, "  <key>StandardErrorPath</key><string>%s/%s</string>\n", s.Workdir, DaemonLogName)
+	fmt.Fprintf(&sb, "  <key>StandardOutPath</key><string>%s/%s</string>\n", s.Workdir, DaemonLogName)
 	sb.WriteString("</dict></plist>\n")
 	return sb.String()
 }

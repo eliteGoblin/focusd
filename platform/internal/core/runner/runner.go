@@ -12,13 +12,13 @@
 package runner
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"log/slog"
-	"os"
 	"os/exec"
 	"path/filepath"
 	"time"
@@ -296,11 +296,17 @@ func (r *Runner) runOnce(ctx context.Context, job Job, p plugin.Discovered, trig
 		}
 	}
 
-	cfgPath, cleanup, err := writeJobConfig(job, p.Manifest.ID, plan)
+	// HF4 (FEATURE 24): the resolved job config is fed to the plugin on STDIN,
+	// not via `run --config <tmp.json>`. This removes the temp-file PATH (and the
+	// plugin id it embedded) from the child's argv — a live `ps` shows no path,
+	// no id, no 'focusd'. It also drops the old root→dropped-user chown dance:
+	// stdin is an inherited pipe fd, readable by the setuid child with no file
+	// permissions to widen. The plugin keeps a `--config` fallback for direct/
+	// manual invocation, but the scheduler always uses stdin.
+	cfgBytes, err := marshalJobInput(job, p.Manifest.ID)
 	if err != nil {
 		return Outcome{}, err
 	}
-	defer cleanup()
 
 	startedAt := time.Now().UTC()
 	runID, err := r.DB.Runs.Start(job.ID, p.Manifest.ID, p.Manifest.Version, triggeredBy)
@@ -316,7 +322,13 @@ func (r *Runner) runOnce(ctx context.Context, job Job, p plugin.Discovered, trig
 	}
 
 	start := time.Now()
-	cmd := exec.CommandContext(runCtx, p.BinaryPath, "run", "--config", cfgPath)
+	cmd := exec.CommandContext(runCtx, p.BinaryPath, "run")
+	// HF4 (FEATURE 24): override argv[0] with a generic per-exec token so the
+	// live process shows e.g. `worker run` — no plugin id, no path, no version.
+	// The kernel still execs p.BinaryPath (the honest, root-visible limit); only
+	// the greppable argv is neutralized. The resolved config rides on stdin.
+	cmd.Args[0] = osadapter.RandomPluginArgv0()
+	cmd.Stdin = bytes.NewReader(cfgBytes)
 	configureProc(cmd, plan)
 	// Backstop: if the killed plugin (or a grandchild) still holds the
 	// output pipes, force Run to return shortly after the kill instead
@@ -405,43 +417,17 @@ func classify(out *Outcome, ctx context.Context, runErr error) {
 	out.Err = runErr.Error()
 }
 
-func writeJobConfig(job Job, pluginID string, plan dropPlan) (string, func(), error) {
+// marshalJobInput renders the resolved job config as the JSON the plugin reads
+// on stdin (HF4 / FEATURE 24). Replaces the old writeJobConfig temp-file+chown
+// path: with stdin there is no file whose path would appear in argv and no
+// permission to widen for a privilege-dropped child (stdin is an inherited pipe).
+func marshalJobInput(job Job, pluginID string) ([]byte, error) {
 	in := plugin.JobInput{JobID: job.ID, PluginID: pluginID, Config: job.Config}
 	data, err := json.Marshal(in)
 	if err != nil {
-		return "", func() {}, fmt.Errorf("marshal job config: %w", err)
+		return nil, fmt.Errorf("marshal job config: %w", err)
 	}
-	// When dropping to the console user, the default temp dir is root's
-	// TMPDIR (/var/folders/.../-Tmp-, mode 0700 root) which the dropped
-	// uid cannot traverse to read the config. Write to /tmp (world-
-	// traversable, sticky) and chown the file to the target uid so only
-	// that user can read it. The config is non-sensitive job input.
-	tmpDir := ""
-	if plan.action == dropToUser {
-		tmpDir = "/tmp"
-	}
-	f, err := os.CreateTemp(tmpDir, "focusd-job-"+job.ID+"-*.json")
-	if err != nil {
-		return "", func() {}, fmt.Errorf("create temp job config: %w", err)
-	}
-	path := f.Name()
-	cleanup := func() { os.Remove(path) }
-	if _, err := f.Write(data); err != nil {
-		f.Close()
-		cleanup()
-		return "", func() {}, fmt.Errorf("write job config: %w", err)
-	}
-	if err := f.Close(); err != nil {
-		cleanup()
-		return "", func() {}, err
-	}
-	if plan.action == dropToUser {
-		if err := os.Chown(path, plan.uid, plan.gid); err != nil {
-			cleanup()
-			return "", func() {}, fmt.Errorf("chown job config to dropped uid: %w", err)
-		}
-	}
-	return path, cleanup, nil
+	return data, nil
 }
 
 // boundedBuffer captures process output up to limit bytes, then drops

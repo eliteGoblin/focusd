@@ -31,7 +31,7 @@ func TestNewWritesToFile(t *testing.T) {
 	if err := closer(); err != nil {
 		t.Fatalf("closer: %v", err)
 	}
-	b, err := os.ReadFile(filepath.Join(dir, "platform.log"))
+	b, err := os.ReadFile(filepath.Join(dir, LogName))
 	if err != nil {
 		t.Fatalf("read log: %v", err)
 	}

@@ -201,12 +201,19 @@ func procCount(workdir redact.Token, good string) int {
 		ctx, cancel := context.WithTimeout(context.Background(), platformStatusTimeout)
 		defer cancel()
 		st, platWD := platformStore(raw)
-		binPath := st.BinPath(good)
-		// pgrep -f -x: match the full argument vector exactly. The platform
-		// is started as `<binPath> --workdir <platform-workdir>`, so match that
-		// exact argv (FEATURE 21 / HF1: workdir is the platform-workdir, NOT the
-		// daemon-home).
-		pattern := binPath + " --workdir " + platWD
+		// pgrep -f -x: match the full argument vector EXACTLY.
+		//
+		// HF4 (FEATURE 24): the disguised platform child runs as `<argv0> run`
+		// (a generic token, workdir moved into the environment), so match that
+		// deterministic argv — reconstructed from the per-install salt, exactly
+		// what platformsvc.Start set. Legacy (no salt) installs still run as
+		// `<binPath> --workdir <platform-workdir>` (FEATURE 21 / HF1).
+		var pattern string
+		if argv0 := st.PlatformArgv0(); argv0 != "" {
+			pattern = argv0 + " run"
+		} else {
+			pattern = st.BinPath(good) + " --workdir " + platWD
+		}
 		out, err := exec.CommandContext(ctx, "pgrep", "-f", "-x", pattern).Output()
 		if err != nil {
 			// Exit status 1 = no match (count 0); any other error we also

@@ -5,7 +5,7 @@
   "type": "job",
   "runtime": "native_binary",
   "protocol_version": "1",
-  "entrypoint": "./skill-protector",
+  "entrypoint": "./harbor",
   "supported_os": ["darwin"],
   "supported_arch": ["arm64", "amd64"],
   "required_privilege": "user",

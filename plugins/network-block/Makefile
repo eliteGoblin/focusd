@@ -16,7 +16,11 @@ OUT_BIN     := $(BUILD_DIR)/$(PLUGIN_NAME)
 # walk-up handles a tarball checkout (no .git). The plugin lives at
 # <repo>/plugins/network-block so the walk-up is two levels.
 REPO_ROOT   := $(shell git rev-parse --show-toplevel 2>/dev/null || (cd $(CURDIR)/../.. && pwd))
-BUNDLE_DIR  := $(REPO_ROOT)/platform/internal/bundle/data/$(PLUGIN_NAME)
+# HF4 (FEATURE 24): bundle dir + binary use a NEUTRAL codename (not the plugin
+# id) so the on-disk install carries no greppable plugin token. Discovery keys
+# off plugin.json "id" (unchanged), not the dir name; entrypoint → ./$(BUNDLE_NAME).
+BUNDLE_NAME := quartz
+BUNDLE_DIR  := $(REPO_ROOT)/platform/internal/bundle/data/$(BUNDLE_NAME)
 
 GO ?= go
 LDFLAGS ?= -s -w
@@ -35,7 +39,7 @@ test:
 bundle: build
 	mkdir -p $(BUNDLE_DIR)
 	cp plugin.json $(BUNDLE_DIR)/plugin.json
-	cp $(OUT_BIN)  $(BUNDLE_DIR)/$(PLUGIN_NAME)
+	cp $(OUT_BIN)  $(BUNDLE_DIR)/$(BUNDLE_NAME)
 	@echo "bundled $(PLUGIN_NAME) into $(BUNDLE_DIR)"
 
 clean:

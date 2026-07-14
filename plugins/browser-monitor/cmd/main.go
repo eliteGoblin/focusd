@@ -16,9 +16,11 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
 	"flag"
 	"fmt"
+	"io"
 	"os"
 
 	"github.com/eliteGoblin/focusd/plugins/browser-monitor/internal/guard"
@@ -58,7 +60,13 @@ func run(args []string) int {
 		return 2
 	}
 
-	blocklist, err := loadBlocklist(*cfgPath)
+	raw, err := readJobConfig(*cfgPath)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "config error:", err)
+		emit(result{Status: "error", Message: err.Error()})
+		return 2
+	}
+	blocklist, err := loadBlocklist(raw)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "config error:", err)
 		emit(result{Status: "error", Message: err.Error()})
@@ -111,16 +119,30 @@ func report(g *guard.Guard) int {
 	return 0
 }
 
-// loadBlocklist resolves the effective blocklist: config.blocklist
-// (replaces the default) and config.extra_blocklist (appended). No path
-// or no keys => the embedded DefaultBlocklist.
-func loadBlocklist(path string) ([]string, error) {
-	if path == "" {
-		return nil, nil
+// readJobConfig returns the job-config JSON bytes: from --config <path>
+// (compat) when set, else drained from stdin (the disguised path — the
+// config path never appears in this process's argv). Empty/absent => nil
+// (grounded defaults). HF4 (FEATURE 24).
+func readJobConfig(cfgPath string) ([]byte, error) {
+	if cfgPath != "" {
+		return os.ReadFile(cfgPath)
 	}
-	raw, err := os.ReadFile(path)
+	b, err := io.ReadAll(os.Stdin)
 	if err != nil {
-		return nil, fmt.Errorf("read config: %w", err)
+		return nil, fmt.Errorf("read stdin config: %w", err)
+	}
+	if len(bytes.TrimSpace(b)) == 0 {
+		return nil, nil // no config → defaults
+	}
+	return b, nil
+}
+
+// loadBlocklist resolves the effective blocklist: config.blocklist
+// (replaces the default) and config.extra_blocklist (appended). Empty/nil
+// raw or no keys => the embedded DefaultBlocklist.
+func loadBlocklist(raw []byte) ([]string, error) {
+	if len(raw) == 0 {
+		return nil, nil
 	}
 	var in jobInput
 	if err := json.Unmarshal(raw, &in); err != nil {
