@@ -81,7 +81,7 @@ func TestUpgradePath_ExecutorReapsOrphan_NoDuplicate(t *testing.T) {
 	}
 
 	// Exactly one platform under this root survives the upgrade.
-	if remaining := countLivePlatformsUnder(t, root, signedVerify()); remaining != 1 {
+	if remaining := countLivePlatformsUnder(t, root, signedVerify(), orphanPID, survivorPID); remaining != 1 {
 		t.Fatalf("upgrade must leave EXACTLY ONE platform, got %d", remaining)
 	}
 }

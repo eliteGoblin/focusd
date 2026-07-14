@@ -93,7 +93,7 @@ func waitExecVisible(t *testing.T, pid int) {
 	t.Helper()
 	deadline := time.Now().Add(5 * time.Second)
 	for time.Now().Before(deadline) {
-		out, _ := exec.Command("lsof", "-p", strconv.Itoa(pid), "-d", "txt", "-Fn").Output()
+		out, _ := exec.Command("lsof", "-p", strconv.Itoa(pid), "-a", "-d", "txt", "-Fn").Output()
 		if strings.Contains(string(out), "\nn/") {
 			return // at least one absolute txt path → executable is mapped
 		}
@@ -140,6 +140,28 @@ func testVerify(unsigned map[string]bool) Verifier {
 // signedVerify accepts every present binary (no unsigned decoys).
 func signedVerify() Verifier { return testVerify(nil) }
 
+// verifyEnoentFor reports fs.ErrNotExist for the given paths — exactly what
+// production sig.VerifyFile returns for a REMOVED binary — and signs every other
+// present file. It drives the deleted-binary ENOENT fallback against a RELIABLY
+// LIVE process: literally os.Remove'ing a running Mach-O is racy on macOS (a page
+// fault to the now-removed vnode can SIGKILL the process before the reaper acts),
+// so we reproduce the exact verify-branch selection via the seam while the process
+// stays alive — proving the reaper genuinely SIGKILLs an ENOENT-classified
+// process. (The pure classifier test covers the ENOENT→fallback path directly.)
+func verifyEnoentFor(paths ...string) Verifier {
+	set := make(map[string]bool, len(paths))
+	for _, p := range paths {
+		set[filepath.Clean(p)] = true
+	}
+	base := testVerify(nil)
+	return func(p string) (bool, error) {
+		if set[filepath.Clean(p)] {
+			return false, enoent(p)
+		}
+		return base(p)
+	}
+}
+
 // reapRoot returns a symlink-RESOLVED temp dir. macOS symlinks /var→/private/var,
 // so lsof reports a process's executable under /private/var while t.TempDir()
 // hands back /var/folders/… — the reaper's SupportRoot anchor (a lexical prefix
@@ -155,16 +177,47 @@ func reapRoot(t *testing.T) string {
 	return dir
 }
 
-// countLivePlatformsUnder counts live processes classified as a focusd platform
-// under root (survivor NOT exempted: keepClean=""), using the real ps+lsof seams
-// and the given verifier — the "exactly one remains" assertion helper.
-func countLivePlatformsUnder(t *testing.T, root string, verify Verifier) int {
+// execResolverFor is a LIGHTWEIGHT execResolver that lsof's ONLY the given pids
+// (per-pid, a handful of fds each) instead of the whole system. The real
+// resolvePlatformExecs scans every process's txt fds (~180ms, heavy); running it
+// in every real-process reap test starved the timeout-sensitive sibling packages
+// (e2e rollback, engine-log capture) under `go test ./...`. Per-pid lsof exercises
+// the SAME real lsof output + classifier, scoped to the test's own processes.
+// resolvePlatformExecs itself (the production system-wide scan) is covered by
+// TestResolvePlatformExecs_FindsSpawnedProcess.
+func execResolverFor(pids ...int) execResolver {
+	return func() (map[int]string, error) {
+		m := make(map[int]string)
+		for _, pid := range pids {
+			out, _ := exec.Command("lsof", "-p", strconv.Itoa(pid), "-a", "-d", "txt", "-Fn").Output()
+			for _, line := range strings.Split(string(out), "\n") {
+				if strings.HasPrefix(line, "n/") {
+					m[pid] = line[1:] // first absolute txt path = the executable
+					break
+				}
+			}
+		}
+		return m, nil
+	}
+}
+
+// countLivePlatformsUnder counts, AMONG the given pids, those still alive and
+// classified as a focusd platform under root (survivor NOT exempted) — the
+// "exactly one remains" assertion helper. Scoped to the test's own pids (via the
+// per-pid resolver) so it neither scans the whole system nor miscounts a stray
+// process from a sibling test.
+func countLivePlatformsUnder(t *testing.T, root string, verify Verifier, pids ...int) int {
 	t.Helper()
 	procs, _ := listPlatformProcs()
-	execs, _ := resolvePlatformExecs()
-	n := 0
+	byPID := make(map[int]rawProc, len(procs))
 	for _, p := range procs {
-		if isAlive(p.pid) && classifyReapCandidate(execs[p.pid], p.cmd, root, "", verify) {
+		byPID[p.pid] = p
+	}
+	execs, _ := execResolverFor(pids...)()
+	n := 0
+	for _, pid := range pids {
+		p, ok := byPID[pid]
+		if ok && isAlive(pid) && classifyReapCandidate(execs[pid], p.cmd, root, "", verify) {
 			n++
 		}
 	}
@@ -327,7 +380,7 @@ func TestReapForeignPlatforms_ReapsExtraExemptsSurvivor(t *testing.T) {
 		t.Fatalf("pre-condition: both platforms alive (survivor=%v orphan=%v)",
 			isAlive(survivorPID), isAlive(orphanPID))
 	}
-	n, err := reapForeignPlatforms(root, survivorPID, "", listPlatformProcs, resolvePlatformExecs, signedVerify(), killProc)
+	n, err := reapForeignPlatforms(root, survivorPID, "", listPlatformProcs, execResolverFor(survivorPID, orphanPID), signedVerify(), killProc)
 	if err != nil {
 		t.Fatalf("reap: %v", err)
 	}
@@ -355,7 +408,7 @@ func TestReap_SignedDisguisedBasename_Reaped(t *testing.T) {
 	if platformSignatureRE.MatchString(disguisedBin) {
 		t.Fatalf("test bug: %q should NOT match the legacy signature", disguisedBin)
 	}
-	n, err := reapForeignPlatforms(root, 0, "", listPlatformProcs, resolvePlatformExecs, signedVerify(), killProc)
+	n, err := reapForeignPlatforms(root, 0, "", listPlatformProcs, execResolverFor(orphanPID), signedVerify(), killProc)
 	if err != nil {
 		t.Fatalf("reap: %v", err)
 	}
@@ -366,8 +419,12 @@ func TestReap_SignedDisguisedBasename_Reaped(t *testing.T) {
 }
 
 // TestReap_DeletedCanonicalBinary_ReapedViaFallback (coordinator #2): a canonical
-// orphan whose binary is os.Remove'd while it runs → sig.VerifyFile returns
-// ENOENT → the deleted-binary fallback matches the persisting kernel argv0.
+// orphan whose binary is GONE (sig.VerifyFile ⇒ fs.ErrNotExist) is reaped by the
+// deleted-binary fallback matching the persisting kernel argv0 — while its live
+// sibling survivor (a signed, present binary) is exempt by PID. The GONE binary is
+// modeled by verifyEnoentFor rather than a literal os.Remove of the running
+// process (macOS-racy — see verifyEnoentFor); the process stays alive so the
+// reaper's SIGKILL is genuinely exercised.
 func TestReap_DeletedCanonicalBinary_ReapedViaFallback(t *testing.T) {
 	root := reapRoot(t)
 	canonicalBin := filepath.Join(root, ".oldgen", "bin", "v0.16.3", "platform")
@@ -375,18 +432,10 @@ func TestReap_DeletedCanonicalBinary_ReapedViaFallback(t *testing.T) {
 	orphanPID := spawnFakePlatformAt(t, canonicalBin)
 	survivorPID := spawnFakePlatformAt(t, survivorBin)
 
-	// Delete the orphan's binary while it runs (the workdir-rm'd orphan case).
-	if !isAlive(orphanPID) {
-		t.Fatal("pre-condition: orphan must be alive before deletion")
+	if !isAlive(orphanPID) || !isAlive(survivorPID) {
+		t.Fatal("pre-condition: orphan + survivor must both be alive")
 	}
-	if err := os.Remove(canonicalBin); err != nil {
-		t.Fatalf("remove orphan binary: %v", err)
-	}
-
-	// Real sig.VerifyFile: it never validly signs our unsigned survivor either, so
-	// inject testVerify (present→signed, deleted→ENOENT) which reproduces the exact
-	// (verified | ENOENT) branch selection production takes.
-	n, err := reapForeignPlatforms(root, survivorPID, "", listPlatformProcs, resolvePlatformExecs, signedVerify(), killProc)
+	n, err := reapForeignPlatforms(root, survivorPID, "", listPlatformProcs, execResolverFor(orphanPID, survivorPID), verifyEnoentFor(canonicalBin), killProc)
 	if err != nil {
 		t.Fatalf("reap: %v", err)
 	}
@@ -397,7 +446,7 @@ func TestReap_DeletedCanonicalBinary_ReapedViaFallback(t *testing.T) {
 	if !isAlive(survivorPID) {
 		t.Fatal("survivor must remain")
 	}
-	if got := countLivePlatformsUnder(t, root, signedVerify()); got != 1 {
+	if got := countLivePlatformsUnder(t, root, signedVerify(), orphanPID, survivorPID); got != 1 {
 		t.Fatalf("want exactly ONE platform remaining, got %d", got)
 	}
 }
@@ -413,7 +462,7 @@ func TestReap_UnsignedPlatformShaped_NotReaped(t *testing.T) {
 		t.Fatal("pre-condition: decoy must be alive")
 	}
 	unsigned := map[string]bool{filepath.Clean(decoyBin): true}
-	n, err := reapForeignPlatforms(root, 0, "", listPlatformProcs, resolvePlatformExecs, testVerify(unsigned), killProc)
+	n, err := reapForeignPlatforms(root, 0, "", listPlatformProcs, execResolverFor(decoyPID), testVerify(unsigned), killProc)
 	if err != nil {
 		t.Fatalf("reap: %v", err)
 	}
@@ -435,7 +484,7 @@ func TestReap_SignedOutsideRoot_NotReaped(t *testing.T) {
 	if !isAlive(pid) {
 		t.Fatal("pre-condition: outside platform must be alive")
 	}
-	n, err := reapForeignPlatforms(root, 0, "", listPlatformProcs, resolvePlatformExecs, signedVerify(), killProc)
+	n, err := reapForeignPlatforms(root, 0, "", listPlatformProcs, execResolverFor(pid), signedVerify(), killProc)
 	if err != nil {
 		t.Fatalf("reap: %v", err)
 	}
@@ -465,7 +514,7 @@ func TestReap_SurvivorNeverReaped_EvenIfUnreadable(t *testing.T) {
 	if !isAlive(survivorPID) || !isAlive(orphanPID) {
 		t.Fatal("pre-condition: survivor + orphan alive")
 	}
-	n, err := reapForeignPlatforms(root, survivorPID, "", listPlatformProcs, resolvePlatformExecs, signedVerify(), killProc)
+	n, err := reapForeignPlatforms(root, survivorPID, "", listPlatformProcs, execResolverFor(survivorPID, orphanPID), signedVerify(), killProc)
 	if err != nil {
 		t.Fatalf("reap: %v", err)
 	}
@@ -483,13 +532,15 @@ func TestReap_SurvivorNeverReaped_EvenIfUnreadable(t *testing.T) {
 // sixteenReproConvergesToOne runs the accretion→convergence chain: D1 wins the
 // flock + runs orphan platform #1, D1 "dies" (flock released, orphan survives),
 // standby D2 wins the freed flock + runs survivor platform #2, then D2's reap
-// exempts its survivor and reaps the orphan → EXACTLY ONE platform remains. The
-// orphan is produced by spawnOrphan (canonical / disguised / deleted variants)
-// and prepped (e.g. binary deletion) by prep before the reap tick.
+// exempts its survivor and reaps the orphan → EXACTLY ONE platform remains.
+// spawnOrphan returns the orphan pid AND its binary path (canonical / disguised /
+// gone variants); makeVerify (nil ⇒ signedVerify) builds the reap verifier from
+// that path — the gone variant returns fs.ErrNotExist for it to drive the ENOENT
+// fallback against a still-live process.
 func sixteenReproConvergesToOne(
 	t *testing.T,
-	spawnOrphan func(t *testing.T, root string) int,
-	prep func(t *testing.T),
+	spawnOrphan func(t *testing.T, root string) (pid int, binPath string),
+	makeVerify func(orphanBin string) Verifier,
 ) {
 	t.Helper()
 	root := reapRoot(t)
@@ -500,7 +551,7 @@ func sixteenReproConvergesToOne(
 	if ok, err := d1.TryAcquire(lockPath); err != nil || !ok {
 		t.Fatalf("D1 must win the flock: ok=%v err=%v", ok, err)
 	}
-	orphanPID := spawnOrphan(t, root)
+	orphanPID, orphanBin := spawnOrphan(t, root)
 
 	// (2) D1 "dies": the kernel frees the flock; its platform child survives.
 	if err := d1.Release(); err != nil {
@@ -518,15 +569,16 @@ func sixteenReproConvergesToOne(
 	defer d2.Release()
 	survivorPID := spawnFakePlatform(t, root, ".gen2", "v0.16.4")
 
-	if prep != nil {
-		prep(t)
-	}
 	if !isAlive(orphanPID) || !isAlive(survivorPID) {
 		t.Fatal("both platforms must be alive before the reap tick")
 	}
+	reapVerify := signedVerify()
+	if makeVerify != nil {
+		reapVerify = makeVerify(orphanBin)
+	}
 
 	// (4) D2's reap exempts its own survivor and reaps the orphan.
-	n, err := reapForeignPlatforms(root, survivorPID, "", listPlatformProcs, resolvePlatformExecs, signedVerify(), killProc)
+	n, err := reapForeignPlatforms(root, survivorPID, "", listPlatformProcs, execResolverFor(orphanPID, survivorPID), reapVerify, killProc)
 	if err != nil {
 		t.Fatalf("reap: %v", err)
 	}
@@ -537,7 +589,7 @@ func sixteenReproConvergesToOne(
 	if !isAlive(survivorPID) {
 		t.Fatal("survivor platform #2 must remain — reap must never reach zero")
 	}
-	if got := countLivePlatformsUnder(t, root, signedVerify()); got != 1 {
+	if got := countLivePlatformsUnder(t, root, signedVerify(), orphanPID, survivorPID); got != 1 {
 		t.Fatalf("want exactly ONE platform after convergence, got %d", got)
 	}
 }
@@ -546,7 +598,10 @@ func sixteenReproConvergesToOne(
 // present, signed platform) — reaped by the signature tier.
 func TestReapForeignPlatforms_SixteenPlatformRepro(t *testing.T) {
 	sixteenReproConvergesToOne(t,
-		func(t *testing.T, root string) int { return spawnFakePlatform(t, root, ".gen1", "v0.16.3") },
+		func(t *testing.T, root string) (int, string) {
+			bin := filepath.Join(root, ".gen1", "bin", "v0.16.3", "platform")
+			return spawnFakePlatformAt(t, bin), bin
+		},
 		nil)
 }
 
@@ -554,24 +609,39 @@ func TestReapForeignPlatforms_SixteenPlatformRepro(t *testing.T) {
 // /platform) — the old regex would miss it; the signature tier reaps it.
 func TestSixteenRepro_DisguisedOrphan(t *testing.T) {
 	sixteenReproConvergesToOne(t,
-		func(t *testing.T, root string) int {
-			return spawnFakePlatformAt(t, filepath.Join(root, ".gen1", "bin", "dossier.1122334455"))
+		func(t *testing.T, root string) (int, string) {
+			bin := filepath.Join(root, ".gen1", "bin", "dossier.1122334455")
+			return spawnFakePlatformAt(t, bin), bin
 		},
 		nil)
 }
 
-// TestSixteenRepro_DeletedOrphan: the orphan's binary is deleted while it runs —
-// the ENOENT fallback (canonical argv0) reaps it.
+// TestSixteenRepro_DeletedOrphan: the orphan's binary is GONE (VerifyFile ⇒
+// ENOENT) — the deleted-binary fallback (canonical argv0) reaps it. Modeled via
+// verifyEnoentFor against a still-live process (literal os.Remove of a running
+// Mach-O is macOS-racy — see verifyEnoentFor).
 func TestSixteenRepro_DeletedOrphan(t *testing.T) {
-	orphanBin := ""
 	sixteenReproConvergesToOne(t,
-		func(t *testing.T, root string) int {
-			orphanBin = filepath.Join(root, ".gen1", "bin", "v0.16.3", "platform")
-			return spawnFakePlatformAt(t, orphanBin)
+		func(t *testing.T, root string) (int, string) {
+			bin := filepath.Join(root, ".gen1", "bin", "v0.16.3", "platform")
+			return spawnFakePlatformAt(t, bin), bin
 		},
-		func(t *testing.T) {
-			if err := os.Remove(orphanBin); err != nil {
-				t.Fatalf("remove orphan binary: %v", err)
-			}
-		})
+		func(orphanBin string) Verifier { return verifyEnoentFor(orphanBin) })
+}
+
+// TestResolvePlatformExecs_FindsSpawnedProcess covers the PRODUCTION system-wide
+// resolver (the heavy path the other reap tests avoid via execResolverFor): a
+// single `lsof -d txt` over the whole machine must map a spawned process to its
+// executable path under the sandbox root.
+func TestResolvePlatformExecs_FindsSpawnedProcess(t *testing.T) {
+	root := reapRoot(t)
+	pid := spawnFakePlatform(t, root, ".sys", "v0.16.3")
+	execs, err := resolvePlatformExecs()
+	if err != nil {
+		t.Fatalf("resolvePlatformExecs: %v", err)
+	}
+	got := filepath.Clean(execs[pid])
+	if got == "." || !strings.HasPrefix(got, filepath.Clean(root)+string(filepath.Separator)) {
+		t.Fatalf("system-wide resolver must map pid %d to an exec path under %q; got %q", pid, root, execs[pid])
+	}
 }
