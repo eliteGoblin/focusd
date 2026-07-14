@@ -229,6 +229,11 @@ func guardMode(a osadapter.Adapter, mode osadapter.RunMode) error {
 // each plugin against host/protocol/privilege/security gates, and syncs
 // the result (accepted and rejected) into the inventory.
 func (a *App) DiscoverPlugins() ([]plugin.Discovered, error) {
+	// The real embedded bundle is ALWAYS the discovery trust root here. Note for
+	// test authors: a fixture plugin whose subdir name collides with a genuine
+	// bundled plugin id (e.g. "kill-steam") will be silently reconciled against
+	// the embedded bytes by verify-before-parse — use a non-bundled name for
+	// hand-crafted discovery fixtures (see app_test.go's "demo-job").
 	d := (&plugin.Discoverer{
 		GOOS:   a.Adapter.CurrentOS(),
 		GOARCH: a.Adapter.CurrentArch(),

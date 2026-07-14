@@ -320,14 +320,17 @@ func (r *Runner) runOnce(ctx context.Context, job Job, p plugin.Discovered, trig
 	// since verify, so refuse and defer to the NEXT tick, which re-verifies +
 	// restores + runs the genuine copy. This runs BEFORE Runs.Start so a
 	// refusal records exactly one error run (no dangling started row), matching
-	// the verify-error path.
+	// the verify-error path. The tradeoff is honest: Runs.Start (a SQLite write)
+	// plus exec.CommandContext/configureProc/pipe setup still execute AFTER this
+	// comparison, so a sub-millisecond swap landing in THAT tail is not caught —
+	// a residual window, not full closure.
 	//
-	// This narrows the window to the few fast statements between here and the
-	// fork/exec. A hard inode pin (exec an open fd) is the stronger closure but
-	// is not portable: macOS — the primary target — rejects execve(/dev/fd/N)
-	// with EACCES and has no fexecve(2). The re-hash guard is the honest,
-	// portable closure and matches ADR-0019's stance: fast self-heal + detection
-	// against an impulsive swap, not an unbreakable seal against scripted root.
+	// A hard inode pin (exec an open fd) would close that tail, but is not
+	// portable: macOS — the primary target — rejects execve(/dev/fd/N) with
+	// EACCES and has no fexecve(2). The re-hash guard is the honest, portable
+	// closure and matches ADR-0019's stance: fast self-heal + detection against
+	// an impulsive swap, not an unbreakable seal against a scripted root racing
+	// the check.
 	if havePin {
 		nowSum, herr := hashFile(p.BinaryPath)
 		if herr != nil || nowSum != verifiedSum {

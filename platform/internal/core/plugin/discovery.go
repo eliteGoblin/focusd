@@ -117,7 +117,26 @@ func rejectExpected(dir, reason string, m *Manifest) Discovered {
 	return d
 }
 
-func (d *Discoverer) evaluate(dir string) Discovered {
+func (d *Discoverer) evaluate(dir string) (result Discovered) {
+	// Thread the authenticity-restore signal onto WHICHEVER Discovered this
+	// function returns — success OR any downstream rejection. A plugin can be
+	// tampered AND then fail a later gate (host/protocol/perms/missing binary);
+	// VerifyOrRestore still repaired it on disk, so the composition root must
+	// still see Restored=true to record the tamper event. Setting it only on the
+	// OK path would drop the audit trail in exactly that adversarial case
+	// (go-reviewer HIGH). A named return + defer attaches it uniformly; the
+	// closure vars stay zero for the two returns that precede the guard call, so
+	// those are correctly left untouched.
+	var restored bool
+	var wantPrefix, gotPrefix string
+	defer func() {
+		if restored {
+			result.Restored = true
+			result.TamperWant = wantPrefix
+			result.TamperGot = gotPrefix
+		}
+	}()
+
 	// 0. Authenticity gate (FEATURE 23, ADR-0019) — runs BEFORE the manifest
 	// is read, because everything downstream (entrypoint resolution, run_as)
 	// trusts plugin.json, and plugin.json is on disk where a root attacker can
@@ -136,8 +155,6 @@ func (d *Discoverer) evaluate(dir string) Discovered {
 	//       below reads authentic bytes. A restore is surfaced (Restored +
 	//       prefixes) so the composition root can record the tamper event — the
 	//       runner's point-of-use check would otherwise never see it.
-	var restored bool
-	var wantPrefix, gotPrefix string
 	if d.guard != nil {
 		clean := filepath.Clean(dir)
 		subdir := filepath.Base(clean)
@@ -204,10 +221,9 @@ func (d *Discoverer) evaluate(dir string) Discovered {
 		return reject(dir, berr.Error(), m)
 	}
 
-	return Discovered{
-		Manifest: m, Dir: dir, BinaryPath: bin, OK: true,
-		Restored: restored, TamperWant: wantPrefix, TamperGot: gotPrefix,
-	}
+	// Restored/TamperWant/TamperGot are attached by the deferred closure above,
+	// uniformly with every rejection path.
+	return Discovered{Manifest: m, Dir: dir, BinaryPath: bin, OK: true}
 }
 
 // resolveBinary finds the plugin executable, trying the manifest's

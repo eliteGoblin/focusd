@@ -217,6 +217,38 @@ func TestDiscoverVerifyBeforeParseDefeatsEntrypointSwap(t *testing.T) {
 	}
 }
 
+// TestDiscoverRestoredSurvivesDownstreamRejection pins the go-reviewer HIGH:
+// a plugin that is tampered (restored by the guard) AND then fails a downstream
+// gate must STILL carry Restored + tamper prefixes forward, so the composition
+// root can audit the repair. Here the restore rewrites the manifest to one with
+// a mismatched host, which the host gate rejects — the audit signal must not be
+// dropped on that rejection path.
+func TestDiscoverRestoredSurvivesDownstreamRejection(t *testing.T) {
+	root := t.TempDir()
+	writePlugin(t, root, "kill-steam", goodManifest("kill-steam"), true)
+	// The guard "restores" a manifest whose supported_os is a bogus value, so
+	// discovery reaches the host gate and REJECTS after the restore happened.
+	restoredManifest := `{"id":"kill-steam","name":"X","version":"1.0.0","type":"job",
+"protocol_version":"1","entrypoint":"./kill-steam",
+"supported_os":["nonesuch-os"],"supported_arch":["nonesuch-arch"],
+"required_privilege":"user","run_as":"current_user"}`
+	guard := &fakeGuard{
+		bundled: map[string]bool{"kill-steam": true},
+		restore: map[string]string{"kill-steam": restoredManifest},
+	}
+	got, err := NewDiscoverer(osadapter.ModeUser).WithIntegrity(guard).Discover(root)
+	if err != nil {
+		t.Fatalf("Discover: %v", err)
+	}
+	if len(got) != 1 || got[0].OK {
+		t.Fatalf("expected a rejected (host-mismatch) plugin, got %+v", got)
+	}
+	if !got[0].Restored || got[0].TamperWant == "" || got[0].TamperGot == "" {
+		t.Errorf("a restore must survive a downstream rejection for audit; got Restored=%v want=%q got=%q",
+			got[0].Restored, got[0].TamperWant, got[0].TamperGot)
+	}
+}
+
 // TestDiscoverSystemModeRejectsNonBundledDir pins FEATURE 23, Fix 3: a rogue
 // plugin directory carrying a perfectly valid, host-matching manifest but NOT
 // present in the signed embedded bundle must be refused by a system-mode

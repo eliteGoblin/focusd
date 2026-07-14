@@ -98,21 +98,13 @@ func ExtractTo(pluginRoot string) (extracted []string, err error) {
 // returns restored=false, "", "", nil — a non-bundled plugin is simply not
 // covered, never an error.
 func VerifyOrRestore(pluginRoot, subdir string) (restored bool, wantPrefix, gotPrefix string, err error) {
-	// Defensive guard: an empty, "."/"..", or nested/path-like subdir would
-	// make embedDir walk the whole bundle (every plugin) instead of one
-	// plugin, turning a point-of-use check into a full restore. That can only
-	// come from a bad caller (discovery always passes a real subdir); fail
-	// loudly rather than silently over-reaching.
-	//
-	// Validate the CLEANED value and require a single path element. Checking
-	// the cleaned value (not raw subdir) closes "./x" → "x" style slips and
-	// is portable: on Windows filepath.Clean("a/b") yields "a\\b" (no '/'), so
-	// a raw strings.Contains(clean, "/") would miss it — hence we test BOTH
-	// '/' and os.PathSeparator, and confirm clean == filepath.Base(clean).
-	clean := filepath.Clean(subdir)
-	if clean == "" || clean == "." || clean == ".." ||
-		strings.ContainsRune(clean, '/') || strings.ContainsRune(clean, os.PathSeparator) ||
-		clean != filepath.Base(clean) {
+	// Defensive guard (see validateSubdir): an empty, "."/"..", or path-like
+	// subdir would make embedDir walk the whole bundle (every plugin) instead of
+	// one plugin, turning a point-of-use check into a full restore. That can only
+	// come from a bad caller (discovery always passes a real subdir); fail loudly
+	// rather than silently over-reaching.
+	clean, ok := validateSubdir(subdir)
+	if !ok {
 		return false, "", "", fmt.Errorf("invalid plugin subdir %q", subdir)
 	}
 
@@ -221,10 +213,8 @@ func reconcileFile(target, rel string, data []byte) (wrote bool, err error) {
 // escape the bundle namespace. Any invalid or unknown value returns false
 // (fail closed).
 func IsBundled(subdir string) bool {
-	clean := filepath.Clean(subdir)
-	if clean == "" || clean == "." || clean == ".." ||
-		strings.ContainsRune(clean, '/') || strings.ContainsRune(clean, os.PathSeparator) ||
-		clean != filepath.Base(clean) {
+	clean, ok := validateSubdir(subdir)
+	if !ok {
 		return false
 	}
 	info, err := fs.Stat(fsys, "data/"+clean)
@@ -232,6 +222,23 @@ func IsBundled(subdir string) bool {
 		return false
 	}
 	return info.IsDir()
+}
+
+// validateSubdir is the single source of truth for the "one plugin, not the
+// whole tree, not an escape" check shared by VerifyOrRestore and IsBundled. It
+// returns the cleaned single-element name and ok=false for any empty, dot, or
+// path-like value. Checking the CLEANED value closes "./x" → "x" style slips
+// and is portable: on Windows filepath.Clean("a/b") yields "a\\b" (no '/'), so a
+// raw strings.Contains(clean, "/") would miss it — hence both '/' and
+// os.PathSeparator are tested, plus clean == filepath.Base(clean).
+func validateSubdir(subdir string) (clean string, ok bool) {
+	clean = filepath.Clean(subdir)
+	if clean == "" || clean == "." || clean == ".." ||
+		strings.ContainsRune(clean, '/') || strings.ContainsRune(clean, os.PathSeparator) ||
+		clean != filepath.Base(clean) {
+		return "", false
+	}
+	return clean, true
 }
 
 // HasAny reports whether the bundle contains any plugin at all (useful
