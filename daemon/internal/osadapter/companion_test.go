@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"syscall"
 	"testing"
 	"time"
@@ -532,6 +533,53 @@ func TestRefreshCompanionBackupWriteWhenChanged(t *testing.T) {
 	}
 	if b, _ := os.ReadFile(dir.Backup()); !bytes.Equal(b, v2) {
 		t.Fatalf("backup not refreshed to v2")
+	}
+}
+
+// TestCompanionWriteFileConcurrent guards the atomic-write helper against the
+// shared-temp-path race that this change makes routine: EnsureCompanion now
+// refreshes the companion binary/backup on EVERY mesh-worker tick where content
+// differs, so all mesh workers (RoleA/RoleB/RoleEnsure) rewrite the SAME target in
+// lockstep right after an upgrade. A fixed "<path>.tmp" collides — one worker's
+// rename races another's truncating write, and a second rename hits ENOENT — so a
+// unique temp per write must let every concurrent writer succeed and leave exactly
+// the intended content with no leftover temp files.
+func TestCompanionWriteFileConcurrent(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, ".target")
+	content := bytes.Repeat([]byte("companion-bytes"), 512)
+
+	const n = 16
+	errs := make(chan error, n)
+	var wg sync.WaitGroup
+	for i := 0; i < n; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			errs <- companionWriteFile(path, content, 0o755)
+		}()
+	}
+	wg.Wait()
+	close(errs)
+	for e := range errs {
+		if e != nil {
+			t.Fatalf("concurrent companionWriteFile failed (shared-temp race?): %v", e)
+		}
+	}
+	got, err := os.ReadFile(path)
+	if err != nil || !bytes.Equal(got, content) {
+		t.Fatalf("final content wrong after concurrent writes: err=%v", err)
+	}
+	if fi, _ := os.Stat(path); fi != nil && fi.Mode().Perm() != 0o755 {
+		t.Fatalf("perm = %o, want 0755", fi.Mode().Perm())
+	}
+	// No leftover temp files — every temp was renamed into place (atomic) or
+	// cleaned up.
+	ents, _ := os.ReadDir(dir)
+	for _, e := range ents {
+		if e.Name() != ".target" {
+			t.Fatalf("leftover temp file after concurrent writes: %q", e.Name())
+		}
 	}
 }
 

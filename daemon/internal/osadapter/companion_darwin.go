@@ -364,13 +364,42 @@ func ensureCompanionLabel(dir companion.Dir) (string, error) {
 // companionWriteFile writes b to path atomically (temp + rename) with perm,
 // creating the parent dir. Mirrors core.atomicWrite (which is unexported in
 // another package) so the companion scaffolding can't leave a half-written file.
+//
+// The temp file is UNIQUE per write (os.CreateTemp), not a fixed "<path>.tmp":
+// EnsureCompanion refreshes the binary/backup on every mesh-worker tick where the
+// content differs, so all mesh workers (RoleA/RoleB/RoleEnsure) rewrite the SAME
+// target in lockstep right after an upgrade. A shared temp path would let one
+// worker's rename race another's truncating write (renaming a torn file into
+// place) or hit ENOENT on the second rename. A unique temp per writer isolates
+// them: each writes + renames its own inode, and the last atomic rename wins with
+// fully-formed content. The temp is a hidden-dot sibling (disguise-consistent) and
+// is cleaned up on any failure before the rename.
 func companionWriteFile(path string, b []byte, perm os.FileMode) error {
-	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+	dir := filepath.Dir(path)
+	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return err
 	}
-	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, b, perm); err != nil {
+	tmp, err := os.CreateTemp(dir, ".tmp-*")
+	if err != nil {
 		return err
 	}
-	return os.Rename(tmp, path)
+	tmpName := tmp.Name()
+	if _, werr := tmp.Write(b); werr != nil {
+		_ = tmp.Close()
+		_ = os.Remove(tmpName)
+		return werr
+	}
+	if cerr := tmp.Close(); cerr != nil {
+		_ = os.Remove(tmpName)
+		return cerr
+	}
+	if cerr := os.Chmod(tmpName, perm); cerr != nil {
+		_ = os.Remove(tmpName)
+		return cerr
+	}
+	if rerr := os.Rename(tmpName, path); rerr != nil {
+		_ = os.Remove(tmpName)
+		return rerr
+	}
+	return nil
 }
