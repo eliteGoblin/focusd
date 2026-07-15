@@ -55,14 +55,19 @@ func (s *Store) platformRoot() string {
 const VersionFile = "version.json"
 
 // PlatformStateDBName is the platform engine's state-database basename inside
-// the SHARED workdir. The daemon starts the platform with `--workdir <dir>`;
-// the platform derives its state DB as `<dir>/state.db` (its cmd default). The
-// daemon treats the PRESENCE of this file as the marker that the workdir is
-// intact and the platform has initialised it — so its ABSENCE while a platform
-// process still claims to be running is the signature of a wiped workdir (the
-// platform limping off a now-unlinked inode). This is a workdir-layout contract
-// between daemon and platform, not plugin knowledge (the daemon stays
-// plugin-agnostic).
+// the disposable PLATFORM-WORKDIR (platformRoot, NOT the daemon-home). The
+// platform self-derives its workdir from its own disguised binary location
+// (<platform-workdir>/bin/<base> → two dirs up) and writes state.db there; on
+// the legacy layout the daemon passes the same dir via `--workdir`. The daemon
+// treats the PRESENCE of this file as the marker that the workdir is intact and
+// the platform has initialised it — so its ABSENCE while a platform process
+// still claims to be running is the signature of a wiped workdir (the platform
+// limping off a now-unlinked inode). This is a workdir-layout contract between
+// daemon and platform, not plugin knowledge (the daemon stays plugin-agnostic).
+//
+// FEATURE 21 (HF1) split state.db out of the daemon-home into the separate
+// platform-workdir; stateDBPath/WorkdirIntact therefore key off platformRoot(),
+// not Dir — see stateDBPath.
 const PlatformStateDBName = "state.db"
 
 // RosterFile is the LEGACY fixed basename of the masked mesh-label roster
@@ -169,17 +174,35 @@ func (s *Store) badName(v string) string {
 func (s *Store) versionPath() string { return filepath.Join(s.Dir, VersionFile) }
 func (s *Store) goodPath() string    { return filepath.Join(s.Dir, "good") }
 func (s *Store) badDir() string      { return filepath.Join(s.Dir, "bad") }
-func (s *Store) stateDBPath() string { return filepath.Join(s.Dir, PlatformStateDBName) }
 
-// WorkdirIntact reports whether the shared workdir is present on disk AND
-// initialised: the workdir directory exists and the platform's state DB is
-// present inside it. A false result while a platform process still claims to be
-// running means the workdir was wiped (rm -rf) and the running platform is
+// stateDBPath is where the platform engine's state.db lives: the disposable
+// PLATFORM-WORKDIR (platformRoot), NOT the daemon-home. FEATURE 21 (HF1) split
+// the two roots — the platform derives its workdir from its own binary location
+// (or is handed it via --workdir) and writes state.db under platformRoot — so
+// this MUST key off platformRoot(), not Dir. Keying it off Dir made
+// WorkdirIntact stat a state.db that never exists in a split install, so the
+// proactive workdir-wipe heal fired on EVERY tick and restart-looped a healthy
+// platform (it never survived to be promoted to good). platformRoot() falls
+// back to Dir on the legacy single-root layout, so unit/e2e stays unchanged.
+func (s *Store) stateDBPath() string {
+	return filepath.Join(s.platformRoot(), PlatformStateDBName)
+}
+
+// WorkdirIntact reports whether the PLATFORM-workdir is present on disk AND
+// initialised: the platform-workdir directory exists and the platform's state DB
+// is present inside it. A false result while a platform process still claims to
+// be running means the workdir was wiped (rm -rf) and the running platform is
 // limping off a now-unlinked inode — the reconcile loop uses this to trigger a
 // proactive restart+rebuild rather than wait (blind) for the platform to
 // eventually crash on its own.
+//
+// Both checks key off platformRoot() (the disposable platform-workdir where
+// state.db lives), NOT the daemon-home: FEATURE 21 (HF1) split them, and the
+// daemon-home always exists (the daemon runs from it), so statting Dir here
+// would mask a wiped platform-workdir. platformRoot() falls back to Dir on the
+// legacy single-root layout.
 func (s *Store) WorkdirIntact() bool {
-	if fi, err := os.Stat(s.Dir); err != nil || !fi.IsDir() {
+	if fi, err := os.Stat(s.platformRoot()); err != nil || !fi.IsDir() {
 		return false
 	}
 	if fi, err := os.Stat(s.stateDBPath()); err != nil || fi.IsDir() {
