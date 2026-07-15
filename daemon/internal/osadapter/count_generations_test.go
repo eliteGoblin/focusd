@@ -54,6 +54,11 @@ func TestCountOtherGenerations_Pure(t *testing.T) {
 			name: "no generations at all → 0",
 			want: 0,
 		},
+		{
+			name: "dead entry equal to keep is guarded out → 0 (defensive, mirrors retire)",
+			dead: []DeadGeneration{{BinaryPath: keep}},
+			want: 0,
+		},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {

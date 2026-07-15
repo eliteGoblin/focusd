@@ -546,9 +546,13 @@ func RetireOtherGenerations(m mode.Mode, keepBinaryPath, supportRoot string) (in
 // "unknown" rather than falsely counting the live generation as an orphan).
 //
 // Returns a COUNT ONLY — never the disguised labels/paths — so a caller like
-// `daemon status` physically cannot leak a teardown string. A filesystem
-// failure at the scan is surfaced as err so status buckets it to "unknown"
-// rather than ever fabricating a "clean" 0.
+// `daemon status` physically cannot leak a teardown string. NOTE: the returned
+// err can carry a *PathError from the underlying scan (its .Error() embeds a
+// filesystem path), so callers must never log/render it verbatim — the sole
+// caller (gather_darwin) discards it into a boolean "unknown" flag.
+//
+// A filesystem failure at the scan is surfaced as err so status buckets it to
+// "unknown" rather than ever fabricating a "clean" 0.
 func CountOtherGenerations(m mode.Mode, keepBinaryPath string) (others int, err error) {
 	if keepBinaryPath == "" {
 		return 0, fmt.Errorf("count generations: keepBinaryPath must not be empty")
@@ -567,7 +571,10 @@ func CountOtherGenerations(m mode.Mode, keepBinaryPath string) (others int, err 
 // binary path differs from keepBinaryPath, PLUS every dead generation (its
 // deleted binary can never equal the surviving keep). Paths are Clean'd before
 // comparison so a trailing-slash / non-canonical keep never mis-counts the keep
-// itself as an orphan.
+// itself as an orphan. A dead generation carries the SAME defensive keep-equality
+// guard as retireGenerations' dead loop — by construction a dead (deleted) binary
+// can never equal the present, verified keep, but the twin read/write paths stay
+// consistent so a future divergence can't silently over-count.
 func countOtherGenerations(live []Generation, dead []DeadGeneration, keepBinaryPath string) int {
 	keep := filepath.Clean(keepBinaryPath)
 	others := 0
@@ -576,7 +583,12 @@ func countOtherGenerations(live []Generation, dead []DeadGeneration, keepBinaryP
 			others++
 		}
 	}
-	return others + len(dead)
+	for _, d := range dead {
+		if filepath.Clean(d.BinaryPath) != keep {
+			others++
+		}
+	}
+	return others
 }
 
 // SweepOrphanWorkdirs deletes daemon-home workdirs that survive on disk with NO
