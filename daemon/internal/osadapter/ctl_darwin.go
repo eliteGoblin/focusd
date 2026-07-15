@@ -527,43 +527,39 @@ func RetireOtherGenerations(m mode.Mode, keepBinaryPath, supportRoot string) (in
 		c.bootout, os.Remove, pkillBinary, killGenerationPlatform(supportRoot), os.RemoveAll), nil
 }
 
-// stateDBFile is the SQLite state file a platform writes into its generation
-// workdir (see platform: filepath.Join(workdir, "state.db")). A hidden-dot
-// directory directly under the support root that contains this file is the
-// generation-workdir signature SweepOrphanWorkdirs keys on. The out-of-band
-// watchdog copy dir (also a hidden-dot sibling) holds only the relocated binary
-// and NO state.db, so it is excluded by construction.
-const stateDBFile = "state.db"
-
-// SweepOrphanWorkdirs deletes generation workdirs that survive on disk with NO
+// SweepOrphanWorkdirs deletes daemon-home workdirs that survive on disk with NO
 // loaded plist or running process backing them — the residual a teardown /
 // recovery / re-install cycle leaves behind (FEATURE 17 follow-up, TC-21).
 // RetireOtherGenerations only catches generations still visible to a plist scan
 // (live "other" + dead-binary "zombie" generations); a generation whose plist
-// was already removed leaves ONLY orphaned files on disk, invisible to that
-// scan. Those stale state.db copies clutter disk and confuse status reads
-// (multiple state sources). This sweep is the disk-side complement: after any
-// install exactly ONE generation workdir (the keep) survives.
+// was already removed leaves ONLY orphaned files on disk, invisible to that scan.
+// This sweep is the disk-side complement: after any install exactly ONE
+// daemon-home (the keep) survives.
 //
-// It scans the IMMEDIATE children of the mode's support root and removes each
-// hidden-dot directory that contains a state.db file (the generation signature)
-// and is NOT the keepWorkdir. Every removal is GATED by safeToRemoveWorkdir
-// (absolute, strictly under the support root, not the keep, not an ancestor of
-// the keep) — the same belt RetireOtherGenerations uses. The watchdog copy dir
-// has no state.db so it is never a candidate. Best-effort throughout: it returns
-// only the count of removed workdirs (never the disguised paths) and never errors
-// out the install — a failed remove is skipped, a scan failure returns the count
-// so far with the error for optional logging.
+// FEATURE 26 (destructive-safety core): it scans the IMMEDIATE children of the
+// support root and removes each directory carrying the DAEMON-HOME CONTENT
+// sentinel (platdir.IsDaemonHome — a sentinel file whose bytes un-mask to the
+// daemon-home magic) that is NOT the keepWorkdir. This REPLACES the previous
+// "hidden-dot + contains state.db" heuristic, which — once names lost their
+// leading dot — would have scanned real app folders and deleted any that happened
+// to hold a file named state.db. Now nothing but a positive daemon-home magic
+// match can gate a RemoveAll: a platform-workdir (different magic) and a real app
+// folder (no magic) are never candidates. Every removal is additionally GATED by
+// safeToRemoveWorkdir (absolute, strictly under the support root, not the keep,
+// not an ancestor of the keep) — the same belt RetireOtherGenerations uses.
 //
-// keepWorkdir is the new install's workdir (Dir of the relocated binary).
+// keepWorkdir is the new install's daemon-home (Dir of the relocated binary).
 //
 // supportRoot is the scan root AND the containment root for os.RemoveAll — an
 // EXPLICIT param (mirroring SweepStalePlatformWorkdirs), NOT recomputed from
 // mode.SupportRoot(m, home). That recompute was the storage-separation defect:
 // SupportRoot(Test, …) resolves to the REAL ~/Library/Application Support, so a
-// test-mode install would scan and delete REAL generation workdirs. The caller
-// (installMesh) passes the sandboxed local it already computed, so a test-mode
-// sweep is confined to the sandbox.
+// test-mode install would scan and delete REAL workdirs. The caller (installMesh)
+// passes the sandboxed local it already computed, so a test-mode sweep is
+// confined to the sandbox.
+//
+// Best-effort throughout: it returns only the count of removed workdirs (never
+// the disguised paths) and never errors out the install.
 func SweepOrphanWorkdirs(supportRoot, keepWorkdir string) (removed int, err error) {
 	entries, rerr := os.ReadDir(supportRoot)
 	if rerr != nil {
@@ -574,26 +570,22 @@ func SweepOrphanWorkdirs(supportRoot, keepWorkdir string) (removed int, err erro
 	}
 	keep := filepath.Clean(keepWorkdir)
 	for _, e := range entries {
-		if !e.IsDir() || !strings.HasPrefix(e.Name(), ".") {
-			continue // only hidden-dot directories are generation workdirs
+		if !e.IsDir() {
+			continue
 		}
 		dir := filepath.Join(supportRoot, e.Name())
 		if filepath.Clean(dir) == keep {
-			continue // the surviving generation — never sweep it
+			continue // the surviving daemon-home — never sweep it
 		}
-		// FEATURE 21 (HF1): a disposable platform-workdir now holds the state.db
-		// (the daemon-home does not). Skip sentinel-marked platform-workdirs here
-		// so this daemon-home orphan sweep never deletes the LIVE platform
-		// storage; stale platform-workdirs are handled by
-		// SweepStalePlatformWorkdirs.
+		// A platform-workdir carries a DIFFERENT magic; leave it to
+		// SweepStalePlatformWorkdirs. (IsDaemonHome is already false for it, so
+		// this is belt-and-suspenders clarity.)
 		if platdir.IsPlatformWorkdir(dir) {
 			continue
 		}
-		// The generation signature: a state.db file. The watchdog copy dir (a
-		// hidden-dot sibling) has none, so it is naturally excluded; a legit
-		// third-party Application Support dir is not hidden-dot and lacks our
-		// state.db, so it can never match.
-		if st, serr := os.Stat(filepath.Join(dir, stateDBFile)); serr != nil || st.IsDir() {
+		// CONTENT gate: only a positive daemon-home sentinel match. Real app
+		// folders (no magic) are skipped here — nothing else reaches the RemoveAll.
+		if !platdir.IsDaemonHome(dir) {
 			continue
 		}
 		// GUARD: only RemoveAll a dir strictly under the support root that is
@@ -721,10 +713,17 @@ var interTagSpaceRE = regexp.MustCompile(`>\s+<`)
 // tags, so they are untouched.
 func collapseInterTagSpace(s string) string { return interTagSpaceRE.ReplaceAllString(s, "><") }
 
-// parsePlist extracts the Label, the first ProgramArguments string (the binary
-// path), the full argv (binary path + arguments), and the plist's
-// EnvironmentVariables map from one of our generated plists. argv[0] == bin;
-// len(argv) == 0 and env == nil on parse failure.
+// parsePlist extracts the Label, the real BINARY path, the full argv, and the
+// plist's EnvironmentVariables map from one of our generated plists. len(argv)==0
+// and env==nil on parse failure.
+//
+// FEATURE 26 (layer a): a non-test mesh plist now carries a Program key (the real
+// binary launchd execs) and a spoofed ProgramArguments[0] (the display argv[0]).
+// bin is taken from Program when present, so discovery/verification still keys on
+// the REAL binary path even though argv[0] is now a generic token. A legacy/test
+// plist has no Program key ⇒ bin falls back to ProgramArguments[0] (== argv[0]),
+// exactly as before. argv is always the ProgramArguments array (the token +
+// arguments), so the roster/workdir/interval argv fallbacks are unaffected.
 //
 // FEATURE 19: the env map carries the mesh role marker (MeshEnvKey) that the
 // minimized prod argv no longer holds — DiscoverAllGenerations unions it with
@@ -750,9 +749,14 @@ func parsePlist(path string) (label, bin string, argv []string, env map[string]s
 	}
 	env = parseEnvDict(s)
 	label = between(s, "<key>Label</key><string>", "</string>")
+	// FEATURE 26: the real binary is under the Program key (the search string ends
+	// in "</key><string>", so it cannot false-match "<key>ProgramArguments</key>",
+	// which is followed by "<array>"). Absent ⇒ legacy/test plist → bin falls back
+	// to ProgramArguments[0] below.
+	program := between(s, "<key>Program</key><string>", "</string>")
 	i := strings.Index(s, "<key>ProgramArguments</key><array>")
 	if i < 0 {
-		return label, "", nil, env
+		return label, program, nil, env
 	}
 	// Walk the inner <string>...</string> entries up to the closing
 	// </array>; preserves order and handles the "--flag value" pair
@@ -776,7 +780,13 @@ func parsePlist(path string) (label, bin string, argv []string, env map[string]s
 		argv = append(argv, v)
 		inner = inner[j+k+len("</string>"):]
 	}
-	if len(argv) > 0 {
+	// FEATURE 26: prefer the Program key (the REAL binary) as bin; only fall back
+	// to ProgramArguments[0] for a legacy/test plist that has no Program key (there
+	// argv[0] IS the binary). This keeps discovery/verification/generation-grouping
+	// keyed on the real binary path even though argv[0] is now a spoof token.
+	if program != "" {
+		bin = program
+	} else if len(argv) > 0 {
 		bin = argv[0]
 	}
 	return label, bin, argv, env

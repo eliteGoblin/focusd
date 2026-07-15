@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"strings"
 	"time"
+
+	"github.com/eliteGoblin/focusd/daemon/internal/relocate"
 )
 
 // args returns the daemon argv for a role (the strings AFTER the binary in
@@ -80,17 +82,54 @@ func intervalSeconds(s Spec) int {
 	return n
 }
 
+// daemonArgv0 is the display-only argv[0] token for a NON-test mesh worker plist
+// (FEATURE 26, layer a) — derived from the role's independent label so it is
+// distinct per role and stable across every plist-generation path. Empty for the
+// dev fallback (no roster) ⇒ the caller keeps the legacy binary-path argv[0].
+func daemonArgv0(s Spec, r Role) string {
+	if s.isTest() {
+		return "" // test keeps the full, legacy argv (ProgramArguments[0] = SelfPath)
+	}
+	return relocate.DaemonArgv0(s.Label(r))
+}
+
 // Plist renders the launchd plist for a role. Pure → unit-tested.
 // A/B: KeepAlive+RunAtLoad (survive kill/crash/reboot-at-login).
 // ensure: RunAtLoad + StartInterval (periodic mesh repair).
+//
+// FEATURE 26 (layer a) — argv[0] spoof via a Program/ProgramArguments SPLIT.
+// When a display token is available (non-test, disguised roster), the plist emits
+// Program=<real binary path> (what launchd execs) and ProgramArguments[0]=<token>
+// (what the process shows in `ps aux`). launchd execs Program and hands
+// ProgramArguments as argv, so the live process's argv[0] is the generic token —
+// no disguised binary PATH in `ps aux`. parsePlist reads Program back as the
+// binary for discovery/verification. The test / dev-fallback path keeps the
+// legacy single ProgramArguments[0]=SelfPath form (no Program key), so e2e and
+// existing plist tests are unchanged.
+//
+// HONEST FLOOR: `ps -o comm=` and `lsof` still resolve the process's REAL
+// executable path from the kernel (KERN_PROCARGS2 / the vnode), independent of
+// argv — the same structural limit as the platform child. The split only hides
+// the path from an argv-based `ps aux | grep`.
 func Plist(s Spec, r Role) string {
 	var sb strings.Builder
 	sb.WriteString(`<?xml version="1.0" encoding="UTF-8"?>` + "\n")
 	sb.WriteString(`<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">` + "\n")
 	sb.WriteString("<plist version=\"1.0\"><dict>\n")
 	fmt.Fprintf(&sb, "  <key>Label</key><string>%s</string>\n", s.Label(r))
-	sb.WriteString("  <key>ProgramArguments</key><array>\n")
-	fmt.Fprintf(&sb, "    <string>%s</string>\n", s.SelfPath)
+	token := daemonArgv0(s, r)
+	if token != "" {
+		// Program = the real binary launchd execs; ProgramArguments[0] = the
+		// spoofed argv[0] the process shows. args(s,r) is empty for prod (the mesh
+		// marker rides in env), so argv is exactly [token].
+		fmt.Fprintf(&sb, "  <key>Program</key><string>%s</string>\n", s.SelfPath)
+		sb.WriteString("  <key>ProgramArguments</key><array>\n")
+		fmt.Fprintf(&sb, "    <string>%s</string>\n", token)
+	} else {
+		// Legacy / test: ProgramArguments[0] IS the binary path (no Program key).
+		sb.WriteString("  <key>ProgramArguments</key><array>\n")
+		fmt.Fprintf(&sb, "    <string>%s</string>\n", s.SelfPath)
+	}
 	for _, a := range args(s, r) {
 		fmt.Fprintf(&sb, "    <string>%s</string>\n", a)
 	}

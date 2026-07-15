@@ -1,7 +1,10 @@
 package core
 
 import (
+	"bytes"
+	"crypto/hmac"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -62,34 +65,105 @@ const VersionFile = "version.json"
 // plugin-agnostic).
 const PlatformStateDBName = "state.db"
 
-// RosterFile is the basename of the masked mesh-label roster under the
-// workdir (FEATURE 10 / ADR-0014). It holds the three independent mesh
-// labels XOR-masked so a casual `cat` shows non-plaintext bytes; a
-// freshly relaunched survivor reads it to recover the roster on a cold
-// start. In-memory roster is authoritative; this file self-heals from it.
+// RosterFile is the LEGACY fixed basename of the masked mesh-label roster
+// (FEATURE 10 / ADR-0014). FEATURE 26 salt-derives the live basename
+// (RosterPath); this literal is the fallback for dev/test/legacy (no salt). It
+// holds the three independent mesh labels XOR-masked so a casual `cat` shows
+// non-plaintext bytes; a freshly relaunched survivor reads it to recover the
+// roster on a cold start. In-memory roster is authoritative; it self-heals.
 const RosterFile = ".roster"
 
 // InstallSaltFile is the basename (in the daemon-home) of the per-install salt
-// that seeds every HF4 (FEATURE 24) disguise derivation: the platform binary's
-// on-disk basename (BinPath) and the platform child's argv[0] (PlatformArgv0).
-// It IS the "version→path index the daemon reads": salt + version → path,
-// deterministically, so status/procCount reconstructs the exact running argv
-// without a second lookup table. Neutral, dot-hidden basename; lives 0700 in the
-// disguised daemon-home. Absent ⇒ the legacy non-disguised layout (dev/tests).
-const InstallSaltFile = ".idx"
+// that seeds every disguise derivation: the platform binary's on-disk basename
+// (BinPath), the platform child's argv[0] (PlatformArgv0), and — FEATURE 26 — the
+// masked-roster / pidfile / pointer / lock basenames. It IS the single FIXED
+// literal (relocate.SaltBasename) a reader needs to bootstrap the salt before it
+// can derive the rest. Neutral, dot-hidden; lives 0700 in the disguised
+// daemon-home. Absent ⇒ the legacy non-disguised layout (dev/tests).
+const InstallSaltFile = relocate.SaltBasename
 
-// PlatformPidFile is the basename (in the daemon-home) of the platform child's
-// liveness pidfile (HF4 FEATURE 24, P3). It holds ONLY the child's OS pid as a
-// bare integer — no path, no version, no greppable word — so status liveness is
-// SALT-INDEPENDENT: a `focusd status` CLI reads it and probes the pid directly,
-// correct even if the disguise salt diverged from the running child's argv (the
-// old pgrep pattern could then miss and falsely report DOWN). Written by the
-// singleton-lock holder (platformsvc.Start) and removed by its exit waiter.
-// Neutral dot-hidden basename, like .roster/.idx.
+// PlatformPidFile is the LEGACY fixed basename (in the daemon-home) of the
+// platform child's liveness pidfile (HF4 FEATURE 24, P3). FEATURE 26 salt-derives
+// the live basename (PidFilePath); this literal is the fallback for dev/test/
+// legacy. It holds ONLY the child's OS pid as a bare integer — no path, no
+// version, no greppable word — so status liveness is SALT-INDEPENDENT: a `focusd
+// status` CLI reads it and probes the pid directly, correct even if the disguise
+// salt diverged from the running child's argv.
 const PlatformPidFile = ".seq"
 
 type versionConfig struct {
 	Desired string `json:"desired"`
+}
+
+// FEATURE 26 (bundle 4) — version grep-hook mask.
+//
+// version.json / good / bad/* CONTENT carried the platform version in plaintext,
+// and a bad/<v> FILENAME carried it too — so a `grep -r v0.16 ~/Library` or a
+// `find -name 'v0.16*'` hit the install even after HF4 disguised the bin path.
+// These are now masked with a distinct salt-keyed XOR key, and the bad/<v>
+// filename becomes a keyed digest. Legacy plaintext files are still ACCEPTED on
+// read (a leading marker byte disambiguates masked from plaintext), so an upgrade
+// self-heals to masked on the next write without losing the current version.
+//
+// Empty salt (dev/test/legacy) ⇒ no mask, legacy filenames — the deterministic
+// layout the existing tests and e2e rely on is unchanged.
+
+// verMaskMarker is the non-printable leading MARKER of a masked version payload.
+// A correctly un-masked payload starts with these exact bytes; a legacy plaintext
+// file un-masked with the key matches all 4 only with probability ~2^-32, so its
+// absence reliably flags "legacy plaintext" (a wide, deterministic discriminator,
+// not a 1-in-256 heuristic).
+var verMaskMarker = []byte{0x1e, 0x46, 0x32, 0x36} // 0x1e + "F26"
+
+// verMaskKey is the deterministic XOR key for version-state content, distinct
+// from every other salt-keyed mask. Empty salt ⇒ nil (no masking).
+func (s *Store) verMaskKey() []byte {
+	salt := s.InstallSalt()
+	if salt == "" {
+		return nil
+	}
+	h := sha256.Sum256([]byte(salt + "|verstate"))
+	return h[:]
+}
+
+// maskVer returns the on-disk bytes for version-state data: XOR(marker+data, key)
+// when a salt is present, else data verbatim (legacy/test plaintext).
+func (s *Store) maskVer(data []byte) []byte {
+	key := s.verMaskKey()
+	if key == nil {
+		return data
+	}
+	return xor(append(append([]byte(nil), verMaskMarker...), data...), key)
+}
+
+// unmaskVer returns (data, true) when raw is a file WE masked (the multi-byte
+// marker is present after un-masking), or (raw, false) when it is a legacy
+// plaintext file the caller should use as-is. With no salt it returns (raw,
+// false) — plaintext is authoritative.
+func (s *Store) unmaskVer(raw []byte) ([]byte, bool) {
+	key := s.verMaskKey()
+	if key == nil {
+		return raw, false
+	}
+	u := xor(raw, key)
+	if len(u) >= len(verMaskMarker) && bytes.Equal(u[:len(verMaskMarker)], verMaskMarker) {
+		return u[len(verMaskMarker):], true
+	}
+	return raw, false // not ours-masked → treat as legacy plaintext
+}
+
+// badName is the bad-marker basename for version v: a keyed HMAC digest (no
+// version leak in the filename) when a salt is present, else the legacy
+// path-sanitised name. Deterministic, so ClearBad removes exactly what MarkBad
+// wrote.
+func (s *Store) badName(v string) string {
+	salt := s.InstallSalt()
+	if salt == "" {
+		return safe(v)
+	}
+	mac := hmac.New(sha256.New, []byte(salt))
+	mac.Write([]byte("bad|" + v))
+	return hex.EncodeToString(mac.Sum(nil))[:24]
 }
 
 func (s *Store) versionPath() string { return filepath.Join(s.Dir, VersionFile) }
@@ -114,10 +188,29 @@ func (s *Store) WorkdirIntact() bool {
 	return true
 }
 
-// RosterPath is the absolute path of the masked mesh-label roster file
-// under the workdir. Exported so the osadapter mesh layer can read/write
-// it via the core roster helpers.
-func (s *Store) RosterPath() string { return filepath.Join(s.Dir, RosterFile) }
+// RosterPath is the absolute path of the masked mesh-label roster file under the
+// daemon-home. FEATURE 26: the basename is salt-derived (de-patterned per install)
+// when a salt is present, else the fixed legacy RosterFile. Every reader
+// (roster_fs, recoverRoster, the ArgvFromEnv cold-start) reads this through the
+// SAME method against a Store keyed by the daemon-home, so they always agree.
+func (s *Store) RosterPath() string {
+	if n := relocate.MarkerBasename(s.InstallSalt(), "roster"); n != "" {
+		return filepath.Join(s.Dir, n)
+	}
+	return filepath.Join(s.Dir, RosterFile)
+}
+
+// PidFilePath is the absolute path of the platform child's liveness pidfile under
+// the daemon-home. FEATURE 26: salt-derived basename (de-patterned) when a salt is
+// present, else the fixed legacy PlatformPidFile. The writer (platformsvc.Start
+// via the loop) and the `focusd status` reader both resolve it through this
+// method against the daemon-home, so they agree without a shared literal.
+func (s *Store) PidFilePath() string {
+	if n := relocate.MarkerBasename(s.InstallSalt(), "pidfile"); n != "" {
+		return filepath.Join(s.Dir, n)
+	}
+	return filepath.Join(s.Dir, PlatformPidFile)
+}
 
 // saltPath is the absolute path of the per-install disguise salt (daemon-home).
 func (s *Store) saltPath() string { return filepath.Join(s.Dir, InstallSaltFile) }
@@ -206,10 +299,24 @@ func (s *Store) PlatformArgv0() string {
 	return relocate.PlatformArgv0(s.InstallSalt())
 }
 
-// LockPath is the singleton-lock file the winning daemon holds for the
-// lifetime of its platform child. fd-tied advisory lock ⇒ kernel auto-
-// releases on holder death, so a standby's next tick takes over.
-func (s *Store) LockPath() string { return filepath.Join(s.Dir, "platform.lock") }
+// legacyLockFile is the fixed fallback basename of the per-workdir singleton
+// lock (dev/test/legacy). The CROSS-GENERATION election uses a separate FIXED
+// mode-keyed path (main.singletonLockPath) that CANNOT be salt-derived — two
+// generations with different salts must flock the SAME file or twin platforms
+// result — so only this per-workdir fallback is de-patterned here.
+const legacyLockFile = "platform.lock"
+
+// LockPath is the per-workdir singleton-lock file the winning daemon holds for
+// the lifetime of its platform child. fd-tied advisory lock ⇒ kernel auto-
+// releases on holder death, so a standby's next tick takes over. FEATURE 26:
+// salt-derived basename (de-patterned, drops the 'platform' token) when a salt is
+// present, else the fixed legacy basename.
+func (s *Store) LockPath() string {
+	if n := relocate.MarkerBasename(s.InstallSalt(), "lock"); n != "" {
+		return filepath.Join(s.Dir, n)
+	}
+	return filepath.Join(s.Dir, legacyLockFile)
+}
 
 // HaveBin reports whether the platform binary for v exists.
 func (s *Store) HaveBin(v string) bool {
@@ -223,54 +330,57 @@ func (s *Store) HaveConfig() bool {
 	return err == nil
 }
 
-// Desired returns the configured desired version ("" if none).
+// Desired returns the configured desired version ("" if none). It un-masks a
+// FEATURE-26 masked version.json and still accepts a legacy plaintext one.
 func (s *Store) Desired() string {
 	b, err := os.ReadFile(s.versionPath())
 	if err != nil {
 		return ""
 	}
+	data, _ := s.unmaskVer(b) // masked → payload; legacy/plaintext → raw bytes
 	var c versionConfig
-	if json.Unmarshal(b, &c) != nil {
+	if json.Unmarshal(data, &c) != nil {
 		return ""
 	}
 	return c.Desired
 }
 
-// WriteDesired atomically records the desired version.
+// WriteDesired atomically records the desired version (masked when a salt exists).
 func (s *Store) WriteDesired(v string) error {
 	if err := os.MkdirAll(s.Dir, 0o755); err != nil {
 		return err
 	}
 	b, _ := json.Marshal(versionConfig{Desired: v})
-	return atomicWrite(s.versionPath(), b)
+	return atomicWrite(s.versionPath(), s.maskVer(b))
 }
 
-// Good / WriteGood track the last-known-good version.
+// Good / WriteGood track the last-known-good version (masked content, FEATURE 26).
 func (s *Store) Good() string {
 	b, err := os.ReadFile(s.goodPath())
 	if err != nil {
 		return ""
 	}
-	return strings.TrimSpace(string(b))
+	data, _ := s.unmaskVer(b)
+	return strings.TrimSpace(string(data))
 }
 
 func (s *Store) WriteGood(v string) error {
 	if err := os.MkdirAll(s.Dir, 0o755); err != nil {
 		return err
 	}
-	return atomicWrite(s.goodPath(), []byte(v))
+	return atomicWrite(s.goodPath(), s.maskVer([]byte(v)))
 }
 
-// MarkBad records v as crash-looped (never run again).
+// MarkBad records v as crash-looped (never run again). FEATURE 26: the filename
+// is a keyed digest (no version leak) and the ORIGINAL version is the MASKED file
+// CONTENT, so BadSet returns the exact version string and the executor's
+// s.Bad[desired] lookup is symmetric (no silent miss for versions containing
+// sanitised characters).
 func (s *Store) MarkBad(v string) error {
 	if err := os.MkdirAll(s.badDir(), 0o755); err != nil {
 		return err
 	}
-	// Filename is path-sanitised; the ORIGINAL version is the file
-	// CONTENT so BadSet returns the exact version string and the
-	// executor's s.Bad[desired] lookup is symmetric (no silent miss
-	// for versions containing sanitised characters).
-	return atomicWrite(filepath.Join(s.badDir(), safe(v)), []byte(v))
+	return atomicWrite(filepath.Join(s.badDir(), s.badName(v)), s.maskVer([]byte(v)))
 }
 
 // ClearBad removes v's crash-looped marker, if present. Idempotent — a
@@ -278,15 +388,20 @@ func (s *Store) MarkBad(v string) error {
 // once a genuine, signature-verified binary for v is back on disk, any prior
 // "bad" verdict was about the TAMPERED bytes that have now been reverted, so
 // v must become runnable again WITHOUT requiring a daemon process restart.
+// FEATURE 26: removes both the keyed-digest name and the legacy path-sanitised
+// name so a marker written before an upgrade is still cleared.
 func (s *Store) ClearBad(v string) error {
-	if err := os.Remove(filepath.Join(s.badDir(), safe(v))); err != nil && !errors.Is(err, os.ErrNotExist) {
-		return err
+	for _, name := range []string{s.badName(v), safe(v)} {
+		if err := os.Remove(filepath.Join(s.badDir(), name)); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return err
+		}
 	}
 	return nil
 }
 
-// BadSet returns the exact versions marked bad (read from file
-// content, so lookups by the original version string always match).
+// BadSet returns the exact versions marked bad (read from the un-masked file
+// CONTENT, so lookups by the original version string always match — regardless of
+// the keyed-digest filename). Legacy plaintext markers are still accepted.
 func (s *Store) BadSet() map[string]bool {
 	out := map[string]bool{}
 	entries, err := os.ReadDir(s.badDir())
@@ -301,7 +416,8 @@ func (s *Store) BadSet() map[string]bool {
 		if rerr != nil {
 			continue
 		}
-		if v := strings.TrimSpace(string(b)); v != "" {
+		data, _ := s.unmaskVer(b)
+		if v := strings.TrimSpace(string(data)); v != "" {
 			out[v] = true
 		}
 	}

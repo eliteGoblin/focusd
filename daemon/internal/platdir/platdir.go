@@ -24,6 +24,7 @@
 package platdir
 
 import (
+	"crypto/sha256"
 	"os"
 	"path/filepath"
 	"strings"
@@ -31,56 +32,152 @@ import (
 	"github.com/eliteGoblin/focusd/daemon/internal/relocate"
 )
 
-// pointerBasename is the disguised basename of the pointer file inside
-// daemon-home. Apple-metadata-looking so a casual `ls` in the (already hidden)
-// daemon-home does not flag it. Not a real-install identifier — a generic
-// disguise chosen for this feature (cf. the singleton-lock disguise).
-const pointerBasename = ".com.apple.metadata.store.plist"
+// legacyPointerBasename is the FIXED pointer basename used before FEATURE 26.
+// New installs salt-derive the basename (relocate.MarkerBasename "pointer"); this
+// literal is retained ONLY as a read fallback so an upgrade that seeds the salt
+// after the legacy pointer was written still finds the live platform-workdir
+// (migration: don't orphan the live install).
+const legacyPointerBasename = ".com.apple.metadata.store.plist"
 
-// sentinelBasename marks a directory as a platform-workdir this package
-// created. It lets the orphan sweep tell a platform-workdir apart from a
-// daemon-home (which has NO sentinel) without guessing from contents, so the
-// sweep can never delete a daemon-home by mistake.
-const sentinelBasename = ".com.apple.metadata.pwd.plist"
-
-// PointerPath is the absolute path of the pointer file inside daemonHome.
-func PointerPath(daemonHome string) string {
-	return filepath.Join(daemonHome, pointerBasename)
-}
-
-// SentinelPath is the absolute path of the platform-workdir sentinel inside a
-// platform-workdir.
-func SentinelPath(platformWorkdir string) string {
-	return filepath.Join(platformWorkdir, sentinelBasename)
-}
-
-// IsPlatformWorkdir reports whether dir carries the platform-workdir sentinel
-// (i.e. this package created it). Used by the orphan sweep so it only ever
-// deletes platform-workdirs, never a daemon-home.
-func IsPlatformWorkdir(dir string) bool {
-	fi, err := os.Stat(SentinelPath(dir))
-	return err == nil && !fi.IsDir()
-}
-
-// Read returns the platform-workdir recorded in daemonHome's pointer file, or
-// "" when the pointer is absent/unreadable/empty. It does NOT validate the
-// target (see SafeTarget) or check that it exists (see Resolve).
-func Read(daemonHome string) string {
-	b, err := os.ReadFile(PointerPath(daemonHome))
+// installSalt reads the per-install disguise salt from daemonHome (the fixed
+// relocate.SaltBasename literal), or "" when absent (dev/test/legacy → the
+// callers fall back to the fixed legacy pointer basename + plaintext content).
+func installSalt(daemonHome string) string {
+	b, err := os.ReadFile(filepath.Join(daemonHome, relocate.SaltBasename))
 	if err != nil {
 		return ""
 	}
 	return strings.TrimSpace(string(b))
 }
 
-// Write atomically records target as daemonHome's platform-workdir.
+// pointerBasename returns daemonHome's pointer basename: salt-derived when a salt
+// is present (de-patterned per install), else the fixed legacy literal.
+func pointerBasename(daemonHome string) string {
+	if n := relocate.MarkerBasename(installSalt(daemonHome), "pointer"); n != "" {
+		return n
+	}
+	return legacyPointerBasename
+}
+
+// PointerPath is the absolute path of the pointer file inside daemonHome (its
+// current, possibly salt-derived, basename).
+func PointerPath(daemonHome string) string {
+	return filepath.Join(daemonHome, pointerBasename(daemonHome))
+}
+
+// pointerMaskKey is the deterministic XOR key for the pointer file CONTENT,
+// distinct from every other salt-keyed mask. Empty salt ⇒ no mask (plaintext,
+// legacy/test).
+func pointerMaskKey(salt string) []byte {
+	if salt == "" {
+		return nil
+	}
+	h := sha256.Sum256([]byte(salt + "|pointer"))
+	return h[:]
+}
+
+// xorMask returns src XOR key (its own inverse). key nil ⇒ src unchanged.
+func xorMask(src, key []byte) []byte {
+	if len(key) == 0 {
+		return append([]byte(nil), src...)
+	}
+	out := make([]byte, len(src))
+	for i, b := range src {
+		out[i] = b ^ key[i%len(key)]
+	}
+	return out
+}
+
+// IsPlatformWorkdir reports whether dir is a platform-workdir this package
+// created — recognised by the FORWARD content magic (a sentinel file whose bytes
+// un-mask to pwdMagic) OR the LEGACY two-signal migration marker. Used by the
+// generation sweeps so they only ever delete a platform-workdir, never a
+// daemon-home or a real app folder. Content-only forward recognition works
+// cross-generation (no salt needed) and cannot match a real app folder.
+func IsPlatformWorkdir(dir string) bool {
+	return hasMarker(dir, pwdMagic()) || isLegacyPlatformWorkdir(dir)
+}
+
+// IsDaemonHome reports whether dir is a daemon-home this package marked (a
+// sentinel file whose bytes un-mask to dhMagic). The daemon-home orphan sweep
+// gates its RemoveAll on this positive content match — never on a name or on a
+// state.db heuristic — so a real app folder is never a delete candidate.
+//
+// INTENTIONAL asymmetry with IsPlatformWorkdir: there is NO legacy-migration
+// fallback here. A pre-FEATURE-26 daemon-home (no sentinel) is not swept by the
+// orphan sweep — but that is safe and sufficient: a live/retired legacy
+// daemon-home is cleaned by the plist-driven generation retire (which RemoveAll's
+// Dir(verified-binary), name-agnostic), so only a truly-orphaned pre-F26
+// daemon-home whose plist is already gone leaks as harmless disk residue. We
+// prefer that leak to a name/state.db heuristic that could hit a real folder.
+func IsDaemonHome(dir string) bool {
+	return hasMarker(dir, dhMagic())
+}
+
+// MarkPlatformWorkdir writes the platform-workdir content sentinel into dir.
+// Best-effort (a failure only weakens later recognition).
+func MarkPlatformWorkdir(dir string) { writeSentinel(dir, pwdMagic()) }
+
+// MarkDaemonHome writes the daemon-home content sentinel into dir. Called once at
+// install so an orphaned daemon-home is later recognisable + sweepable by
+// content. Best-effort.
+func MarkDaemonHome(dir string) { writeSentinel(dir, dhMagic()) }
+
+// MarkWatchdogCopy writes the watchdog-copy content sentinel into dir. Called when
+// the out-of-band watchdog binary copy is placed, so the later refresh/uninstall
+// RemoveAll of the OLD copy dir can positively confirm the dir is ours before
+// deleting it (never a real app folder). Best-effort.
+func MarkWatchdogCopy(dir string) { writeSentinel(dir, wdMagic()) }
+
+// IsWatchdogCopy reports whether dir is a watchdog-copy dir this package marked.
+// The watchdog teardown gates its RemoveAll on this positive content match.
+func IsWatchdogCopy(dir string) bool { return hasMarker(dir, wdMagic()) }
+
+// Read returns the platform-workdir recorded in daemonHome's pointer file, or
+// "" when the pointer is absent/unreadable/empty. It transparently un-masks a
+// salt-masked pointer, accepts a legacy plaintext pointer (self-heals on the next
+// Write), and falls back to the legacy pointer basename during an upgrade so the
+// live platform-workdir is not orphaned. It does NOT validate the target (see
+// SafeTarget) or check that it exists (see Resolve).
+func Read(daemonHome string) string {
+	salt := installSalt(daemonHome)
+	raw, err := os.ReadFile(PointerPath(daemonHome))
+	if err != nil {
+		// Migration: a just-upgraded install may still have the pointer at the
+		// legacy basename (the salt was seeded after it was written). Adopt it.
+		if salt != "" {
+			if lb, lerr := os.ReadFile(filepath.Join(daemonHome, legacyPointerBasename)); lerr == nil {
+				raw = lb
+			} else {
+				return ""
+			}
+		} else {
+			return ""
+		}
+	}
+	// Prefer the un-masked interpretation; accept a legacy plaintext path if the
+	// bytes are already a valid absolute path (an install written before the salt
+	// existed). filepath.IsAbs is the validity oracle: a masked path is
+	// overwhelmingly non-"/"-leading, so this disambiguates without a format byte.
+	if unmasked := strings.TrimSpace(string(xorMask(raw, pointerMaskKey(salt)))); filepath.IsAbs(unmasked) {
+		return unmasked
+	}
+	if plain := strings.TrimSpace(string(raw)); filepath.IsAbs(plain) {
+		return plain // legacy plaintext → Resolve/Write will re-mask it
+	}
+	return ""
+}
+
+// Write atomically records target as daemonHome's platform-workdir, XOR-masking
+// the content with the salt-derived key (plaintext when no salt: legacy/test).
 func Write(daemonHome, target string) error {
 	if err := os.MkdirAll(daemonHome, 0o700); err != nil {
 		return err
 	}
 	p := PointerPath(daemonHome)
+	payload := xorMask([]byte(target+"\n"), pointerMaskKey(installSalt(daemonHome)))
 	tmp := p + ".tmp"
-	if err := os.WriteFile(tmp, []byte(target+"\n"), 0o600); err != nil {
+	if err := os.WriteFile(tmp, payload, 0o600); err != nil {
 		return err
 	}
 	return os.Rename(tmp, p)
@@ -141,19 +238,20 @@ func SafeTarget(target, supportRoot, daemonHome string) bool {
 	return true
 }
 
-// Create makes a FRESH disguised platform-workdir under supportRoot, marks it
-// with the sentinel, and returns its path. The name is drawn from the same
-// disguise pool as the daemon-home so a platform-workdir is indistinguishable
-// from any other hidden Application-Support dir.
+// Create EXCLUSIVELY makes a FRESH disguised platform-workdir under supportRoot,
+// marks it with the content sentinel, and returns its path. The name is a
+// shape-ensemble blend (relocate.FreshHiddenDir) that reads as an ordinary
+// app-support entry — different from the daemon-home and from every other
+// generation. FreshHiddenDir uses os.Mkdir (never MkdirAll), so it can NEVER
+// adopt a pre-existing real app folder: our sentinel only ever lands in a
+// directory we exclusively created. That exclusivity is the invariant that keeps
+// the content-gated sweep from ever deleting a real folder.
 func Create(supportRoot string) (string, error) {
-	dir := relocate.HiddenWorkdir(supportRoot)
-	if err := os.MkdirAll(dir, 0o700); err != nil {
+	dir, err := relocate.FreshHiddenDir(supportRoot)
+	if err != nil {
 		return "", err
 	}
-	// Best-effort sentinel: a write failure only weakens the orphan sweep's
-	// ability to recognise this dir later; it must not fail the create (the
-	// platform can still run from an unmarked dir).
-	_ = os.WriteFile(SentinelPath(dir), nil, 0o600)
+	MarkPlatformWorkdir(dir)
 	return dir, nil
 }
 

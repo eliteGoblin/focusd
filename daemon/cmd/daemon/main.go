@@ -410,7 +410,7 @@ func build(o opts) (*core.Executor, *slog.Logger) {
 	// the DAEMON-HOME (o.workdir survives a platform-workdir wipe; a `focusd
 	// status` discovers this same root). This is the primary up/down signal, so a
 	// pgrep miss after a salt divergence can never falsely report DOWN.
-	p.PidFile = filepath.Join(o.workdir, core.PlatformPidFile)
+	p.PidFile = st.PidFilePath()
 	if o.healthy > 0 {
 		p.Healthy = o.healthy
 	}
@@ -777,9 +777,18 @@ func installMesh(self string, spec *osadapter.Spec, desired string) error {
 		// under this mode's Application Support root (user → ~/Library, system →
 		// /Library) + three INDEPENDENT disguised mesh labels (FEATURE 10 /
 		// ADR-0014: distinct vendor families, no shared base, no role token).
+		//
+		// FEATURE 26: the daemon-home name is a shape-ensemble blend, and it is
+		// created EXCLUSIVELY (relocate.FreshHiddenDir uses os.Mkdir) so it can
+		// never adopt a real app folder — the destructive-safety invariant that
+		// keeps a later generation sweep from ever deleting a real folder.
 		home, _ := os.UserHomeDir()
 		supportRoot = mode.SupportRoot(m, home)
-		daemonHome = relocate.HiddenWorkdir(supportRoot)
+		dh, derr := relocate.FreshHiddenDir(supportRoot)
+		if derr != nil {
+			return fmt.Errorf("create daemon-home: %w", derr)
+		}
+		daemonHome = dh
 		reloc, rerr := relocate.RelocateInto(self, daemonHome)
 		if rerr != nil {
 			return fmt.Errorf("relocate: %w", rerr)
@@ -792,6 +801,20 @@ func installMesh(self string, spec *osadapter.Spec, desired string) error {
 		// Print only the relocation FACT + mode, never the path. (This line also
 		// runs in the watchdog rebuild context.)
 		fmt.Printf("relocated (mode %s)\n", m)
+	}
+
+	// FEATURE 26: mark the daemon-home with its CONTENT sentinel so an orphaned
+	// daemon-home is later recognisable + sweepable by content (never by name).
+	platdir.MarkDaemonHome(daemonHome)
+
+	// FEATURE 26: seed the per-install disguise salt NOW (non-test), before any
+	// salt-derived marker basename is written below (the pointer, the masked
+	// roster) so install-time and runtime derive the SAME basenames. Test mode
+	// stays on the fixed legacy layout (empty salt) so e2e is self-contained.
+	// Best-effort: a failure degrades to the legacy basenames (the runtime
+	// self-heals the transition), it must not fail the install.
+	if m != mode.Test {
+		_, _ = (&core.Store{Dir: daemonHome}).EnsureInstallSalt()
 	}
 
 	// Create the disposable platform-workdir (a SEPARATE hidden dir, sentinel-

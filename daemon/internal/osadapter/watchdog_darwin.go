@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/eliteGoblin/focusd/daemon/internal/mode"
+	"github.com/eliteGoblin/focusd/daemon/internal/platdir"
 	"github.com/eliteGoblin/focusd/daemon/internal/relocate"
 )
 
@@ -62,9 +63,19 @@ type cronTab interface {
 
 // copyFS is the filesystem seam for the watchdog binary copy + its own
 // hidden dir (separate from the mesh workdir).
+//
+// FEATURE 26: place now owns EXCLUSIVE creation of the copy dir (so it can never
+// adopt a real app folder now that disguised names blend as ordinary apps) and
+// marks it with the watchdog-copy content sentinel; removeCopyDir gates its delete
+// on that positive match, so neither a name collision nor a tampered cron path can
+// wipe a real folder.
 type copyFS interface {
-	relocateInto(src, dir string) (string, error) // place a disguised copy, return its path
-	removeAll(dir string) error
+	// place puts a fresh disguised copy of src into a NEW exclusively-created,
+	// content-marked hidden dir under supportRoot; returns the copy path.
+	place(src, supportRoot string) (string, error)
+	// removeCopyDir removes dir ONLY if it is a watchdog-copy dir this package
+	// created (positive content sentinel). Best-effort.
+	removeCopyDir(dir string) error
 }
 
 // realCronTab shells out to `crontab`. An empty/no-crontab state surfaces as
@@ -107,14 +118,37 @@ func (realCronTab) replace(content string) error {
 	return nil
 }
 
-// realCopyFS uses relocate (hard-link/copy under a disguised name) + a plain
-// recursive remove of the copy dir.
+// realCopyFS EXCLUSIVELY creates a fresh disguised dir (never adopts a real app
+// folder), places the copy under a disguised name, and marks the dir with the
+// watchdog-copy content sentinel. removeCopyDir deletes a dir only after a
+// positive sentinel match.
 type realCopyFS struct{}
 
-func (realCopyFS) relocateInto(src, dir string) (string, error) {
-	return relocate.RelocateInto(src, dir)
+func (realCopyFS) place(src, supportRoot string) (string, error) {
+	dir, err := relocate.FreshHiddenDir(supportRoot) // os.Mkdir — never adopts
+	if err != nil {
+		return "", err
+	}
+	cp, err := relocate.RelocateInto(src, dir) // dir already exists (MkdirAll no-op)
+	if err != nil {
+		return "", err
+	}
+	platdir.MarkWatchdogCopy(dir) // so removeCopyDir can positively confirm ownership
+	return cp, nil
 }
-func (realCopyFS) removeAll(dir string) error { return os.RemoveAll(dir) }
+
+// removeCopyDir removes dir ONLY when it carries the watchdog-copy content
+// sentinel — a positive proof the dir is ours. A tampered cron path or a name
+// collision with a real app folder (which has no sentinel) is skipped, so the
+// teardown can never RemoveAll a real folder. A pre-FEATURE-26 copy dir (no
+// sentinel) is likewise skipped — it leaks as harmless disk residue rather than
+// risk a wrong delete.
+func (realCopyFS) removeCopyDir(dir string) error {
+	if !platdir.IsWatchdogCopy(dir) {
+		return nil
+	}
+	return os.RemoveAll(dir)
+}
 
 // EnsureWatchdog writes the root cron line iff absent. It read-modify-writes
 // the WHOLE crontab so a reinstall never duplicates the line. copyPath is the
@@ -203,7 +237,7 @@ func refreshWatchdog(
 	// Remove the old copy's parent dir (its OWN hidden dir) iff it differs
 	// from the freshly placed one — so self-updates don't leave orphan dirs.
 	if oldCopy != "" && filepath.Dir(oldCopy) != filepath.Dir(cp) {
-		_ = fs.removeAll(filepath.Dir(oldCopy))
+		_ = fs.removeCopyDir(filepath.Dir(oldCopy))
 	}
 	return nil
 }
@@ -228,7 +262,7 @@ func removeWatchdog(m mode.Mode, ct cronTab, fs copyFS) error {
 	}
 	if cp != "" {
 		// The copy lives in its own hidden dir; remove that whole dir.
-		_ = fs.removeAll(filepath.Dir(cp))
+		_ = fs.removeCopyDir(filepath.Dir(cp))
 	}
 	return nil
 }
@@ -258,13 +292,14 @@ func watchdogStatus(ct cronTab) (cronPresent, copyOK bool) {
 	return true, false
 }
 
-// placeWatchdogCopy puts a fresh disguised copy of src into a NEW hidden dir
-// under this mode's Application Support root — its OWN dir, NOT the mesh
-// workdir (so a workdir wipe does not remove it). Returns the copy path.
+// placeWatchdogCopy puts a fresh disguised copy of src into a NEW exclusively-
+// created, content-marked hidden dir under this mode's Application Support root —
+// its OWN dir, NOT the mesh workdir (so a workdir wipe does not remove it).
+// Returns the copy path. The exclusive create (in fs.place) is what stops a
+// blended disguise name from ever adopting a real app folder.
 func placeWatchdogCopy(m mode.Mode, src string, fs copyFS) (string, error) {
 	home, _ := os.UserHomeDir()
-	dir := relocate.HiddenWorkdir(mode.SupportRoot(m, home))
-	return fs.relocateInto(src, dir)
+	return fs.place(src, mode.SupportRoot(m, home))
 }
 
 // cronLine renders our cron entry for the given copy path + desired version.

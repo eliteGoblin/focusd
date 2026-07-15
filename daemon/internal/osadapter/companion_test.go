@@ -144,17 +144,17 @@ func TestCompanionNotDiscovered(t *testing.T) {
 }
 
 // TestCompanionFolderNotSwept (HARD INVARIANT #2): the companion folder is a
-// hidden-dot sibling under the support root with NO state.db, so
-// SweepOrphanWorkdirs (FEATURE 17 follow-up) never removes it while it sweeps a
+// sibling under the support root with NO daemon-home content sentinel, so
+// SweepOrphanWorkdirs (FEATURE 26 content gate) never removes it while it sweeps a
 // real orphan generation.
 func TestCompanionFolderNotSwept(t *testing.T) {
 	home, root := supportRootUnderHome(t)
 
-	keep := mkWorkdir(t, root, ".keep.gen", true)
-	orphan := mkWorkdir(t, root, ".orphan.gen", true)
+	keep := mkDaemonHome(t, root, "KeepVendorAgent", true)
+	orphan := mkDaemonHome(t, root, "OrphanVendorAgent", true)
 
 	// The real companion folder, scaffolded with backup/binary/heartbeat but NO
-	// state.db (the generation signature SweepOrphanWorkdirs keys on).
+	// daemon-home magic (the signature SweepOrphanWorkdirs keys on).
 	dir := companion.For(mode.User, home)
 	if err := os.MkdirAll(dir.Root(), 0o755); err != nil {
 		t.Fatal(err)
