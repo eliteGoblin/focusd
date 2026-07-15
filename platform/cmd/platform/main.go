@@ -109,10 +109,10 @@ func resolveWorkdir(flag string) string {
 func parseCommon(name string, honorConfigFlag bool, args []string) app.Options {
 	fs := flag.NewFlagSet(name, flag.ExitOnError)
 	cfg := fs.String("config", "", "config.yaml path (dev `validate` only; ignored on the run path)")
-	db := fs.String("state-db", "", "state.db path (default: <workdir>/state.db or OS layout)")
-	pdir := fs.String("plugin-dir", "", "plugin scan dir (default: <platform-binary-dir>/plugins or OS layout)")
+	db := fs.String("state-db", "", "state.db path (default: derived from the workdir)")
+	pdir := fs.String("plugin-dir", "", "plugin scan dir (default: <platform-binary-dir>/plugins)")
 	mode := fs.String("mode", "", "force run mode: user|system")
-	wd := fs.String("workdir", "", "daemon-managed workdir; derives state-db/plugin-dir (default: empty = use OS layout)")
+	wd := fs.String("workdir", "", "daemon-managed workdir; derives state-db/plugin-dir (release builds always self-derive it from the binary location, ignoring this flag)")
 	_ = fs.Parse(args)
 	// HF4 (FEATURE 24): resolve the workdir WITHOUT ever exposing it on argv or in
 	// the environment. In a RELEASE build workdirOverride() ignores both the

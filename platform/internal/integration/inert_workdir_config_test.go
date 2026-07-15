@@ -33,7 +33,22 @@ func TestRunPathIgnoresWorkdirConfig(t *testing.T) {
 	if len(defaultCfg.Jobs) < 2 {
 		t.Fatalf("embedded default needs >=2 jobs to exercise the regression; got %d", len(defaultCfg.Jobs))
 	}
-	toDisable := defaultCfg.Jobs[0] // the hostile override tries to disable this
+	// Target an actually baked-ENABLED default job. If we blindly took Jobs[0]
+	// and it ever became baked-disabled, the "hostile disable is ignored"
+	// assertion would pass vacuously (a disabled job staying disabled proves
+	// nothing). Pick the first enabled job and fail loudly if the signed
+	// default somehow ships none.
+	var toDisable config.Job // the hostile override tries to disable this
+	foundEnabled := false
+	for _, j := range defaultCfg.Jobs {
+		if j.Enabled {
+			toDisable, foundEnabled = j, true
+			break
+		}
+	}
+	if !foundEnabled {
+		t.Fatalf("embedded default has no enabled job to exercise the hostile-disable regression")
+	}
 
 	// Simulate the daemon's --workdir layout: a real config.yaml on disk at
 	// <workdir>/config.yaml — the exact path the OLD loader used to read.
