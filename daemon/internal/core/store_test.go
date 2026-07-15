@@ -142,6 +142,46 @@ func TestStoreWorkdirIntact(t *testing.T) {
 	}
 }
 
+// TestStoreWorkdirIntactHonorsPlatformDir is the v0.19.0 regression guard.
+// FEATURE 21 (HF1) split the daemon-home (Dir) from the disposable
+// platform-workdir (PlatformDir); the platform writes state.db under
+// PlatformDir, not Dir. WorkdirIntact MUST therefore key off the platform-workdir
+// — otherwise it stats a state.db under the daemon-home that never exists in a
+// split install, always reads "wiped", and the proactive workdir-wipe heal
+// restart-loops a HEALTHY platform (it never survives to be promoted to good:
+// the exact `platform process down / good=none` regression).
+func TestStoreWorkdirIntactHonorsPlatformDir(t *testing.T) {
+	daemonHome := t.TempDir()
+	platformWorkdir := t.TempDir()
+	s := &Store{Dir: daemonHome, PlatformDir: platformWorkdir}
+
+	// state.db present in the PLATFORM-workdir (where the platform actually
+	// writes it) → intact — even though the daemon-home has NO state.db.
+	if err := os.WriteFile(filepath.Join(platformWorkdir, PlatformStateDBName), []byte("db"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if !s.WorkdirIntact() {
+		t.Fatal("split install: state.db in the platform-workdir must read as intact")
+	}
+
+	// Guard against a regression to the daemon-home: a state.db that exists ONLY
+	// in the daemon-home (never in the platform-workdir) must NOT read as intact.
+	dhOnly := &Store{Dir: t.TempDir(), PlatformDir: t.TempDir()}
+	if err := os.WriteFile(filepath.Join(dhOnly.Dir, PlatformStateDBName), []byte("db"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if dhOnly.WorkdirIntact() {
+		t.Fatal("split install: state.db only in the daemon-home must NOT read as intact")
+	}
+
+	// A wiped platform-workdir (dir gone) reads as broken even though the
+	// daemon-home still exists (the daemon runs from it).
+	wiped := &Store{Dir: t.TempDir(), PlatformDir: filepath.Join(t.TempDir(), "gone")}
+	if wiped.WorkdirIntact() {
+		t.Fatal("split install: absent platform-workdir must not read as intact")
+	}
+}
+
 func TestAtomicWriteCreatesDirs(t *testing.T) {
 	p := filepath.Join(t.TempDir(), "a", "b", "f")
 	if err := atomicWrite(p, []byte("x")); err != nil {
