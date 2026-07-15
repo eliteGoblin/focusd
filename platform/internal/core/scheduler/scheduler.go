@@ -37,6 +37,15 @@ type Scheduler struct {
 	mu         sync.Mutex
 	triggered  map[string]int  // jobID -> trigger count (test/observability)
 	skipLogged map[string]bool // jobID -> Info-logged "first run_as skip"
+
+	// kickstart holds one fire-once trigger per registered job. Start runs
+	// each ONCE immediately (then the cron interval takes over) so every
+	// protection layer engages right after a (re)start instead of waiting a
+	// full interval — closing the cold-start blind window a long-interval job
+	// (e.g. network-block @every 30m) would otherwise leave. kickWG tracks
+	// those in-flight runs so Stop drains them alongside cron-dispatched ones.
+	kickstart []func()
+	kickWG    sync.WaitGroup
 }
 
 // New builds a scheduler. The runner and DB must be ready. mode is the
@@ -140,15 +149,17 @@ func (s *Scheduler) Register(jobs []config.Job, plugins map[string]plugin.Discov
 
 		job := j // capture
 		disc := p
-		_, err := s.cron.AddFunc(job.Schedule, func() {
-			s.trigger(job, disc)
-		})
+		fire := func() { s.trigger(job, disc) }
+		_, err := s.cron.AddFunc(job.Schedule, fire)
 		if err != nil {
 			reason := fmt.Sprintf("invalid schedule %q for job %q: %v", job.Schedule, job.ID, err)
 			s.event(state.SeverityError, "bad_schedule", reason, job.ID)
 			s.log.Error("bad schedule", "job", job.ID, "err", err)
 			continue
 		}
+		// Same closure Start fires once immediately (kickstart), so the job's
+		// first run is at t=0 rather than t=schedule.
+		s.kickstart = append(s.kickstart, fire)
 		registered++
 		s.log.Info("job registered", "job", job.ID, "plugin", job.Plugin, "schedule", job.Schedule)
 	}
@@ -303,11 +314,45 @@ func (s *Scheduler) event(sev, typ, msg, jobID string) {
 	_ = s.db.Events.Record(sev, typ, msg, string(details))
 }
 
-// Start begins the cron loop (non-blocking).
-func (s *Scheduler) Start() { s.cron.Start() }
+// Start begins the cron loop (non-blocking) and KICKSTARTS every registered
+// job once, immediately. robfig/cron's @every schedules the FIRST tick at
+// now+interval, so without a kickstart a job on a long interval leaves its
+// protection layer absent — and its status reading "never" — for up to that
+// interval after each platform (re)start. network-block (@every 30m) is the
+// acute case: a 30-minute cold-start window where the pf packet-filter layer
+// is down after every restart/deploy. Firing once here engages every layer
+// within seconds and lets status reflect reality promptly; the cron interval
+// then takes over for steady-state reconciliation.
+//
+// Each kickstart runs in its own goroutine (mirroring cron's per-entry
+// dispatch) so Start stays non-blocking. no-overlap job_locks make a kickstart
+// run and the first cron tick coexist safely (whichever loses the lock records
+// a benign skip). Stop drains these via kickWG.
+func (s *Scheduler) Start() {
+	s.cron.Start()
+	for _, fire := range s.kickstart {
+		s.kickWG.Add(1)
+		go func() {
+			defer s.kickWG.Done()
+			fire()
+		}()
+	}
+}
 
-// Stop halts scheduling and waits for in-flight jobs to finish.
-func (s *Scheduler) Stop() context.Context { return s.cron.Stop() }
+// Stop halts scheduling and waits for in-flight jobs to finish — both the
+// cron-dispatched runs (drained by cron.Stop's context) and any still-running
+// kickstart runs (drained via kickWG). The returned context is Done only once
+// BOTH have settled, so callers get one honest "fully drained" signal.
+func (s *Scheduler) Stop() context.Context {
+	cronCtx := s.cron.Stop()
+	ctx, cancel := context.WithCancel(context.Background())
+	go func() {
+		<-cronCtx.Done()
+		s.kickWG.Wait()
+		cancel()
+	}()
+	return ctx
+}
 
 // TriggerCount reports how many times a job has been triggered (test
 // and observability aid).
