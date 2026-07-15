@@ -66,8 +66,12 @@ func TestNetworkBlockShipsEnabled(t *testing.T) {
 		t.Error("network-block config.table missing/empty")
 	}
 	resolver, _ := j.Config["resolver"].(string)
-	if len(resolver) < 8 || resolver[:8] != "https://" {
-		t.Errorf("network-block config.resolver must be an https:// DoH URL, got %q", resolver)
+	// Require at least one character after the scheme: a bare "https://"
+	// (len 8) is a usable-looking but degenerate value that would leave
+	// net-block misconfigured. `<=` rejects it; the `||` short-circuits so
+	// resolver[:8] is never indexed on a short string.
+	if len(resolver) <= 8 || resolver[:8] != "https://" {
+		t.Errorf("network-block config.resolver must be an https:// DoH URL with a host, got %q", resolver)
 	}
 	domains, ok := j.Config["domains"].([]any)
 	if !ok || len(domains) == 0 {
