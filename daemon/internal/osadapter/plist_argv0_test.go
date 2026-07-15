@@ -1,3 +1,8 @@
+//go:build darwin
+
+// The plist Program/argv0 split and parsePlist read-back are launchd (darwin)
+// concerns — parsePlist lives in ctl_darwin.go — so this behaviour test is
+// darwin-only, matching the other *_darwin tests in this package.
 package osadapter
 
 import (
