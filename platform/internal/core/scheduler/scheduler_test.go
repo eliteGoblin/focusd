@@ -250,3 +250,46 @@ func TestStartStopLifecycle(t *testing.T) {
 		t.Error("Stop did not drain in time")
 	}
 }
+
+// TestStartKickstartsRegisteredJobsImmediately proves the cold-start fix:
+// a job on a long interval (whose first cron tick is an hour out) still runs
+// once promptly because Start kickstarts every registered job. Without the
+// kickstart this job would show status=none/never for an hour after start —
+// the exact network-block (@every 30m) blind window this closes.
+func TestStartKickstartsRegisteredJobsImmediately(t *testing.T) {
+	s, db := newSched(t)
+	p := testutil.ScriptPlugin(t, "ok", `echo '{"status":"ok"}'`)
+	s.Register([]config.Job{{ID: "j1", Plugin: "ok", Enabled: true,
+		Schedule: "@every 1h", Timeout: dur(5 * time.Second)}},
+		map[string]plugin.Discovered{"ok": p})
+
+	s.Start()
+	t.Cleanup(func() {
+		// Bounded so a regressed/hung Stop surfaces fast instead of deadlocking
+		// the package until the global test timeout.
+		select {
+		case <-s.Stop().Done():
+		case <-time.After(2 * time.Second):
+			t.Error("Stop did not drain in time")
+		}
+	})
+
+	// The kickstart fires in a goroutine; wait for the run to actually RECORD
+	// (TriggerCount increments before the run completes, so poll the DB row).
+	deadline := time.After(3 * time.Second)
+	for {
+		if _, err := db.Runs.LastByStatus("j1", state.RunStatusOK); err == nil {
+			break
+		}
+		select {
+		case <-deadline:
+			t.Fatalf("job not kickstarted within 3s (trigger count = %d)", s.TriggerCount("j1"))
+		case <-time.After(20 * time.Millisecond):
+		}
+	}
+	// Kickstart fires each job exactly once; the 1h cron tick is far away, so
+	// the count must stay at 1 (no accidental double-fire).
+	if got := s.TriggerCount("j1"); got != 1 {
+		t.Errorf("kickstart trigger count = %d, want exactly 1", got)
+	}
+}
