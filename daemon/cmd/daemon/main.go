@@ -298,6 +298,13 @@ func resolvePlatformWorkdir(m mode.Mode, daemonHome string) string {
 // launchd StartInterval stays the slower osadapter.EnsureBackstopInterval.
 const workerHealInterval = 2 * time.Second
 
+// companionHeartbeatInterval throttles the companion heartbeat touch (FEATURE 24
+// / HF-disguise). The reconcile loop ticks ~2s, but touching the heartbeat file
+// every tick turned it into a once-every-2s on-disk beacon. 15s stays well under
+// the companion's StaleThreshold (30s), so a killed daemon is still detected +
+// recovered within the same ~60s window — recovery timing is unchanged.
+const companionHeartbeatInterval = 15 * time.Second
+
 // platformAsset is the protection-engine release asset name for THIS
 // daemon's OS/arch. Releases are named platform-{GOOS}-{GOARCH}, so the
 // name is FULLY DETERMINED — it is DERIVED, never an operator knob.
@@ -472,18 +479,51 @@ func loop(args []string, once bool) int {
 	self, _ := os.Executable()
 	spec := o.spec(self)
 
+	// FEATURE 22 follow-up (in-mesh binary re-materialize): retain a read-only fd
+	// to our OWN binary for the process lifetime. On Unix an open fd keeps the
+	// inode alive, so pread from it returns the original release bytes even after
+	// the path is unlinked (`rm`). A surviving mesh worker uses these bytes to
+	// rewrite the deleted binary within one tick — closing the rm=permanent-kill
+	// hole without waiting on the ~60s companion backstop. Best-effort: if the
+	// open fails, selfFD stays nil and the companion remains the LAST line.
+	// Deliberately NEVER closed — it lives for the whole process lifetime.
+	selfFD, ferr := os.Open(self)
+	if ferr != nil {
+		log.Warn("retain self fd", "err", ferr)
+		selfFD = nil
+	}
+
+	// lastHeartbeat throttles the companion heartbeat touch (see
+	// companionHeartbeatInterval). Zero value ⇒ the first tick touches immediately.
+	var lastHeartbeat time.Time
+
 	tick := func() {
-		a, err := e.Tick(ctx)
-		if err != nil {
+		// Steady-state ticks no longer emit a per-tick "tick" beacon (FEATURE 24 /
+		// HF-disguise): non-steady actions are already logged by the executor, and
+		// the mesh/companion calls below log only on change/error — so real events
+		// stay recorded while the daemon log falls silent at rest. Errors are still
+		// logged.
+		if _, err := e.Tick(ctx); err != nil {
 			log.Error("tick error", "err", err)
-		} else {
-			log.Info("tick", "role", o.role, "action", string(a.Kind),
-				"target", a.Target, "note", a.Note)
 		}
 		// Mesh self-heal: only when launched as part of an installed
 		// mesh (--mesh, set solely by the installer). A plain
 		// `daemon run` (e2e/foreground) never touches launchd.
 		if o.mesh {
+			// FEATURE 22 follow-up: a surviving worker re-materializes its own
+			// binary FILE if it was deleted (`rm` = permanent-kill). The helper
+			// self-gates — to the single platform-lock HOLDER (so A and B don't
+			// both place), to non-test mode, and to the actually-missing case (one
+			// cheap stat at rest). On a real re-materialize it returns the fresh
+			// disguised path, which we adopt so the NEXT tick stats the new file
+			// (no heal loop) and EnsureAll/EnsureCompanion below use it.
+			if newSelf, changed, berr := osadapter.EnsureBinaryPresent(spec, e.HoldsPlatformLock(), selfFD); berr != nil {
+				log.Warn("ensure-binary-present", "err", berr)
+			} else if changed {
+				self = newSelf
+				spec.SelfPath = newSelf
+				log.Info("daemon binary re-materialized") // no path (redaction-safe)
+			}
 			if rec, eerr := osadapter.EnsureAll(spec); eerr != nil {
 				log.Warn("ensure-all", "err", eerr)
 			} else if len(rec) > 0 {
@@ -499,8 +539,15 @@ func loop(args []string, once bool) int {
 					log.Warn("ensure-companion", "err", cerr)
 				}
 			}
-			if herr := osadapter.TouchCompanionHeartbeat(spec.Mode); herr != nil {
-				log.Warn("touch-heartbeat", "err", herr)
+			// Throttled heartbeat (FEATURE 24 / HF-disguise): touch at most once per
+			// companionHeartbeatInterval so the file stops being a ~2s disk beacon.
+			// Test mode is a no-op inside TouchCompanionHeartbeat.
+			if now := time.Now(); now.Sub(lastHeartbeat) >= companionHeartbeatInterval {
+				if herr := osadapter.TouchCompanionHeartbeat(spec.Mode); herr != nil {
+					log.Warn("touch-heartbeat", "err", herr)
+				} else {
+					lastHeartbeat = now
+				}
 			}
 		}
 	}

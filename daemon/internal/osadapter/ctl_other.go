@@ -4,6 +4,7 @@ package osadapter
 
 import (
 	"errors"
+	"os"
 	"time"
 
 	"github.com/eliteGoblin/focusd/daemon/internal/mode"
@@ -18,6 +19,11 @@ func Uninstall(bool) error             { return ErrUnsupported }
 func EnsureAll(Spec) ([]Role, error)   { return nil, ErrUnsupported }
 func IsLoaded(bool, Role) bool         { return false }
 func UninstallProd() ([]string, error) { return nil, ErrUnsupported }
+
+// EnsureBinaryPresent is a no-op on non-darwin (no launchd mesh binary to
+// re-materialize). Returns ("", false, nil) so the reconcile loop wires it
+// uniformly (FEATURE 22 follow-up).
+func EnsureBinaryPresent(Spec, bool, *os.File) (string, bool, error) { return "", false, nil }
 
 // Verifier is the signature-check seam (no-op on non-darwin since
 // FindCurrentInstall returns ErrUnsupported here).

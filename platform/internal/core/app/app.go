@@ -58,6 +58,16 @@ type Options struct {
 	PluginDir string
 	// ForceMode pins the run mode. "" => config, then adapter detection.
 	ForceMode osadapter.RunMode
+	// NoLogFile suppresses the engine's own on-disk log file, leaving the
+	// logger stderr-only. The daemon-managed run path sets this (FEATURE 24 /
+	// HF-disguise): the daemon already tees the child's stdout+stderr into the
+	// disguised workdir's svc.log, so the engine's separate DefaultLogDir file
+	// (<supportRoot>/focusd/logs/svc.log) is redundant AND the only
+	// `focusd`-literal footprint a `find -iname '*focus*'` would surface. When
+	// NoLogFile is set, logDir is cleared before logging.New so no file under
+	// DefaultLogDir is ever opened. Zero value (dev/direct-run) keeps the
+	// on-disk log for ergonomics.
+	NoLogFile bool
 }
 
 // App holds the wired runtime dependencies.
@@ -104,21 +114,13 @@ func Bootstrap(opts Options) (*App, error) {
 	// (the result of defaultconfig.Load — the signed embedded default;
 	// the workdir config.yaml is inert). Fall back to a path-based load
 	// if no pre-loaded Config was provided.
-	var (
-		cfg     *config.Config
-		cfgPath string // for the bootstrapped log line only
-	)
+	var cfg *config.Config
 	if opts.Config != nil {
 		cfg = opts.Config
-		// Best-effort label for the log: the override path if one was
-		// passed (the loader may or may not have actually merged it),
-		// otherwise mark the source as the embedded default.
-		cfgPath = opts.ConfigPath
-		if cfgPath == "" {
-			cfgPath = "<embedded default>"
-		}
 	} else {
-		cfgPath = opts.ConfigPath
+		// Path-based load: the config path is used ONLY to open the file here
+		// (never logged — see the redacted "platform bootstrapped" line below).
+		cfgPath := opts.ConfigPath
 		if cfgPath == "" {
 			// Need a provisional mode just to find the default config
 			// path; detection is safe and side-effect free.
@@ -156,6 +158,12 @@ func Bootstrap(opts Options) (*App, error) {
 	if err != nil {
 		return nil, fmt.Errorf("resolve log dir: %w", err)
 	}
+	// Daemon-managed runs suppress the engine's own file (the daemon already
+	// captures the child's stdio into the workdir); "" degrades logging.New to
+	// stderr-only, leaving no `focusd`-literal DefaultLogDir footprint.
+	if opts.NoLogFile {
+		logDir = ""
+	}
 	log, logClose, err := logging.New(cfg.Platform.LogLevel, logDir)
 	if err != nil {
 		return nil, err
@@ -183,9 +191,12 @@ func Bootstrap(opts Options) (*App, error) {
 		snap = snapshot.NewStore(filepath.Dir(dbPath))
 	}
 
+	// Redaction (FEATURE 24 / HF-disguise): drop the config + state_db fields —
+	// state_db is the plaintext disguised workdir path, which must never reach
+	// the INFO log stream. Keep only the path-free os/arch/mode context.
 	log.Info("platform bootstrapped",
 		"os", adapter.CurrentOS(), "arch", adapter.CurrentArch(),
-		"mode", string(mode), "config", cfgPath, "state_db", dbPath)
+		"mode", string(mode))
 
 	pluginDir := opts.PluginDir
 	if pluginDir == "" {
@@ -265,7 +276,13 @@ func (a *App) DiscoverPlugins() ([]plugin.Discovered, error) {
 		}
 		switch {
 		case p.OK:
-			a.Log.Info("plugin discovered", "id", p.Manifest.ID, "dir", p.Dir)
+			// Redaction (FEATURE 24 / HF-disguise): the OK branch carries the
+			// plugin id (e.g. skill-protector) + its on-disk dir (the disguised
+			// workdir path). At Debug it never reaches the default-INFO prod log,
+			// so a filesystem grep of the engine log can't recover a plugin name
+			// or the workdir. The WARN/rejected branches stay redacted via
+			// redactPaths for the rare genuine-defect case.
+			a.Log.Debug("plugin discovered", "id", p.Manifest.ID, "dir", p.Dir)
 		case p.Expected:
 			// A normal environment mismatch (wrong host, or a plugin this
 			// install's mode can't serve). The bundle ships every plugin to
