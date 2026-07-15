@@ -50,13 +50,27 @@ func TestRandomBinaryNameShapeAndUnique(t *testing.T) {
 	}
 }
 
+// TestHiddenWorkdir pins the FEATURE 26 naming blend: the disguised directory is
+// under the support root, is NOT dotted (it must blend as an ordinary
+// app-support entry, not read as "someone is hiding something"), carries no
+// project string, and has a plausible non-empty basename.
 func TestHiddenWorkdir(t *testing.T) {
-	wd := HiddenWorkdir("/Users/x/Library/Application Support")
-	if !strings.HasPrefix(wd, "/Users/x/Library/Application Support/.") {
-		t.Fatalf("workdir not hidden under support root: %s", wd)
-	}
-	if strings.Contains(wd, "focusd") {
-		t.Fatalf("workdir must not contain 'focusd': %s", wd)
+	const root = "/Users/x/Library/Application Support"
+	for i := 0; i < 200; i++ {
+		wd := HiddenWorkdir(root)
+		if filepath.Dir(wd) != root {
+			t.Fatalf("workdir not directly under support root: %s", wd)
+		}
+		base := filepath.Base(wd)
+		if base == "" {
+			t.Fatalf("empty disguised basename: %s", wd)
+		}
+		if strings.HasPrefix(base, ".") {
+			t.Fatalf("FEATURE 26 drops the leading dot; got hidden-dot name: %s", base)
+		}
+		if strings.Contains(strings.ToLower(base), "focusd") {
+			t.Fatalf("workdir must not contain 'focusd': %s", wd)
+		}
 	}
 }
 

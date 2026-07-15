@@ -42,10 +42,12 @@ type Options struct {
 	// Adapter overrides the OS adapter (tests inject fakes). nil => real.
 	Adapter osadapter.Adapter
 	// Config, if non-nil, is the pre-loaded Config the caller wants
-	// Bootstrap to use directly. This is the path the platform CLI
-	// uses to inject the result of defaultconfig.LoadWithOverrides
-	// (embedded default + optional on-disk override merged). When set,
-	// ConfigPath is ignored for the config load step.
+	// Bootstrap to use directly. On the daemon-managed run path the
+	// platform CLI injects the signed embedded default here via
+	// defaultconfig.Load (the workdir config.yaml is inert). Dev
+	// inspection via `platform validate --config <path>` deliberately
+	// leaves this nil and sets ConfigPath instead (path-based load).
+	// When Config is set, ConfigPath is ignored for the config load step.
 	Config *config.Config
 	// ConfigPath overrides the config file path. "" => adapter default.
 	// Ignored when Config is non-nil.
@@ -99,9 +101,9 @@ func Bootstrap(opts Options) (*App, error) {
 	}
 
 	// Config resolution: prefer the pre-loaded one the CLI handed us
-	// (the result of defaultconfig.LoadWithOverrides — embedded
-	// defaults merged with optional override file). Fall back to a
-	// path-based load if no pre-loaded Config was provided.
+	// (the result of defaultconfig.Load — the signed embedded default;
+	// the workdir config.yaml is inert). Fall back to a path-based load
+	// if no pre-loaded Config was provided.
 	var (
 		cfg     *config.Config
 		cfgPath string // for the bootstrapped log line only

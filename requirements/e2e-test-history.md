@@ -22,11 +22,16 @@
 > convergence — PASS) + TC-22 (status never false-UNKNOWN — DB run-history
 > concurrency — PASS) + TC-24 (churn-window status-vs-disk skew — WATCH).
 > TC-23 confirmed open with decisive evidence (bug #83).
-> **FEATURE 20 (mac-browser-guard) ↔ TC-U1 — a UTILITY-tier case (ADR-0021),
-> kept OUTSIDE the platform mesh suite: it exercises a user-mode script on a
-> different execution path, not the signed daemon/platform mesh, so its run model
+> **FEATURE 20 (mac-browser-guard) ↔ TC-U1** and **FEATURE 27 ("browser-monitor
+> Both") ↔ TC-U2 — UTILITY-tier cases (ADR-0021, amended by ADR-0022),
+> kept OUTSIDE the platform mesh suite: they exercise user-mode helpers on a
+> different execution path, not the signed daemon/platform mesh, so their run model
 > is not the mesh "walk every TC each deploy" model — see the Utility-tier
-> section below.**
+> section below.** The **enforced** side of FEATURE 27 (the `browser-monitor`
+> plugin, now bundled + enabled by default) is verified **inside** the platform
+> mesh suite like any other plugin, not here. TC-U2 is currently **⬜ NOT YET
+> VERIFIED** (F27 built on branch `feat/browser-standalone`, live-verification
+> pending — no Run-Log row until a real live pass).
 >
 > **Redaction (non-negotiable).** Verify as a developer, but NEVER print the
 > disguised workdir, labels, rotated binary paths, or plugin paths. Report
@@ -404,10 +409,17 @@ mesh; macOS gives no API to re-enable), (d) **kill all processes**, plus their
 > **These do NOT belong to the platform mesh regression suite above.** The
 > mesh suite verifies the **enforced tier** (signed daemon/platform/plugins) and
 > is walked in full on every live deploy. The cases here verify the **utility /
-> fallback tier** (ADR-0021) — standalone user-mode helpers that run where the
-> enforced stack can't. Different code, different execution path, different (ad-hoc,
+> fallback tier** (ADR-0021, amended by **ADR-0022**) — user-mode helpers that run
+> where the enforced stack isn't present. Different code path, different (ad-hoc,
 > per-machine) run model. They are recorded here so the ownership invariant holds
 > (every shipped feature → a TC) **without** implying the mesh run model applies.
+> As of ADR-0022 the fallback tier has **two** positions: **TC-U1** the
+> mac-browser-guard **script** (for the locked-down/allowlisting Mac), and
+> **TC-U2** the **standalone browser self-daemon** (the `browser-monitor` binary
+> run standalone, for a personal Mac with no enforced platform). Both share the
+> **same blocklist** as the enforced plugin (single source of truth — no drift).
+> The enforced `browser-monitor` plugin itself is verified in the mesh suite, not
+> here.
 
 ### TC-U1 🟡 (utility tier) mac-browser-guard quits a browser on a blocklisted tab — *FEATURE 20 / ADR-0021*  `[added 2026-07-02]`
 - **Tier:** utility / fallback (user-mode script), NOT the enforced mesh — see ADR-0021.
@@ -425,6 +437,29 @@ mesh; macOS gives no API to re-enable), (d) **kill all processes**, plus their
   host. **Status: ✅ PASS (live-verified 2026-07-01, real Mac).**
 - **Honest limit (ADR-0021):** browser-only, user-mode, removable — thin friction,
   no signing/tamper-resistance/commitment-gate. Not a mesh guarantee.
+
+### TC-U2 ⬜ (utility tier) standalone browser self-daemon installs, self-heals, and quits a blocklisted tab — *FEATURE 27 / ADR-0022*  `[added 2026-07-15]`
+- **Tier:** utility / fallback (the `browser-monitor` binary run **standalone** as a
+  user-mode self-daemon), NOT the enforced mesh — see ADR-0022. *(The enforced
+  `browser-monitor` plugin is verified in the mesh suite, not here.)*
+- **Criterion:** run standalone, the browser-monitor binary **installs itself** as a
+  user-mode background helper, **quits any browser on a blocklisted tab** (including
+  non-active tabs), **self-heals against casual deletion** of its installed pieces,
+  and a clean uninstall removes it — entirely user-mode (no sudo/admin). It uses the
+  **same blocklist** as the enforced plugin and the script (single source of truth —
+  no drift).
+- **Repro:** on a Mac with **no enforced platform**, launch the browser-monitor
+  binary in its standalone self-install mode; open a blocklisted site → the browser
+  quits; delete an installed piece → it restores on the next tick; run the uninstall
+  → it's gone. If an enforced platform *is* present, confirm coexistence is harmless
+  (a redundant double-quit, no fighting; install advises rather than probes).
+- **Expect:** installs, quits on a blocklisted host, restores after casual deletion,
+  uninstalls cleanly; coexists idempotently with an enforced platform.
+- **Status: ⬜ NOT YET VERIFIED — built (FEATURE 27, branch `feat/browser-standalone`),
+  live-verification pending.** (No Run-Log row until a real live pass.)
+- **Honest limit (ADR-0022):** thin friction, not durability — user-mode, unsigned,
+  removable, casual-deletion self-heal only; a binary raises the casual-removal bar
+  slightly over the script but is **not** enforced. Not a mesh guarantee.
 
 ---
 

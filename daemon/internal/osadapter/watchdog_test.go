@@ -30,24 +30,26 @@ func (c *fakeCron) replace(s string) error {
 	return nil
 }
 
-// fakeCopyFS is an in-memory copyFS: it records placements and hands back a
-// deterministic disguised path under the requested dir so tests can assert the
-// resulting cron line without a real filesystem.
+// fakeCopyFS is an in-memory copyFS: it records placements and removals and hands
+// back a deterministic disguised path under the requested support root so tests
+// can assert the resulting cron line without a real filesystem. removeCopyDir is
+// unconditional here (the real content-sentinel gate lives in realCopyFS); tests
+// assert the LOGIC decides which dir to remove.
 type fakeCopyFS struct {
-	placed   []string // dirs a copy was placed into
+	placed   []string // support roots a copy was placed under
 	removed  []string // dirs removed
-	nextName string   // basename returned by relocateInto
+	nextName string   // basename returned by place
 }
 
-func (f *fakeCopyFS) relocateInto(_, dir string) (string, error) {
-	f.placed = append(f.placed, dir)
+func (f *fakeCopyFS) place(_, supportRoot string) (string, error) {
+	f.placed = append(f.placed, supportRoot)
 	name := f.nextName
 	if name == "" {
 		name = "com.apple.metadata.helper.deadbeef"
 	}
-	return dir + "/" + name, nil
+	return supportRoot + "/" + name, nil
 }
-func (f *fakeCopyFS) removeAll(dir string) error {
+func (f *fakeCopyFS) removeCopyDir(dir string) error {
 	f.removed = append(f.removed, dir)
 	return nil
 }

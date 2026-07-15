@@ -89,6 +89,28 @@ func PlatformArgv0(salt string) string {
 	return pickDet(procTokens, salt+"|platform-argv0")
 }
 
+// DaemonArgv0 is the deterministic disguised argv[0] token for a daemon MESH
+// worker plist (FEATURE 26, layer a). The launchd plist splits Program (the real
+// binary path launchd execs) from ProgramArguments[0] (the argv[0] the process
+// shows), so `ps aux` over the live mesh shows this generic helper token instead
+// of the real disguised binary path.
+//
+// Derived DETERMINISTICALLY from the per-role seed (the role's independent mesh
+// label) rather than the salt: the daemon argv[0] is DISPLAY-ONLY (nothing reads
+// it back — the mesh recovers its role from env and its binary from
+// os.Executable), and it must be present from the FIRST install, before the salt
+// exists. Seeding from the per-role label yields a DISTINCT token per role (so
+// the three mesh procs never read as a matching set) and a STABLE token across
+// every plist-generation path (install, ensure-rebuild, watchdog, self-update),
+// so a recovery can never regress to a leaky argv. Empty seed ⇒ "" (caller keeps
+// the legacy visible argv — dev fallback with no roster).
+func DaemonArgv0(seed string) string {
+	if seed == "" {
+		return ""
+	}
+	return pickDet(procTokens, seed+"|daemon-argv0")
+}
+
 // PlatformBinBase is the deterministic disguised basename for the platform binary
 // of version v: "<token>.<hex>" derived from salt+version. No 'platform' literal,
 // no version string. Empty salt ⇒ "" (caller falls back to the legacy layout).

@@ -1,18 +1,16 @@
 package defaultconfig
 
 import (
-	"os"
-	"path/filepath"
-	"strings"
+	"reflect"
 	"testing"
 
 	"github.com/eliteGoblin/focusd/platform/internal/core/config"
-	"github.com/eliteGoblin/focusd/platform/internal/osadapter"
 )
 
-// The embedded default must always parse — no override required.
-func TestLoadDefaultOnlyParses(t *testing.T) {
-	cfg, _, err := LoadWithOverrides("")
+// The embedded default must always parse — it is the sole policy source on
+// the daemon-managed run path.
+func TestLoadParsesEmbeddedDefault(t *testing.T) {
+	cfg, err := Load()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -21,233 +19,76 @@ func TestLoadDefaultOnlyParses(t *testing.T) {
 	}
 }
 
-// A missing override file is silently ignored (no error) — useful for
-// fresh installs that have never written one.
-func TestLoadMissingOverrideIsDefaultOnly(t *testing.T) {
-	cfg, _, err := LoadWithOverrides(filepath.Join(t.TempDir(), "does-not-exist.yaml"))
+// Load is path-free by design: there is no override to merge, so two calls
+// return the identical enforced policy regardless of anything on disk.
+func TestLoadIsDeterministicAndOverrideFree(t *testing.T) {
+	a, err := Load()
 	if err != nil {
 		t.Fatal(err)
 	}
-	defaultCfg, _, _ := LoadWithOverrides("")
-	if len(cfg.Jobs) != len(defaultCfg.Jobs) {
-		t.Fatalf("missing override should equal default-only; got %d vs %d",
-			len(cfg.Jobs), len(defaultCfg.Jobs))
+	b, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Compare the WHOLE config, not just the job count: two loads must be the
+	// identical enforced policy — same platform fields, same jobs in the same
+	// order with the same fields, same services — so non-determinism in job
+	// ordering/fields, services, or platform fields (e.g. map iteration order
+	// or mutation of a shared map) can't slip through a count-only check.
+	if !reflect.DeepEqual(a, b) {
+		t.Fatalf("Load must return an identical policy on every call;\n a=%+v\n b=%+v", a, b)
 	}
 }
 
-// FIX 2 (tighten-only, integration): an override that tries to DISABLE a
-// baked-enabled protection is REFUSED — the job stays enabled and a warning is
-// surfaced — while its non-disable fields (schedule) still merge and other
-// defaults are preserved (replace, not append). This is the "no inside door
-// handle": a root user who finds the workdir cannot switch a default
-// protection off via unsigned config.yaml.
-func TestOverrideCannotDisableBakedEnabledJob(t *testing.T) {
-	defaultCfg, _, _ := LoadWithOverrides("")
-	target := defaultCfg.Jobs[0] // dns-block-reconcile — baked enabled:true
-	if !target.Enabled {
-		t.Fatalf("test precondition: %q must be baked enabled", target.ID)
-	}
-
-	p := filepath.Join(t.TempDir(), "override.yaml")
-	override := `platform:
-  log_level: debug
-jobs:
-  - id: ` + target.ID + `
-    plugin: ` + target.Plugin + `
-    enabled: false
-    schedule: "@every 1h"
-    timeout: 1s
-    retry: 0
-    allow_overlap: false
-    config: {}
-`
-	if err := os.WriteFile(p, []byte(override), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	cfg, warnings, err := LoadWithOverrides(p)
+// Requirement (c): network-block ships ENABLED in the embedded default,
+// with the anchor/table/resolver/domains the plugin needs. It used to be
+// enabled only via the now-removed workdir override, so if it regressed to
+// disabled here net-block would silently stop being enforced.
+func TestNetworkBlockShipsEnabled(t *testing.T) {
+	cfg, err := Load()
 	if err != nil {
 		t.Fatal(err)
 	}
-	if cfg.Platform.LogLevel != "debug" {
-		t.Fatalf("Platform.LogLevel not overridden: %q", cfg.Platform.LogLevel)
+	j := findJob(cfg.Jobs, "network-block-reconcile")
+	if j == nil {
+		t.Fatal("network-block-reconcile job missing from embedded default")
 	}
-	if len(cfg.Jobs) != len(defaultCfg.Jobs) {
-		t.Fatalf("job count must be unchanged (replace, not append): %d vs %d",
-			len(cfg.Jobs), len(defaultCfg.Jobs))
+	if !j.Enabled {
+		t.Fatal("network-block-reconcile must be enabled in the embedded default")
 	}
-	var got *config.Job
-	for i := range cfg.Jobs {
-		if cfg.Jobs[i].ID == target.ID {
-			got = &cfg.Jobs[i]
-		}
+	// The plugin (plugins/network-block/cmd/main.go loadConfig) requires all
+	// four keys; assert they are present and well-formed so a config edit
+	// can't ship net-block "enabled" but inert.
+	if s, _ := j.Config["anchor"].(string); s == "" {
+		t.Error("network-block config.anchor missing/empty")
 	}
-	if got == nil {
-		t.Fatalf("overridden job %q vanished", target.ID)
+	if s, _ := j.Config["table"].(string); s == "" {
+		t.Error("network-block config.table missing/empty")
 	}
-	// The disable is REFUSED — the protection remains enabled...
-	if !got.Enabled {
-		t.Fatalf("override must NOT be able to disable baked-enabled %q (inside door handle)", target.ID)
+	resolver, _ := j.Config["resolver"].(string)
+	// Require at least one character after the scheme: a bare "https://"
+	// (len 8) is a usable-looking but degenerate value that would leave
+	// net-block misconfigured. `<=` rejects it; the `||` short-circuits so
+	// resolver[:8] is never indexed on a short string.
+	if len(resolver) <= 8 || resolver[:8] != "https://" {
+		t.Errorf("network-block config.resolver must be an https:// DoH URL with a host, got %q", resolver)
 	}
-	// ...and the refusal is surfaced as a warning.
-	if !hasWarning(warnings, "refused (tighten-only)") {
-		t.Fatalf("a refused disable must warn, got warnings=%v", warnings)
+	domains, ok := j.Config["domains"].([]any)
+	if !ok || len(domains) == 0 {
+		t.Fatal("network-block config.domains missing/empty")
 	}
-	// Non-disable fields still merge (customisation of an enabled job is allowed).
-	if got.Schedule != "@every 1h" {
-		t.Fatalf("non-disable override fields must still apply, schedule=%q", got.Schedule)
-	}
-}
-
-// FIX 2: TIGHTENING is allowed — an override may ENABLE a baked-disabled job.
-// Tighten-only refuses loosening (disable), not strengthening.
-func TestOverrideCanEnableBakedDisabledJob(t *testing.T) {
-	defaultCfg, _, _ := LoadWithOverrides("")
-	var disabled *config.Job
-	for i := range defaultCfg.Jobs {
-		if !defaultCfg.Jobs[i].Enabled {
-			disabled = &defaultCfg.Jobs[i]
-			break
-		}
-	}
-	if disabled == nil {
-		t.Skip("no baked-disabled job to enable")
-	}
-
-	p := filepath.Join(t.TempDir(), "override.yaml")
-	override := `jobs:
-  - id: ` + disabled.ID + `
-    plugin: ` + disabled.Plugin + `
-    enabled: true
-    schedule: "` + disabled.Schedule + `"
-    timeout: 10s
-    retry: 0
-    allow_overlap: false
-    config: {}
-`
-	if err := os.WriteFile(p, []byte(override), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	cfg, _, err := LoadWithOverrides(p)
-	if err != nil {
-		t.Fatal(err)
-	}
-	for i := range cfg.Jobs {
-		if cfg.Jobs[i].ID == disabled.ID && !cfg.Jobs[i].Enabled {
-			t.Fatalf("override must be able to ENABLE baked-disabled %q (tightening)", disabled.ID)
+	for i, d := range domains {
+		if s, ok := d.(string); !ok || s == "" {
+			t.Errorf("network-block config.domains[%d] must be a non-empty string", i)
 		}
 	}
 }
 
-func hasWarning(warnings []string, substr string) bool {
-	for _, w := range warnings {
-		if strings.Contains(w, substr) {
-			return true
+func findJob(jobs []config.Job, id string) *config.Job {
+	for i := range jobs {
+		if jobs[i].ID == id {
+			return &jobs[i]
 		}
 	}
-	return false
-}
-
-// New IDs in the override are appended (lets a user add custom jobs
-// alongside the bundled defaults).
-func TestOverrideNewIDIsAppended(t *testing.T) {
-	defaultCfg, _, _ := LoadWithOverrides("")
-	p := filepath.Join(t.TempDir(), "override.yaml")
-	override := `jobs:
-  - id: my-custom-job
-    plugin: kill-steam
-    enabled: false
-    schedule: "@every 30m"
-    timeout: 5s
-    retry: 0
-    allow_overlap: false
-    config: {}
-`
-	if err := os.WriteFile(p, []byte(override), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	cfg, _, err := LoadWithOverrides(p)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(cfg.Jobs) != len(defaultCfg.Jobs)+1 {
-		t.Fatalf("new id must be appended; got %d vs %d+1",
-			len(cfg.Jobs), len(defaultCfg.Jobs))
-	}
-	if cfg.Jobs[len(cfg.Jobs)-1].ID != "my-custom-job" {
-		t.Fatalf("appended job should be the new one, got %q",
-			cfg.Jobs[len(cfg.Jobs)-1].ID)
-	}
-}
-
-// A malformed override is rejected loudly — no silent fallthrough to
-// defaults that could mask configuration mistakes.
-func TestOverrideMalformedIsError(t *testing.T) {
-	p := filepath.Join(t.TempDir(), "override.yaml")
-	os.WriteFile(p, []byte("this is not: valid: yaml: at: all:\n  - {"), 0o644)
-	if _, _, err := LoadWithOverrides(p); err == nil {
-		t.Fatal("malformed override must surface as an error")
-	}
-}
-
-// FIX 2 (unit, Merge directly): the required test that Merge REFUSES disabling
-// a baked-enabled job. A same-ID override with enabled:false leaves the job
-// enabled and warns; an override that enables a baked-disabled job is applied.
-func TestMergeIsTightenOnlyForEnabled(t *testing.T) {
-	base := &config.Config{Jobs: []config.Job{
-		{ID: "guard", Plugin: "kill-steam", Enabled: true, Schedule: "@every 10s"},
-		{ID: "idle", Plugin: "network-block", Enabled: false, Schedule: "@every 10s"},
-	}}
-	over := &config.Config{Jobs: []config.Job{
-		{ID: "guard", Plugin: "kill-steam", Enabled: false, Schedule: "@every 10s"},  // try to DISABLE
-		{ID: "idle", Plugin: "network-block", Enabled: true, Schedule: "@every 10s"}, // ENABLE (tighten)
-	}}
-
-	merged, warnings := Merge(base, over)
-	byID := map[string]config.Job{}
-	for _, j := range merged.Jobs {
-		byID[j.ID] = j
-	}
-	if !byID["guard"].Enabled {
-		t.Fatal("Merge must refuse disabling baked-enabled job 'guard' (inside door handle)")
-	}
-	if !byID["idle"].Enabled {
-		t.Fatal("Merge must allow enabling baked-disabled job 'idle' (tightening)")
-	}
-	if !hasWarning(warnings, "refused (tighten-only)") {
-		t.Fatalf("a refused disable must warn, got %v", warnings)
-	}
-}
-
-// FIX 2 (run_mode tighten-only): an unsigned override cannot force run_mode.
-// A `user` override on a root-launched platform would make every run_as:system
-// protection report unavailable and silently unschedule — a total disable via
-// one field. The override is refused (baked/auto-detect value kept) and warned.
-func TestMergeRefusesRunModeOverride(t *testing.T) {
-	base := &config.Config{} // baked run_mode empty ⇒ OS auto-detect
-	over := &config.Config{Platform: config.Platform{RunMode: osadapter.ModeUser}}
-
-	merged, warnings := Merge(base, over)
-	if merged.Platform.RunMode != "" {
-		t.Fatalf("override run_mode must be refused (kept baked/auto-detect), got %q", merged.Platform.RunMode)
-	}
-	if !hasWarning(warnings, "run_mode") {
-		t.Fatalf("a refused run_mode override must warn, got %v", warnings)
-	}
-}
-
-// A service disable is refused symmetrically (mergeServices tighten-only).
-func TestMergeServicesTightenOnly(t *testing.T) {
-	base := &config.Config{Services: []config.Service{
-		{ID: "svc", Plugin: "guard", Enabled: true},
-	}}
-	over := &config.Config{Services: []config.Service{
-		{ID: "svc", Plugin: "guard", Enabled: false},
-	}}
-	merged, warnings := Merge(base, over)
-	if !merged.Services[0].Enabled {
-		t.Fatal("Merge must refuse disabling a baked-enabled service")
-	}
-	if !hasWarning(warnings, "refused (tighten-only)") {
-		t.Fatalf("refused service disable must warn, got %v", warnings)
-	}
+	return nil
 }

@@ -1,18 +1,22 @@
-// Command browser-monitor is a focusd job plugin that protects against
-// browser distractions on macOS. It is a single self-contained binary:
-// the AppleScript automation is embedded via go:embed (no external .sh
-// or .applescript files are shipped or required at runtime).
+// Command browser-monitor is a focusd browser-distraction guard for macOS.
+// It is a single self-contained binary with TWO entry tiers, selected by argv
+// alone (never by probing launchd/the filesystem):
 //
-// Contract (platform plugin protocol):
+//	PLUGIN MODE (platform-supervised — UNCHANGED, never self-installs/heals):
+//	  browser-monitor run --config <path>   scan once; kill browsers on a blocklisted tab
+//	    stdout = JSON result · stderr = diagnostics
+//	    exit 0 = ok · 1 = controlled failure (a kill failed) · 2+ = runtime error
 //
-//	browser-monitor run --config <path-to-job-config.json>
+//	STANDALONE SELF-DAEMON (best-effort, user-mode; no platform required —
+//	FEATURE 27; see internal/selfdaemon):
+//	  browser-monitor daemon-install        install self-healing LaunchAgent + cron
+//	  browser-monitor self-tick             heal-then-scan (invoked by the schedule)
+//	  browser-monitor daemon-uninstall      remove the self-daemon
 //
-//	stdout = JSON result · stderr = diagnostics
-//	exit 0 = ok · 1 = controlled failure (a kill failed) · 2+ = runtime error
-//
-// macOS note: the binary invokes /usr/bin/osascript, so macOS may
-// require Automation (and sometimes Accessibility) permission to be
-// granted to the process that launches this plugin. See README.
+// The AppleScript automation is embedded via go:embed (no external files at
+// runtime). macOS note: the binary invokes /usr/bin/osascript, so macOS may
+// require Automation (and sometimes Accessibility) permission to be granted to
+// the process that launches this plugin. See README.
 package main
 
 import (
@@ -24,9 +28,27 @@ import (
 	"os"
 
 	"github.com/eliteGoblin/focusd/plugins/browser-monitor/internal/guard"
+	"github.com/eliteGoblin/focusd/plugins/browser-monitor/internal/selfdaemon"
 )
 
 var version = "dev"
+
+const usage = `browser-monitor — macOS browser-distraction guard
+
+plugin mode (platform-supervised):
+  browser-monitor run --config <path>   scan once; kill browsers on a blocklisted tab
+
+standalone self-daemon (best-effort, user-mode; no platform required):
+  browser-monitor daemon-install        install self-healing LaunchAgent + cron fallback
+  browser-monitor self-tick             heal-then-scan (invoked by the schedule)
+  browser-monitor daemon-uninstall      remove the self-daemon
+
+  browser-monitor version`
+
+// agentFactory builds the standalone self-daemon Agent. A var so tests can
+// route the daemon-* subcommands to a temp-dir agent instead of the real
+// launchd/cron.
+var agentFactory = selfdaemon.DefaultAgent
 
 // jobInput mirrors the platform's plugin.JobInput. Duplicated so the
 // plugin stays an independently released binary (no platform import).
@@ -44,16 +66,34 @@ type result struct {
 
 func main() { os.Exit(run(os.Args[1:])) }
 
+// run dispatches on argv only — mode is never inferred from launchd or the
+// filesystem. The `run` (plugin) path is unchanged from the original binary.
 func run(args []string) int {
-	if len(args) >= 1 && (args[0] == "version" || args[0] == "--version") {
-		fmt.Println("browser-monitor", version)
-		return 0
-	}
-	if len(args) < 1 || args[0] != "run" {
-		fmt.Fprintln(os.Stderr, "usage: browser-monitor run --config <path>")
+	if len(args) == 0 {
+		fmt.Fprintln(os.Stderr, usage)
 		return 2
 	}
+	switch args[0] {
+	case "version", "--version":
+		fmt.Println("browser-monitor", version)
+		return 0
+	case "run":
+		return runPlugin(args)
+	case "daemon-install":
+		return daemonInstall()
+	case "self-tick":
+		return selfTick()
+	case "daemon-uninstall":
+		return daemonUninstall()
+	default:
+		fmt.Fprintln(os.Stderr, usage)
+		return 2
+	}
+}
 
+// runPlugin is the platform-supervised plugin mode: parse the job config, run a
+// single guard pass, emit the JSON result. It NEVER installs or heals anything.
+func runPlugin(args []string) int {
 	fs := flag.NewFlagSet("run", flag.ContinueOnError)
 	cfgPath := fs.String("config", "", "path to resolved job config JSON")
 	if err := fs.Parse(args[1:]); err != nil {
@@ -75,6 +115,54 @@ func run(args []string) int {
 
 	g := guard.New(blocklist, guard.RealListTabs, guard.RealKill)
 	return report(g)
+}
+
+// daemonInstall deploys the standalone self-daemon.
+//
+// Coexistence (FEATURE 27): we deliberately do NOT probe launchd or the
+// disguised platform paths to "detect" the enforced platform — that would mean
+// enumerating exactly the identifiers the design keeps hidden. If the enforced
+// platform already runs browser-monitor here, this standalone daemon is simply
+// redundant and a double browser-quit is harmless (idempotent). So we advise,
+// and proceed best-effort.
+func daemonInstall() int {
+	fmt.Fprintln(os.Stderr, "note: if the focusd enforced platform is already active on this machine,")
+	fmt.Fprintln(os.Stderr, "      it already runs browser-monitor; this standalone daemon is then redundant")
+	fmt.Fprintln(os.Stderr, "      (harmless). It is intended for machines WITHOUT the enforced platform.")
+	a, err := agentFactory()
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "install failed:", err)
+		return 2
+	}
+	if err := a.Install(); err != nil {
+		fmt.Fprintln(os.Stderr, "install failed:", err)
+		return 2
+	}
+	fmt.Println("browser-monitor standalone self-daemon installed (LaunchAgent + cron fallback + hidden self-copies).")
+	return 0
+}
+
+func selfTick() int {
+	a, err := agentFactory()
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "self-tick:", err)
+		return 2
+	}
+	return a.Tick()
+}
+
+func daemonUninstall() int {
+	a, err := agentFactory()
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "uninstall failed:", err)
+		return 2
+	}
+	if err := a.Uninstall(); err != nil {
+		fmt.Fprintln(os.Stderr, "uninstall failed:", err)
+		return 2
+	}
+	fmt.Println("browser-monitor standalone self-daemon removed.")
+	return 0
 }
 
 // report runs a scan and maps the outcome to the plugin contract:

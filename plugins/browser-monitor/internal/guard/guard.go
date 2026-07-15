@@ -13,8 +13,12 @@ import (
 	"strings"
 )
 
-// DefaultBlocklist mirrors app_mon/browser_guard's BLOCKLIST. Hosts are
-// matched exactly or as a parent domain (see IsBlocked).
+// DefaultBlocklist is the SINGLE SOURCE OF TRUTH for the browser-guard
+// blocklist. Hosts are matched exactly or as a parent domain (see IsBlocked).
+// The mac-browser-guard Python util's BLOCKLIST is GENERATED from this list, so
+// the two never drift — after editing, regenerate it:
+//
+//go:generate go run github.com/eliteGoblin/focusd/plugins/browser-monitor/internal/blocklistsync/gen
 var DefaultBlocklist = []string{
 	// Search
 	"google.com",
