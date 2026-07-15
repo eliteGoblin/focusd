@@ -43,12 +43,17 @@ func TestReportControlledFailure(t *testing.T) {
 	}
 }
 
-func TestReportRuntimeError(t *testing.T) {
+// A scan error means browser tabs can't be inspected in this context (no
+// aqua/GUI session or Automation permission — exactly the launchd-supervised
+// reconcile case). That is a healthy no-op skip (exit 0), NOT a hard runtime
+// error (exit 2) that would pin the job DEGRADED on every tick. Real
+// enforcement runs from the standalone self-daemon in the user session.
+func TestReportScanErrorSkips(t *testing.T) {
 	g := guard.New(nil,
 		func() ([]guard.Tab, error) { return nil, errors.New("osascript denied") },
 		func(string) error { return nil })
-	if code := report(g); code != 2 {
-		t.Errorf("scan error => exit %d, want 2", code)
+	if code := report(g); code != 0 {
+		t.Errorf("scan error => exit %d, want 0 (graceful skip)", code)
 	}
 }
 
