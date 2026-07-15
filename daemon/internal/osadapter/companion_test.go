@@ -444,9 +444,12 @@ func inodeOf(t *testing.T, path string) uint64 {
 }
 
 // TestEnsureCompanionRefreshesBackupOnChange: the offline daemon backup must
-// track the CURRENT running signed daemon — refreshed when it DIFFERS, not only
-// when missing (the frozen-backup bug that restored a 16-day-old daemon). An
-// unreadable daemonSelf must LEAVE a good backup intact rather than clobber it.
+// track the CURRENT running signed daemon — refreshed when it changes, not only
+// when missing (the frozen-backup bug that restored a 16-day-old daemon). The
+// EnsureCompanion backstop is size-gated (a rebuilt daemon changes size;
+// RefreshCompanionBackup is the byte-exact authority on self-update), so this
+// exercises size-different upgrades. An unreadable daemonSelf must LEAVE a good
+// backup intact rather than clobber it.
 func TestEnsureCompanionRefreshesBackupOnChange(t *testing.T) {
 	if companionReady() {
 		t.Skip("a real companion binary is embedded; the scaffold-only backup path is N/A")

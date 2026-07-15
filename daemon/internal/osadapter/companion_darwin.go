@@ -64,12 +64,15 @@ func companionDir(m mode.Mode) companion.Dir {
 // backup. Safe to call on every reconcile tick. Skipped entirely in Test mode
 // (e2e never stands up the out-of-band rail).
 //
-// Both the backup and the companion binary are refreshed WHEN THEY DIFFER, not
+// Both the backup and the companion binary are refreshed when they CHANGE, not
 // only when absent. The prior write-only-if-missing checks meant that once a
 // binary/backup existed from an earlier install it was FROZEN forever: an upgrade
 // never landed the new embedded companion bytes (so a fix like #101's no-$HOME
 // crash never reached the disk copy that actually runs) and the offline backup
-// kept restoring a stale daemon. Content-aware refresh closes both.
+// kept restoring a stale daemon. The companion binary is refreshed byte-exact
+// (its refresh IS the fix, so nothing coarser may miss a change); the backup is
+// size-gated here (a cheap backstop — RefreshCompanionBackup is the byte-exact
+// authority on the real self-update rotation).
 func EnsureCompanion(m mode.Mode, daemonSelf, desired string) error {
 	if m == mode.Test {
 		return nil
@@ -82,14 +85,21 @@ func EnsureCompanion(m mode.Mode, daemonSelf, desired string) error {
 		return err
 	}
 	// Backup: keep the offline signed-daemon copy in sync with the CURRENT running
-	// signed daemon (daemonSelf) — refresh when ABSENT or when it DIFFERS, not only
-	// when missing. daemonSelf is a signed daemon binary (running mesh member /
-	// installer self), so a byte-for-byte copy stays a valid sig.VerifyFile target;
-	// an unreadable/empty daemonSelf leaves a good backup intact rather than
-	// clobbering it. RefreshCompanionBackup handles the same on the self-update path.
-	if data, rerr := os.ReadFile(daemonSelf); rerr == nil && len(data) > 0 {
-		if fileContentDiffers(dir.Backup(), data) {
-			_ = companionWriteFile(dir.Backup(), data, 0o755)
+	// signed daemon (daemonSelf) — refresh when ABSENT or when its SIZE differs, not
+	// only when missing. This is the BACKSTOP for a daemon-binary swap that did not
+	// route through self-update; the byte-exact authority is RefreshCompanionBackup
+	// (self_update.go), which copies the freshly verified rotated bytes. Gate on a
+	// cheap size compare so a healthy steady-state tick (~2s cadence) does two stats
+	// instead of reading the multi-MB daemon binary on every pass: a rebuilt daemon
+	// changes size, so an equal size means the backup is already current. daemonSelf
+	// is a signed daemon binary, so a byte-for-byte copy stays a valid sig.VerifyFile
+	// target; an unreadable/empty daemonSelf leaves a good backup INTACT rather than
+	// clobbering it.
+	if sfi, serr := os.Stat(daemonSelf); serr == nil && sfi.Size() > 0 {
+		if bfi, berr := os.Stat(dir.Backup()); berr != nil || bfi.Size() != sfi.Size() {
+			if data, rerr := os.ReadFile(daemonSelf); rerr == nil && len(data) > 0 {
+				_ = companionWriteFile(dir.Backup(), data, 0o755)
+			}
 		}
 	}
 	// Pinned desired version (cheap idempotent write).
