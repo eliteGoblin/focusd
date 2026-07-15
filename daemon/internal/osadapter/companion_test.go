@@ -10,6 +10,7 @@ import (
 
 	"github.com/eliteGoblin/focusd/daemon/internal/companion"
 	"github.com/eliteGoblin/focusd/daemon/internal/mode"
+	"github.com/eliteGoblin/focusd/daemon/internal/sig"
 )
 
 // companionLabel is a stable disguised label for the companion plist in tests
@@ -238,6 +239,43 @@ func TestEnsureCompanionScaffoldsWithoutLaunchd(t *testing.T) {
 	}
 	if _, err := os.Stat(dir.Root()); !os.IsNotExist(err) {
 		t.Fatalf("companion folder should be gone after RemoveCompanion, stat err = %v", err)
+	}
+}
+
+// TestCompanionStatusReflectsBackupSignature: CompanionStatus.present tracks the
+// companion binary on disk, and backupOK tracks whether the offline daemon
+// backup passes Ed25519 verification. This is the rail `daemon status` now reads
+// for watchdog_copy_ok (GAP 2 fix) — an unsigned/corrupted backup honestly reads
+// false; on a real install the backup is a byte-exact copy of the signed daemon
+// (see TestEnsureCompanionScaffoldsWithoutLaunchd) so it verifies true.
+func TestCompanionStatusReflectsBackupSignature(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	dir := companion.For(mode.User, home)
+	if err := os.MkdirAll(dir.Root(), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	// Empty folder: no binary, no backup → absent + backup fails.
+	if present, backupOK := CompanionStatus(mode.User); present || backupOK {
+		t.Fatalf("empty companion folder: want (false,false), got (%v,%v)", present, backupOK)
+	}
+
+	// Companion binary on disk → present=true. An UNSIGNED backup (random
+	// trailer) must NOT verify → backupOK=false.
+	if err := os.WriteFile(dir.Binary(), []byte("companion-bin"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	unsigned := append([]byte("not a signed daemon binary"), make([]byte, sig.SigLen)...)
+	if err := os.WriteFile(dir.Backup(), unsigned, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	present, backupOK := CompanionStatus(mode.User)
+	if !present {
+		t.Fatalf("companion binary on disk → present must be true")
+	}
+	if backupOK {
+		t.Fatalf("an unsigned backup must NOT verify → backupOK must be false")
 	}
 }
 

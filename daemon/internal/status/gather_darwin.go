@@ -102,13 +102,19 @@ func Gather(workdirOverride string, jsonMode bool) (Snapshot, PlatformDetail) {
 		s.Found = found
 	}
 
-	// --- Out-of-band watchdog rail liveness (bools only) ---
-	// FEATURE 12 / ADR-0016: a silently-dead cron watchdog must be checkable.
-	// WatchdogStatus crosses ONLY bools (cron line present / copy on disk) —
-	// the copy path never leaves the osadapter boundary, so this cannot leak.
-	cronPresent, copyOK := osadapter.WatchdogStatus(m)
+	// --- Out-of-band recovery rail liveness (bools only) ---
+	// FEATURE 18 / ADR-0020: the launchd COMPANION superseded the FEATURE 12
+	// cron watchdog as the recovery rail. Report the COMPANION's liveness —
+	// present (its binary on disk) + backupOK (its signed daemon backup passes
+	// Ed25519 verification) — falling back to the legacy cron rail only when no
+	// companion is present (a pre-F18 install mid-migration), so the status
+	// never goes dark. Both probes cross ONLY bools (no path leaves the
+	// osadapter boundary), so this cannot leak a disguised identifier.
+	cPresent, cBackupOK := osadapter.CompanionStatus(m)
+	cronPresent, cronCopyOK := osadapter.WatchdogStatus(m)
+	railPresent, copyOK := recoveryRailStatus(cPresent, cBackupOK, cronPresent, cronCopyOK)
 	s.WatchdogChecked = true
-	s.WatchdogCron = cronPresent
+	s.WatchdogCron = railPresent
 	s.WatchdogCopyOK = copyOK
 
 	// --- Discover the install (workdir + binary path stay tokenised) ---

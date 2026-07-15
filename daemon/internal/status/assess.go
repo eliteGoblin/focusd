@@ -63,11 +63,16 @@ type Snapshot struct {
 	// found=false with no permission error ⇒ clean DOWN ("nothing installed").
 	Found bool
 
-	// Watchdog rail liveness (FEATURE 12 / ADR-0016). WatchdogCron: the root
-	// cron line is present; WatchdogCopyOK: the binary copy it points at is on
-	// disk. Bools only (no paths) — a silently-dead cron watchdog must be
-	// checkable (ADR-0016 honest limitation). WatchdogChecked is false on
-	// non-darwin / when the rail does not apply, so render can stay silent.
+	// Out-of-band recovery-rail liveness (bools only). WatchdogCron: the rail
+	// is present; WatchdogCopyOK: its signed recovery copy verifies. As of
+	// FEATURE 18 / ADR-0020 these report the launchd COMPANION (present +
+	// Ed25519-verified daemon backup), which superseded the FEATURE 12 cron
+	// watchdog; a pre-F18 install still on the cron rail falls back to it (see
+	// recoveryRailStatus + gather_darwin.go). Bools only (no paths) — a
+	// silently-dead recovery rail must be checkable. WatchdogChecked is false on
+	// non-darwin / when the rail does not apply, so render can stay silent. The
+	// JSON field names (watchdog_rail / watchdog_copy_ok) are kept stable for
+	// machine consumers; only the source rail changed.
 	WatchdogChecked bool
 	WatchdogCron    bool
 	WatchdogCopyOK  bool
