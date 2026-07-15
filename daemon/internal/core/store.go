@@ -174,6 +174,7 @@ func (s *Store) badName(v string) string {
 func (s *Store) versionPath() string { return filepath.Join(s.Dir, VersionFile) }
 func (s *Store) goodPath() string    { return filepath.Join(s.Dir, "good") }
 func (s *Store) badDir() string      { return filepath.Join(s.Dir, "bad") }
+
 // stateDBPath is where the platform engine's state.db lives: the disposable
 // PLATFORM-WORKDIR (platformRoot), NOT the daemon-home. FEATURE 21 (HF1) split
 // the two roots — the platform derives its workdir from its own binary location
