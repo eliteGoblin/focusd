@@ -102,6 +102,14 @@ func IsPlatformWorkdir(dir string) bool {
 // sentinel file whose bytes un-mask to dhMagic). The daemon-home orphan sweep
 // gates its RemoveAll on this positive content match — never on a name or on a
 // state.db heuristic — so a real app folder is never a delete candidate.
+//
+// INTENTIONAL asymmetry with IsPlatformWorkdir: there is NO legacy-migration
+// fallback here. A pre-FEATURE-26 daemon-home (no sentinel) is not swept by the
+// orphan sweep — but that is safe and sufficient: a live/retired legacy
+// daemon-home is cleaned by the plist-driven generation retire (which RemoveAll's
+// Dir(verified-binary), name-agnostic), so only a truly-orphaned pre-F26
+// daemon-home whose plist is already gone leaks as harmless disk residue. We
+// prefer that leak to a name/state.db heuristic that could hit a real folder.
 func IsDaemonHome(dir string) bool {
 	return hasMarker(dir, dhMagic())
 }
@@ -114,6 +122,16 @@ func MarkPlatformWorkdir(dir string) { writeSentinel(dir, pwdMagic()) }
 // install so an orphaned daemon-home is later recognisable + sweepable by
 // content. Best-effort.
 func MarkDaemonHome(dir string) { writeSentinel(dir, dhMagic()) }
+
+// MarkWatchdogCopy writes the watchdog-copy content sentinel into dir. Called when
+// the out-of-band watchdog binary copy is placed, so the later refresh/uninstall
+// RemoveAll of the OLD copy dir can positively confirm the dir is ours before
+// deleting it (never a real app folder). Best-effort.
+func MarkWatchdogCopy(dir string) { writeSentinel(dir, wdMagic()) }
+
+// IsWatchdogCopy reports whether dir is a watchdog-copy dir this package marked.
+// The watchdog teardown gates its RemoveAll on this positive content match.
+func IsWatchdogCopy(dir string) bool { return hasMarker(dir, wdMagic()) }
 
 // Read returns the platform-workdir recorded in daemonHome's pointer file, or
 // "" when the pointer is absent/unreadable/empty. It transparently un-masks a

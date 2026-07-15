@@ -1,6 +1,7 @@
 package core
 
 import (
+	"bytes"
 	"crypto/hmac"
 	"crypto/rand"
 	"crypto/sha256"
@@ -96,11 +97,12 @@ type versionConfig struct {
 // Empty salt (dev/test/legacy) ⇒ no mask, legacy filenames — the deterministic
 // layout the existing tests and e2e rely on is unchanged.
 
-// verMaskMarker is the non-printable leading byte of a masked version payload. A
-// correctly un-masked payload starts with it; a legacy plaintext file un-masked
-// with the key almost never does, so its absence reliably flags "legacy
-// plaintext" (deterministic, not a probabilistic heuristic).
-const verMaskMarker byte = 0x1e
+// verMaskMarker is the non-printable leading MARKER of a masked version payload.
+// A correctly un-masked payload starts with these exact bytes; a legacy plaintext
+// file un-masked with the key matches all 4 only with probability ~2^-32, so its
+// absence reliably flags "legacy plaintext" (a wide, deterministic discriminator,
+// not a 1-in-256 heuristic).
+var verMaskMarker = []byte{0x1e, 0x46, 0x32, 0x36} // 0x1e + "F26"
 
 // verMaskKey is the deterministic XOR key for version-state content, distinct
 // from every other salt-keyed mask. Empty salt ⇒ nil (no masking).
@@ -120,21 +122,21 @@ func (s *Store) maskVer(data []byte) []byte {
 	if key == nil {
 		return data
 	}
-	return xor(append([]byte{verMaskMarker}, data...), key)
+	return xor(append(append([]byte(nil), verMaskMarker...), data...), key)
 }
 
-// unmaskVer returns (data, true) when raw is a file WE masked (marker present
-// after un-masking), or (raw, false) when it is a legacy plaintext file the
-// caller should use as-is. With no salt it returns (raw, false) — plaintext is
-// authoritative.
+// unmaskVer returns (data, true) when raw is a file WE masked (the multi-byte
+// marker is present after un-masking), or (raw, false) when it is a legacy
+// plaintext file the caller should use as-is. With no salt it returns (raw,
+// false) — plaintext is authoritative.
 func (s *Store) unmaskVer(raw []byte) ([]byte, bool) {
 	key := s.verMaskKey()
 	if key == nil {
 		return raw, false
 	}
 	u := xor(raw, key)
-	if len(u) >= 1 && u[0] == verMaskMarker {
-		return u[1:], true
+	if len(u) >= len(verMaskMarker) && bytes.Equal(u[:len(verMaskMarker)], verMaskMarker) {
+		return u[len(verMaskMarker):], true
 	}
 	return raw, false // not ours-masked → treat as legacy plaintext
 }

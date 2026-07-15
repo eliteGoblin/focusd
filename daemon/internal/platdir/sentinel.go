@@ -71,6 +71,18 @@ func dhMagic() []byte {
 	return h[:magicLen]
 }
 
+// wdMagic is the out-of-band WATCHDOG-COPY dir magic — distinct again from the
+// other two. The watchdog copy dir is a hidden sibling under the support root
+// holding just the disguised daemon-binary copy (FEATURE 12). Since its name is
+// now a shape-ensemble blend that could equal a real app folder, the code that
+// os.RemoveAll's the OLD copy dir on refresh/uninstall gates that delete on THIS
+// positive content match, so a tampered cron path (or a name collision) can never
+// wipe a real app folder.
+func wdMagic() []byte {
+	h := sha256.Sum256([]byte("focusd-watchdog-" + "copy-magic-v1"))
+	return h[:magicLen]
+}
+
 // maskedSentinel returns the on-disk sentinel bytes for a magic: magic XOR key.
 func maskedSentinel(magic []byte) []byte {
 	key := magicMaskKey()
@@ -93,36 +105,48 @@ func writeSentinel(dir string, magic []byte) {
 // hasMarker reports whether dir contains a sentinel file matching magic. It reads
 // ONLY regular files whose size already equals magicLen (a cheap dirent/stat
 // gate — real files are almost never exactly that size), then compares the
-// un-masked... rather, the on-disk bytes against the pre-masked magic in constant
-// time. Returns true on the FIRST match. A directory it cannot read → false (not
-// ours → never deleted).
+// on-disk bytes against the pre-masked magic in constant time. Returns true on
+// the FIRST match. A directory it cannot read → false (not ours → never deleted).
+//
+// The directory listing is read in BOUNDED batches (os.File.ReadDir(n)) and the
+// whole scan stops after maxSentinelScan entries, so a pathological folder with a
+// huge top-level listing can never make a sweep pass materialize the entire list
+// or read unboundedly. Our own directories hold a handful of files, so the
+// sentinel is always found well within the budget.
 //
 // This is the ONLY predicate permitted to gate a RemoveAll in the sweeps.
 func hasMarker(dir string, magic []byte) bool {
 	want := maskedSentinel(magic)
-	entries, err := os.ReadDir(dir)
+	f, err := os.Open(dir)
 	if err != nil {
 		return false
 	}
+	defer f.Close()
 	scanned := 0
-	for _, e := range entries {
-		if scanned >= maxSentinelScan {
-			break
+	for scanned < maxSentinelScan {
+		entries, rerr := f.ReadDir(256) // bounded batch; io.EOF ends the loop
+		for _, e := range entries {
+			if scanned >= maxSentinelScan {
+				break
+			}
+			if e.IsDir() {
+				continue
+			}
+			info, ierr := e.Info()
+			if ierr != nil || !info.Mode().IsRegular() || info.Size() != int64(magicLen) {
+				continue // symlink / wrong size → cannot be our sentinel (no read)
+			}
+			scanned++
+			b, rderr := os.ReadFile(filepath.Join(dir, e.Name()))
+			if rderr != nil || len(b) != len(want) {
+				continue
+			}
+			if subtle.ConstantTimeCompare(b, want) == 1 {
+				return true
+			}
 		}
-		if e.IsDir() {
-			continue
-		}
-		info, ierr := e.Info()
-		if ierr != nil || !info.Mode().IsRegular() || info.Size() != int64(magicLen) {
-			continue // symlink / wrong size → cannot be our sentinel (no read)
-		}
-		scanned++
-		b, rerr := os.ReadFile(filepath.Join(dir, e.Name()))
-		if rerr != nil || len(b) != len(want) {
-			continue
-		}
-		if subtle.ConstantTimeCompare(b, want) == 1 {
-			return true
+		if rerr != nil {
+			break // io.EOF (done) or a read error → stop
 		}
 	}
 	return false

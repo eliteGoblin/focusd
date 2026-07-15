@@ -191,3 +191,39 @@ func TestSweepOrphanWorkdirs_NeverDeletesRealApps(t *testing.T) {
 	}
 	assertAllSurvive(t, "orphan-daemon-home-sweep", real)
 }
+
+// TestWatchdogRemoveCopyDirNeverDeletesRealApp: the REAL copyFS.removeCopyDir
+// deletes a dir only on a positive watchdog-copy content match — so a blended
+// name collision or a tampered cron path pointing at a real app folder can never
+// wipe it. A marked watchdog-copy dir IS removed.
+func TestWatchdogRemoveCopyDirNeverDeletesRealApp(t *testing.T) {
+	root := t.TempDir()
+
+	realApp := filepath.Join(root, "Google")
+	if err := os.MkdirAll(realApp, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(realApp, "Cookies"), []byte("real data"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	fs := realCopyFS{}
+	if err := fs.removeCopyDir(realApp); err != nil {
+		t.Fatalf("removeCopyDir: %v", err)
+	}
+	if _, err := os.Stat(realApp); err != nil {
+		t.Fatalf("DESTRUCTIVE SAFETY VIOLATION: real app folder deleted by removeCopyDir: %v", err)
+	}
+
+	wd := filepath.Join(root, "com.vendor.helper")
+	if err := os.MkdirAll(wd, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	platdir.MarkWatchdogCopy(wd)
+	if err := fs.removeCopyDir(wd); err != nil {
+		t.Fatalf("removeCopyDir(marked): %v", err)
+	}
+	if _, err := os.Stat(wd); !os.IsNotExist(err) {
+		t.Fatalf("marked watchdog-copy dir must be removed, stat err = %v", err)
+	}
+}
