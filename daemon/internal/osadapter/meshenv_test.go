@@ -49,7 +49,10 @@ func TestIsFocusdMeshOrEnsurePlist(t *testing.T) {
 		{"new worker B (env run:b)", map[string]string{MeshEnvKey: "run:b"}, []string{"/bin/x"}, true},
 		{"new ensurer (env ensure) — the #102-c case", map[string]string{MeshEnvKey: "ensure"}, []string{"/bin/x"}, true},
 		{"old worker (--mesh argv)", nil, []string{"/bin/x", "run", "--r", "a", "--mesh"}, true},
-		{"old/test ensurer (ensure argv)", nil, []string{"/bin/x", "ensure", "--test-mode-flag", "true"}, true},
+		{"test-mode ensurer (ensure + --test-mode-flag)", nil, []string{"/bin/x", "ensure", "--test-mode-flag", "true"}, true},
+		// A bare "ensure" token is NOT focusd-specific → must NOT corroborate, so a
+		// third-party orphan carrying "ensure" is never misclassified (Copilot review).
+		{"third-party bare ensure argv (no focusd marker)", nil, []string{"/usr/bin/thing", "ensure"}, false},
 		{"vendor plist (neither)", map[string]string{"OTHER": "x"}, []string{"/bin/x", "--foo"}, false},
 		{"empty", nil, nil, false},
 	}
