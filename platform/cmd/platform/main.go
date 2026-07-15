@@ -108,21 +108,31 @@ func resolveWorkdir(flag string) string {
 // embedded signed default is the KISS interim.)
 func parseCommon(name string, honorConfigFlag bool, args []string) app.Options {
 	fs := flag.NewFlagSet(name, flag.ExitOnError)
-	cfg := fs.String("config", "", "config.yaml path (dev `validate` only; rejected on the run path)")
+	// Config-lock: --config is a dev-inspection flag honored ONLY by
+	// `platform validate`, so it is not even registered on the daemon-managed
+	// run path — `run -h` never advertises a flag that can't be used. If one is
+	// passed there anyway, reject it loudly (pre-scanned, because an
+	// unregistered flag would otherwise fail fs.Parse with a cryptic message):
+	// the enforced run-path policy is the signed embedded default and nothing
+	// else, so silently accepting --config could mislead a dev into thinking a
+	// custom policy is active.
+	var cfg *string
+	if honorConfigFlag {
+		cfg = fs.String("config", "", "config.yaml path (dev inspection)")
+	} else {
+		for _, a := range args {
+			if a == "-config" || a == "--config" ||
+				strings.HasPrefix(a, "-config=") || strings.HasPrefix(a, "--config=") {
+				fmt.Fprintln(os.Stderr, "--config is not honored on the run path (policy is the signed embedded default); use `platform validate --config` for dev inspection")
+				os.Exit(2)
+			}
+		}
+	}
 	db := fs.String("state-db", "", "state.db path (default: derived from the workdir)")
 	pdir := fs.String("plugin-dir", "", "plugin scan dir (default: <platform-binary-dir>/plugins)")
 	mode := fs.String("mode", "", "force run mode: user|system")
 	wd := fs.String("workdir", "", "daemon-managed workdir; derives state-db/plugin-dir (release builds always self-derive it from the binary location, ignoring this flag)")
 	_ = fs.Parse(args)
-	// Config-lock: --config is a dev-inspection flag honored ONLY by
-	// `platform validate`. On the daemon-managed run path the enforced policy
-	// is the signed embedded default, so an explicit --config cannot take
-	// effect. Rather than silently ignore it (which could mislead a dev into
-	// thinking a custom policy is active), reject it loudly.
-	if !honorConfigFlag && *cfg != "" {
-		fmt.Fprintln(os.Stderr, "--config is not honored on the run path (policy is the signed embedded default); use `platform validate --config` for dev inspection")
-		os.Exit(2)
-	}
 	// HF4 (FEATURE 24): resolve the workdir WITHOUT ever exposing it on argv or in
 	// the environment. In a RELEASE build workdirOverride() ignores both the
 	// --workdir flag and the WorkdirEnvKey env var (returns "") so the child
