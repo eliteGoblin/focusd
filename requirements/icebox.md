@@ -16,7 +16,13 @@
 
 ## Server-managed enforcement mode (server owns the commitment)
 
-**Maturity:** [exploring]
+**Maturity:** [exploring] · **DEFERRED (2026-07-14, Frank — ADR-0022): not on the
+plan now.** Standing decision: focusd stays **local-first** (resilience + friction);
+**no off-device server for now.** Rationale (settled, do not re-pitch as an open
+question): a server would only be a config/lock **manager** — enforcement is
+**inherently local**, so it does not make the local agent run more resiliently or
+un-stoppable. Kept here only as a **possible later revisit**; do not promote without
+Frank explicitly re-raising it.
 
 **The idea (distilled).** Today the strongest commitment lever lives on the same
 machine the weak-moment user controls — so a root user can eventually relax it.
@@ -60,7 +66,8 @@ This does not claim cryptographic perfection. It maximizes the gap between
 Be honest about privilege tiers: with root, durable network/host blocks survive
 daemon death; in pure user mode there is no durable block, so the commitment
 must come from no-self-disable + cooldown-gated remote token + the existing
-off-device NextDNS layer (already the strongest anchor we have).
+off-device NextDNS block (already the strongest anchor we have; not counted as a
+focusd enforced layer — see the "NextDNS as a platform-managed plugin" idea below).
 
 **Tension with current philosophy.**
 - Introduces a **server** and a **network dependency** — a new product shape and
@@ -305,6 +312,102 @@ event plumbing) and the platform's signed-desired-state spine.
 but only as fresh as the last release) or an off-box server-signed policy (the
 server-managed-enforcement entry, stronger but heavier)? Resolve that before
 turning TC-10 into a feature spec + ADR.
+
+**Live observation (2026-07-15, v0.18.0) + the config→server direction.** On the
+v0.18.0 live build, **net-block was disabled by baked default with no override
+present**, and **config/policy integrity was ABSENT** — nothing protects the config
+itself, so this half of the trust story is still fully open on the live machine.
+Frank's stated direction: the **current local baked/override config is the KISS
+interim**; **later, policy authority moves to a server** so the config becomes **hard
+to fake locally** (config→server). That is the *stronger* of the two options in the
+open question above (the server-signed-policy path), and it **rhymes with the
+"Server-managed enforcement mode" entry**. It is a **later revisit, not now**: per
+**ADR-0022** (local-first, no off-device server for now — SETTLED), moving config
+authority to a server needs **Frank to explicitly re-raise it** — do not promote as an
+open question until then.
+
+---
+
+## Install location beyond `/Library/Application Support/` — harder-to-guess / spread across less-predictable dirs
+
+**Maturity:** [raw] — **think, not now.**
+
+**The idea.** Today the install lives under `/Library/Application Support/` — a
+convincing "I'm a legitimate app" disguise home. But it is also the **first place** a
+technical owner looks. Explore a **harder-to-guess** location, or **spreading the
+install across less-predictable directories**, so that even once the process-table
+invisibility bar holds (FEATURE 24 / TC-30), the fallback "just go look in Application
+Support" search doesn't hand over the folder.
+
+**Why it might matter.** Reinforces the VITAL grep→workdir→`rm` defense at the on-disk
+layer: process-table invisibility is worth less if the folder still sits in the one
+obvious place a determined owner will open next.
+
+**Pro / con (one line).** Application Support is a **convincing disguise home** (blends
+in with real apps) but **predictable**; a less-guessable spread is harder to find but
+risks looking *more* anomalous (an odd hidden dir can itself be a tell) and adds
+install/recovery complexity.
+
+**Tension with current philosophy.** Friction, not a seal (register §5) — a determined
+root user who reads the source finds any location; this only raises casual-search cost.
+Must not undercut self-recovery (the recoverer still has to find/rebuild the folder) or
+the disguise's "looks legitimate" goal.
+
+**Dependencies.** Sits on FEATURE 24 (process-table invisibility) + FEATURE 21 (storage
+separation / recovery); interacts with the disguise + path-rotating self-update paths.
+
+**Open question to resolve before promoting.** What location strategy stays both **hard
+to guess** AND **plausible** (not itself an anomaly a scan flags), without breaking
+self-recovery's ability to re-establish the folder? Resolve before turning this into a
+feature spec + ADR.
+
+---
+
+## NextDNS as a platform-managed plugin (network-level DNS under supervision)
+
+**Maturity:** [raw] — **consider in future, not committed.**
+
+**The idea.** Today network-level DNS blocking (NextDNS, configured at the router
+or device) is a **separate, optional, manual anchor** that lives *off* the focusd
+machine — nothing in the daemon/platform keeps it live or notices if it's changed.
+Bring it **under platform management as a plugin**, so the platform **ensures it
+stays live** — supervised and anti-tampered the same way the other plugins are
+(dns-block, kill-steam, network-block, skill-protector). If the weak-moment self
+switched the profile off or repointed DNS, the platform would detect the drift and
+re-assert the intended NextDNS state on its reconcile loop.
+
+**Distinction to keep crisp (local hosts vs network DNS).**
+- **dns-block plugin** already blocks at the **machine-local hosts file** — a
+  platform-managed, enforced-tier plugin today.
+- **NextDNS** blocks at the **network / DNS-resolver level** (every device behind
+  the router), which the machine-local hosts file cannot reach. This idea is about
+  the *network* layer, not the local one — the two are complementary, not duplicates.
+
+**Why it might matter.** NextDNS is the broadest-reach anchor (covers every device
+on the network, not just this Mac), yet it's the *least* self-protecting piece
+because it's manual and off-box. Making it a supervised plugin closes the "user
+quietly turns the DNS profile off" gap and folds it into the same live-and-genuine
+guarantee the register's layered-supervision principle already demands of every
+other layer.
+
+**Tension with current philosophy.**
+- NextDNS control lives **off the focusd machine** (a cloud profile / router
+  setting), so a plugin would need to reach an external account/API — a **new
+  network + external-account dependency** the enforced tier does not have today.
+  That is a scope expansion; **needs human sign-off before promotion.**
+- Anti-tamper only bites where focusd has authority. If the profile is changed from
+  the NextDNS account (not the Mac), a machine-local plugin can **detect** but not
+  necessarily **prevent** it — be honest about that ceiling before promising
+  "supervised."
+
+**Dependencies.** Sits on the platform's plugin-supervision + continuous-authenticity
+machinery (FEATURE 23) and the reconcile loop. Independent of the deferred
+server-managed-enforcement idea above, though they rhyme (both move authority off-box).
+
+**Open question to resolve before promoting.** How does the plugin authenticate to
+NextDNS and re-assert state without embedding a long-lived secret on the very machine
+the weak-moment self controls — and what part of the profile can it actually enforce
+vs merely detect? Resolve before turning this into a feature spec + ADR.
 
 ---
 
