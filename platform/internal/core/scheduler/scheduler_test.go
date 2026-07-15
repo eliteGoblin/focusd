@@ -264,7 +264,15 @@ func TestStartKickstartsRegisteredJobsImmediately(t *testing.T) {
 		map[string]plugin.Discovered{"ok": p})
 
 	s.Start()
-	t.Cleanup(func() { <-s.Stop().Done() })
+	t.Cleanup(func() {
+		// Bounded so a regressed/hung Stop surfaces fast instead of deadlocking
+		// the package until the global test timeout.
+		select {
+		case <-s.Stop().Done():
+		case <-time.After(2 * time.Second):
+			t.Error("Stop did not drain in time")
+		}
+	})
 
 	// The kickstart fires in a goroutine; wait for the run to actually RECORD
 	// (TriggerCount increments before the run completes, so poll the DB row).

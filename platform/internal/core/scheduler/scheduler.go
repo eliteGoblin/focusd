@@ -328,9 +328,17 @@ func (s *Scheduler) event(sev, typ, msg, jobID string) {
 // dispatch) so Start stays non-blocking. no-overlap job_locks make a kickstart
 // run and the first cron tick coexist safely (whichever loses the lock records
 // a benign skip). Stop drains these via kickWG.
+//
+// Lifecycle contract: Register must fully return before Start; Start is called
+// exactly once and is NOT safe to call concurrently with Stop or Register (the
+// s.kickstart slice is built lock-free by Register, and a second Start would
+// re-kickstart every job). The sole production caller (App.BuildScheduler then
+// cmd/platform run) honors this — register once, Start once, Stop once, all on
+// one goroutine. A future reload path must add its own synchronization.
 func (s *Scheduler) Start() {
 	s.cron.Start()
 	for _, fire := range s.kickstart {
+		fire := fire // per-iteration copy (redundant under Go 1.22+ loop semantics; kept explicit)
 		s.kickWG.Add(1)
 		go func() {
 			defer s.kickWG.Done()
