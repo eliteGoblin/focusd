@@ -14,4 +14,4 @@ func RefreshCompanionBackup(mode.Mode, []byte, string) error { return nil }
 func RemoveCompanion(mode.Mode) error                        { return nil }
 func TouchCompanionHeartbeat(mode.Mode) error                { return nil }
 
-func CompanionStatus(mode.Mode) (present, backupOK bool) { return false, false }
+func CompanionStatus(mode.Mode) (present, backupOK, ranRecently bool) { return false, false, false }

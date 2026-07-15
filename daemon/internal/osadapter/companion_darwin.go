@@ -159,18 +159,61 @@ func RemoveCompanion(m mode.Mode) error {
 	return os.RemoveAll(dir.Root())
 }
 
+// companionRanRecentlyWindow is how recent the companion RanMarker's mtime must
+// be for status to treat the rail as FIRING (issue #status-2). ~3× the 30s
+// StartInterval, so a single missed pass does not flap the signal. A companion
+// that never completes a recovery pass (e.g. the #101 no-$HOME crash) never
+// touches the marker → this reads false → status honestly omits the rail line.
+const companionRanRecentlyWindow = 90 * time.Second
+
 // CompanionStatus reports the companion rail's liveness for status (bools only,
-// no paths cross the boundary): present — the companion binary is on disk;
-// backupOK — the offline daemon backup exists AND passes Ed25519 verification.
-func CompanionStatus(m mode.Mode) (present, backupOK bool) {
+// no paths cross the boundary):
+//   - present   — the companion binary is on disk AND its persisted launchd job
+//     is LOADED (issue #status-2 (a): mere on-disk presence used to read "present"
+//     even while the job was DOA);
+//   - backupOK  — the offline daemon backup exists AND passes Ed25519 verification;
+//   - ranRecently — the RanMarker shows a recovery pass COMPLETED within
+//     companionRanRecentlyWindow (issue #status-2 (b): a silently-dead rail that
+//     never fires reads false, so status omits the line instead of trusting
+//     presence).
+func CompanionStatus(m mode.Mode) (present, backupOK, ranRecently bool) {
 	dir := companionDir(m)
+	return companionStatus(dir, launchctlCtl{m: m}.loaded, sig.VerifyFile, time.Now())
+}
+
+// companionStatus is the seam-injected core of CompanionStatus, split out so the
+// launchd-loaded + signature + firing checks are unit-tested without a real
+// launchctl or the offline signing key. loadedFn probes launchd; verify checks the
+// backup signature; now anchors the RanMarker staleness compare.
+func companionStatus(
+	dir companion.Dir,
+	loadedFn func(string) bool,
+	verify func(string) (bool, error),
+	now time.Time,
+) (present, backupOK, ranRecently bool) {
+	binOnDisk := false
 	if fi, err := os.Stat(dir.Binary()); err == nil && !fi.IsDir() {
-		present = true
+		binOnDisk = true
 	}
-	if ok, err := sig.VerifyFile(dir.Backup()); err == nil && ok {
+	present = binOnDisk && companionJobLoaded(dir, loadedFn)
+	if ok, err := verify(dir.Backup()); err == nil && ok {
 		backupOK = true
 	}
-	return present, backupOK
+	if fi, err := os.Stat(dir.RanMarker()); err == nil {
+		ranRecently = now.Sub(fi.ModTime()) < companionRanRecentlyWindow
+	}
+	return present, backupOK, ranRecently
+}
+
+// companionJobLoaded reports whether the companion's persisted launchd label is
+// currently loaded. A missing/empty label file (never bootstrapped) → false.
+func companionJobLoaded(dir companion.Dir, loadedFn func(string) bool) bool {
+	b, err := os.ReadFile(dir.LabelFile())
+	if err != nil {
+		return false
+	}
+	label := strings.TrimSpace(string(b))
+	return label != "" && loadedFn(label)
 }
 
 // TouchCompanionHeartbeat updates the companion heartbeat's mtime to now — the

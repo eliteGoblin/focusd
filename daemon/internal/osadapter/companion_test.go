@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/eliteGoblin/focusd/daemon/internal/companion"
 	"github.com/eliteGoblin/focusd/daemon/internal/mode"
@@ -242,40 +243,66 @@ func TestEnsureCompanionScaffoldsWithoutLaunchd(t *testing.T) {
 	}
 }
 
-// TestCompanionStatusReflectsBackupSignature: CompanionStatus.present tracks the
-// companion binary on disk, and backupOK tracks whether the offline daemon
-// backup passes Ed25519 verification. This is the rail `daemon status` now reads
-// for watchdog_copy_ok (GAP 2 fix) — an unsigned/corrupted backup honestly reads
-// false; on a real install the backup is a byte-exact copy of the signed daemon
-// (see TestEnsureCompanionScaffoldsWithoutLaunchd) so it verifies true.
-func TestCompanionStatusReflectsBackupSignature(t *testing.T) {
+// TestCompanionStatusCore exercises the seam-injected core of CompanionStatus
+// (issue #status-2). present now requires the binary on disk AND the launchd job
+// LOADED (not mere on-disk presence — the old bug that read "present" while the
+// job was DOA); backupOK tracks Ed25519 verification of the offline backup; and
+// ranRecently tracks the RanMarker firing signal. Injected loadedFn/verify keep it
+// deterministic without a real launchctl or the offline signing key.
+func TestCompanionStatusCore(t *testing.T) {
 	home := t.TempDir()
-	t.Setenv("HOME", home)
 	dir := companion.For(mode.User, home)
 	if err := os.MkdirAll(dir.Root(), 0o755); err != nil {
 		t.Fatal(err)
 	}
+	now := time.Now()
+	loadedTrue := func(string) bool { return true }
+	loadedFalse := func(string) bool { return false }
+	verifyReal := func(p string) (bool, error) { return sig.VerifyFile(p) }
 
-	// Empty folder: no binary, no backup → absent + backup fails.
-	if present, backupOK := CompanionStatus(mode.User); present || backupOK {
-		t.Fatalf("empty companion folder: want (false,false), got (%v,%v)", present, backupOK)
+	// Empty folder: nothing present, nothing verifies, never fired.
+	if p, b, r := companionStatus(dir, loadedTrue, verifyReal, now); p || b || r {
+		t.Fatalf("empty companion folder: want (false,false,false), got (%v,%v,%v)", p, b, r)
 	}
 
-	// Companion binary on disk → present=true. An UNSIGNED backup (random
-	// trailer) must NOT verify → backupOK=false.
+	// Binary on disk + a persisted label — but the job is NOT loaded → present
+	// stays false (the #status-2 (a) fix: on-disk presence alone is not "present").
 	if err := os.WriteFile(dir.Binary(), []byte("companion-bin"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(dir.LabelFile(), []byte("com.apple.MobileAsset.helper.dead"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	unsigned := append([]byte("not a signed daemon binary"), make([]byte, sig.SigLen)...)
 	if err := os.WriteFile(dir.Backup(), unsigned, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	present, backupOK := CompanionStatus(mode.User)
-	if !present {
-		t.Fatalf("companion binary on disk → present must be true")
+	if p, _, _ := companionStatus(dir, loadedFalse, verifyReal, now); p {
+		t.Fatalf("binary on disk but job NOT loaded → present must be false")
 	}
-	if backupOK {
+
+	// Job loaded → present=true. Unsigned backup → backupOK=false.
+	p, b, _ := companionStatus(dir, loadedTrue, verifyReal, now)
+	if !p {
+		t.Fatalf("binary on disk + label loaded → present must be true")
+	}
+	if b {
 		t.Fatalf("an unsigned backup must NOT verify → backupOK must be false")
+	}
+
+	// RanMarker firing signal: a recent marker reads true; a stale one reads false.
+	if err := os.WriteFile(dir.RanMarker(), nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, r := companionStatus(dir, loadedTrue, verifyReal, now); !r {
+		t.Fatalf("a freshly-touched RanMarker must read ranRecently=true")
+	}
+	stale := now.Add(-companionRanRecentlyWindow - time.Minute)
+	if err := os.Chtimes(dir.RanMarker(), stale, stale); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, r := companionStatus(dir, loadedTrue, verifyReal, now); r {
+		t.Fatalf("a stale RanMarker (older than the window) must read ranRecently=false")
 	}
 }
 
