@@ -3,6 +3,7 @@
 package osadapter
 
 import (
+	"bytes"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -55,13 +56,23 @@ func companionDir(m mode.Mode) companion.Dir {
 }
 
 // EnsureCompanion idempotently stands up the out-of-band companion rail
-// (best-effort): ensure the folder; refresh the signed daemon backup + pinned
-// desired; create the heartbeat baseline; write the embedded companion binary if
-// missing; and, if its launchd job is not loaded, enable + bootstrap it.
-// daemonSelf is the path of a SIGNED daemon binary (the installer's own
-// executable, or a running mesh member) used as the offline backup. Safe to call
-// on every reconcile tick. Skipped entirely in Test mode (e2e never stands up
-// the out-of-band rail).
+// (best-effort): ensure the folder; REFRESH the signed daemon backup + pinned
+// desired; create the heartbeat baseline; materialize + REFRESH the embedded
+// companion binary; and, if its launchd job is not loaded (or its binary just
+// changed), (re)load it. daemonSelf is the path of a SIGNED daemon binary (the
+// installer's own executable, or a running mesh member) used as the offline
+// backup. Safe to call on every reconcile tick. Skipped entirely in Test mode
+// (e2e never stands up the out-of-band rail).
+//
+// Both the backup and the companion binary are refreshed when they CHANGE, not
+// only when absent. The prior write-only-if-missing checks meant that once a
+// binary/backup existed from an earlier install it was FROZEN forever: an upgrade
+// never landed the new embedded companion bytes (so a fix like #101's no-$HOME
+// crash never reached the disk copy that actually runs) and the offline backup
+// kept restoring a stale daemon. The companion binary is refreshed byte-exact
+// (its refresh IS the fix, so nothing coarser may miss a change); the backup is
+// size-gated here (a cheap backstop — RefreshCompanionBackup is the byte-exact
+// authority on the real self-update rotation).
 func EnsureCompanion(m mode.Mode, daemonSelf, desired string) error {
 	if m == mode.Test {
 		return nil
@@ -73,11 +84,22 @@ func EnsureCompanion(m mode.Mode, daemonSelf, desired string) error {
 	if err := os.MkdirAll(dir.Root(), 0o700); err != nil {
 		return err
 	}
-	// Backup: place a signed daemon copy if missing (cheap on steady-state
-	// ticks; RefreshCompanionBackup overwrites it on self-update).
-	if _, err := os.Stat(dir.Backup()); os.IsNotExist(err) {
-		if data, rerr := os.ReadFile(daemonSelf); rerr == nil {
-			_ = companionWriteFile(dir.Backup(), data, 0o755)
+	// Backup: keep the offline signed-daemon copy in sync with the CURRENT running
+	// signed daemon (daemonSelf) — refresh when ABSENT or when its SIZE differs, not
+	// only when missing. This is the BACKSTOP for a daemon-binary swap that did not
+	// route through self-update; the byte-exact authority is RefreshCompanionBackup
+	// (self_update.go), which copies the freshly verified rotated bytes. Gate on a
+	// cheap size compare so a healthy steady-state tick (~2s cadence) does two stats
+	// instead of reading the multi-MB daemon binary on every pass: a rebuilt daemon
+	// changes size, so an equal size means the backup is already current. daemonSelf
+	// is a signed daemon binary, so a byte-for-byte copy stays a valid sig.VerifyFile
+	// target; an unreadable/empty daemonSelf leaves a good backup INTACT rather than
+	// clobbering it.
+	if sfi, serr := os.Stat(daemonSelf); serr == nil && sfi.Size() > 0 {
+		if bfi, berr := os.Stat(dir.Backup()); berr != nil || bfi.Size() != sfi.Size() {
+			if data, rerr := os.ReadFile(daemonSelf); rerr == nil && len(data) > 0 {
+				_ = companionWriteFile(dir.Backup(), data, 0o755)
+			}
 		}
 	}
 	// Pinned desired version (cheap idempotent write).
@@ -93,28 +115,88 @@ func EnsureCompanion(m mode.Mode, daemonSelf, desired string) error {
 		// the built companion binary; only THEN do we write + load it.
 		return nil
 	}
-	// Companion binary: write the embedded bytes if missing.
-	if _, err := os.Stat(dir.Binary()); os.IsNotExist(err) {
-		if werr := companionWriteFile(dir.Binary(), companionBinary, 0o755); werr != nil {
+	// Companion binary + launchd job: materialize the embed, REFRESH it on change,
+	// and force an immediate reload so an upgraded companion runs on the next tick.
+	c := launchctlCtl{m: m}
+	f := laFS{m: m}
+	return ensureCompanionBinaryLoaded(dir, companionBinary, companionReloader{
+		loaded:     c.loaded,
+		bootout:    c.bootout,
+		bootstrap:  c.bootstrap,
+		plistPath:  f.plistPath,
+		writePlist: f.write,
+	}, companionInterval)
+}
+
+// companionReloader is the injected launchd-control seam for the companion binary
+// standup, so the write-on-change + forced-reload logic is unit-tested without a
+// real launchctl. Production wires launchctlCtl + laFS.
+type companionReloader struct {
+	loaded     func(label string) bool
+	bootout    func(label string) error
+	bootstrap  func(pp string) error
+	plistPath  func(label string) string
+	writePlist func(path, content string) error
+}
+
+// ensureCompanionBinaryLoaded materializes the embedded companion binary and
+// keeps its launchd job loaded, REFRESHING the on-disk binary whenever it differs
+// from the embed. This is the upgrade fix: a prior install's companion was
+// otherwise frozen forever by a write-only-if-missing check, so embed-side code
+// fixes (e.g. #101's no-$HOME crash) never reached the disk copy that actually
+// runs. The write is atomic (temp+rename), so a mid-run one-shot finishes on the
+// old inode and execs the NEW inode next interval. When the binary actually
+// CHANGED and its job is already loaded, it is booted out + re-bootstrapped so the
+// fix runs on the NEXT tick rather than up to one StartInterval later; the bootout
+// is best-effort (a not-loaded label simply has nothing to tear down). An
+// unchanged, already-loaded companion is a pure no-op.
+func ensureCompanionBinaryLoaded(dir companion.Dir, embed []byte, r companionReloader, intervalSec int) error {
+	binChanged := false
+	if fileContentDiffers(dir.Binary(), embed) {
+		if werr := companionWriteFile(dir.Binary(), embed, 0o755); werr != nil {
 			return werr
 		}
+		binChanged = true
 	}
-	// launchd job: load it iff not already loaded (idempotent). The label is
-	// persisted in the folder so we re-check the SAME job across ticks.
+	// The label is persisted in the folder so we re-check the SAME job across ticks.
 	label, lerr := ensureCompanionLabel(dir)
 	if lerr != nil {
 		return lerr
 	}
-	c := launchctlCtl{m: m}
-	if c.loaded(label) {
+	loaded := r.loaded(label)
+	if binChanged && loaded {
+		_ = r.bootout(label) // force reload of the changed binary; best-effort
+		loaded = false
+	}
+	if loaded {
 		return nil
 	}
-	f := laFS{m: m}
-	pp := f.plistPath(label)
-	if werr := f.write(pp, CompanionPlist(label, dir.Binary(), dir.Log(), companionInterval)); werr != nil {
+	pp := r.plistPath(label)
+	if werr := r.writePlist(pp, CompanionPlist(label, dir.Binary(), dir.Log(), intervalSec)); werr != nil {
 		return werr
 	}
-	return c.bootstrap(pp) // reuses the enable-trick + bootstrap
+	return r.bootstrap(pp) // reuses the enable-trick + bootstrap
+}
+
+// fileContentDiffers reports whether the file at path is ABSENT or its bytes
+// differ from want. A cheap size compare short-circuits the multi-MB read on the
+// common upgrade case (a rebuilt binary changes size); only an equal-size file is
+// read back and byte-compared. Any stat/read error other than a clean equal match
+// is treated as "differs" so callers re-materialize defensively rather than trust
+// an unreadable/partial on-disk copy.
+func fileContentDiffers(path string, want []byte) bool {
+	fi, err := os.Stat(path)
+	if err != nil || fi.IsDir() {
+		return true // absent (or not a regular file) → (re)write
+	}
+	if fi.Size() != int64(len(want)) {
+		return true // size gate: cheap "differs" without reading the file
+	}
+	got, rerr := os.ReadFile(path)
+	if rerr != nil {
+		return true
+	}
+	return !bytes.Equal(got, want)
 }
 
 // RefreshCompanionBackup overwrites the companion's offline daemon backup with
@@ -132,8 +214,13 @@ func RefreshCompanionBackup(m mode.Mode, signedDaemonBytes []byte, desired strin
 	if err := os.MkdirAll(dir.Root(), 0o700); err != nil {
 		return err
 	}
-	if err := companionWriteFile(dir.Backup(), signedDaemonBytes, 0o755); err != nil {
-		return err
+	// Refresh the offline backup only when it is ABSENT or DIFFERS from the freshly
+	// verified daemon bytes — the copy tracks the rotated binary without a needless
+	// multi-MB rewrite on a no-op self-update.
+	if fileContentDiffers(dir.Backup(), signedDaemonBytes) {
+		if err := companionWriteFile(dir.Backup(), signedDaemonBytes, 0o755); err != nil {
+			return err
+		}
 	}
 	if companion.IsValidVersion(desired) {
 		_ = companionWriteFile(dir.Desired(), []byte(desired), 0o644)
@@ -287,13 +374,42 @@ func ensureCompanionLabel(dir companion.Dir) (string, error) {
 // companionWriteFile writes b to path atomically (temp + rename) with perm,
 // creating the parent dir. Mirrors core.atomicWrite (which is unexported in
 // another package) so the companion scaffolding can't leave a half-written file.
+//
+// The temp file is UNIQUE per write (os.CreateTemp), not a fixed "<path>.tmp":
+// EnsureCompanion refreshes the binary/backup on every mesh-worker tick where the
+// content differs, so all mesh workers (RoleA/RoleB/RoleEnsure) rewrite the SAME
+// target in lockstep right after an upgrade. A shared temp path would let one
+// worker's rename race another's truncating write (renaming a torn file into
+// place) or hit ENOENT on the second rename. A unique temp per writer isolates
+// them: each writes + renames its own inode, and the last atomic rename wins with
+// fully-formed content. The temp is a hidden-dot sibling (disguise-consistent) and
+// is cleaned up on any failure before the rename.
 func companionWriteFile(path string, b []byte, perm os.FileMode) error {
-	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+	dir := filepath.Dir(path)
+	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return err
 	}
-	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, b, perm); err != nil {
+	tmp, err := os.CreateTemp(dir, ".tmp-*")
+	if err != nil {
 		return err
 	}
-	return os.Rename(tmp, path)
+	tmpName := tmp.Name()
+	if _, werr := tmp.Write(b); werr != nil {
+		_ = tmp.Close()
+		_ = os.Remove(tmpName)
+		return werr
+	}
+	if cerr := tmp.Close(); cerr != nil {
+		_ = os.Remove(tmpName)
+		return cerr
+	}
+	if cerr := os.Chmod(tmpName, perm); cerr != nil {
+		_ = os.Remove(tmpName)
+		return cerr
+	}
+	if rerr := os.Rename(tmpName, path); rerr != nil {
+		_ = os.Remove(tmpName)
+		return rerr
+	}
+	return nil
 }
