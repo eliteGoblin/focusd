@@ -57,17 +57,20 @@ jobs:
     allow_overlap: false
     config: {}
 
-  # NOTE: disabled by default — the network-block plugin needs MANUAL
-  # prerequisites before it can do anything useful:
+  # Enabled by default (baked in): the daemon-managed run path no longer
+  # reads any on-disk override, so this job — which used to be turned on via
+  # a workdir config.yaml — must ship ON here to stay enforced.
+  #
+  # The plugin needs these MANUAL host prerequisites to actually populate
+  # the pf table (without them the pass is a controlled no-op/failure every
+  # 30m, harmless but noisy):
   #   1. /etc/pf.anchors/focusd-block-steam exists with the table + rule
   #   2. /etc/pf.conf has `anchor "focusd-block-steam"` + load anchor
   #   3. (optional) /etc/sudoers.d/focusd-network-block grants pfctl
-  # Without these the job fails every 30m with the same error. Operators
-  # should enable this via an on-disk override config after installing
-  # the prerequisites (see plugins/network-block/README.md). (Copilot.)
+  # See plugins/network-block/README.md.
   - id: network-block-reconcile
     plugin: network-block
-    enabled: false
+    enabled: true
     schedule: "@every 30m"
     timeout: 60s
     retry: 1
