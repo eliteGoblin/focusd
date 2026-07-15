@@ -32,6 +32,12 @@ type binPresentDeps struct {
 	// place writes bytes to a NEW path atomically (temp+rename, 0755). CREATE-ONLY:
 	// it never removes a directory.
 	place func(bytes []byte, dst string) error
+	// findAdoptable scans the IMMEDIATE files of workdir for an already-present,
+	// signature-VERIFIED daemon binary at a path other than excludePath (the known-
+	// missing SelfPath), returning its path or "" (issue #102-b belt). Only a signed
+	// release in the 0700 daemon-home passes verification, so a partial/foreign file
+	// is never adopted. Optional (nil ⇒ the belt is skipped; the create path runs).
+	findAdoptable func(workdir, excludePath string) string
 	// reinstall re-renders the three mesh plists at newSpec.SelfPath and
 	// re-bootstraps them (installAll). Repointing SelfPath repoints all three by
 	// construction.
@@ -83,6 +89,24 @@ func ensureBinaryPresent(d binPresentDeps, spec Spec, holdsLock bool) (newSelfPa
 	}
 	if present { // steady state: the file is there, nothing to do
 		return "", false, nil
+	}
+
+	// BELT (issue #102-b): before placing a fresh binary, check whether a sibling
+	// already re-materialized a signature-VERIFIED daemon binary in the workdir
+	// (at a path != the missing SelfPath). If so, ADOPT it and just repoint the
+	// plists — never place a SECOND binary. 102-a's single-actor reinstall already
+	// prevents the double-place, but this makes placement idempotent regardless of
+	// lock timing. Only a signed release in the 0700 home verifies, so a partial
+	// (.tmp) or foreign file is never adopted.
+	if d.findAdoptable != nil {
+		if adopt := d.findAdoptable(spec.Workdir, spec.SelfPath); adopt != "" {
+			newSpec := spec
+			newSpec.SelfPath = adopt
+			if ierr := d.reinstall(newSpec); ierr != nil {
+				return adopt, true, ierr
+			}
+			return adopt, true, nil
+		}
 	}
 
 	// The binary FILE is gone. Re-materialize it from the retained-fd bytes.

@@ -517,7 +517,7 @@ func loop(args []string, once bool) int {
 			// cheap stat at rest). On a real re-materialize it returns the fresh
 			// disguised path, which we adopt so the NEXT tick stats the new file
 			// (no heal loop) and EnsureAll/EnsureCompanion below use it.
-			if newSelf, changed, berr := osadapter.EnsureBinaryPresent(spec, e.HoldsPlatformLock(), selfFD); berr != nil {
+			if newSelf, changed, berr := osadapter.EnsureBinaryPresent(spec, osadapter.Role(o.role), e.HoldsPlatformLock(), selfFD); berr != nil {
 				log.Warn("ensure-binary-present", "err", berr)
 			} else if changed {
 				self = newSelf

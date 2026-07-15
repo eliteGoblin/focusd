@@ -82,3 +82,35 @@ func ArgvFromEnv() []string {
 func isFocusdMeshWorkerPlist(env map[string]string, argv []string) bool {
 	return strings.HasPrefix(env[MeshEnvKey], meshEnvRunPrefix) || hasMeshFlag(argv)
 }
+
+// hasEnsureArgv reports whether a parsed argv carries the ensurer subcommand
+// ("ensure") — the OLD-plist / test-mode ensurer marker (a PROD ensurer carries
+// it in env as MeshEnvKey="ensure" instead). Used ONLY by isFocusdMeshOrEnsurePlist
+// for the DEAD-branch sweep; a worker argv never contains "ensure".
+func hasEnsureArgv(argv []string) bool {
+	for _, a := range argv {
+		if a == string(RoleEnsure) { // "ensure"
+			return true
+		}
+	}
+	return false
+}
+
+// isFocusdMeshOrEnsurePlist is the DEAD-branch corroboration predicate for
+// DiscoverAllGenerations (issue #102-c). Unlike the strict worker-only
+// isFocusdMeshWorkerPlist used on the LIVE branch, it ALSO matches the ENSURER —
+// because a dead generation left as ONLY its ensurer plist (its workers already
+// swept, its binary gone) would otherwise be dropped and stay launchd-active with
+// a missing binary. It matches any focusd mesh env value a/b/ensure
+// (decodeMeshEnv != nil, the NEW-plist marker) OR the legacy --mesh argv (OLD
+// workers) OR the "ensure" argv (OLD/test ensurer).
+//
+// SAFETY: this is used ONLY where the binary is ALREADY proven missing
+// (fs.ErrNotExist) AND the plist is grouped by that focusd-specific dangling
+// path — MeshEnvKey ("APP_LAUNCH_CONTEXT") with value "ensure" is a focusd-invented
+// marker no vendor plist carries — so a third-party plist whose binary merely
+// happens to be absent is never treated as ours. The LIVE branch stays strict
+// worker-only (no regression: a live ensure-only "generation" is still excluded).
+func isFocusdMeshOrEnsurePlist(env map[string]string, argv []string) bool {
+	return decodeMeshEnv(env[MeshEnvKey]) != nil || hasMeshFlag(argv) || hasEnsureArgv(argv)
+}

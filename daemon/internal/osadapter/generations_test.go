@@ -205,10 +205,12 @@ func TestDiscoverAllGenerationsRecordsDeadBinary(t *testing.T) {
 	deadRoster := []string{"com.docker.helper.4", "us.zoom.ZoomDaemon.svc.5", "io.tailscale.ipnextension.relay.6"}
 	deadBin, deadWd := writeDeadGeneration(t, home, laDir, "dead", deadRoster, AllRoles...)
 
-	// A non-mesh DEAD plist: binary deleted, ONLY the ensure role (no marker)
-	// under a distinct dangling bin → must NOT be treated as ours.
+	// An ENSURE-ONLY DEAD orphan: binary deleted, ONLY the ensure plist left (its
+	// workers already swept). Issue #102-c: this MUST now be recognised as ours (a
+	// dead ensurer carries the focusd-specific APP_LAUNCH_CONTEXT="ensure" marker),
+	// so it is swept rather than stranded launchd-active with a missing binary.
 	ensRoster := []string{"com.vendor.x.7", "com.vendor.y.8", "com.vendor.z.9"}
-	writeDeadGeneration(t, home, laDir, "ensonly", ensRoster, RoleEnsure)
+	ensBin, _ := writeDeadGeneration(t, home, laDir, "ensonly", ensRoster, RoleEnsure)
 
 	// A vendor plist whose binary EXISTS but fails the signature.
 	vendorWd := filepath.Join(home, "Library", "Application Support", ".vendor")
@@ -237,19 +239,31 @@ func TestDiscoverAllGenerationsRecordsDeadBinary(t *testing.T) {
 	if len(gens) != 1 || gens[0].BinaryPath != liveBin {
 		t.Fatalf("want exactly the live generation, got %+v", gens)
 	}
-	// Exactly one dead generation: the full-mesh zombie (ensure-only + vendor excluded).
-	if len(dead) != 1 {
-		t.Fatalf("want exactly 1 dead generation, got %d: %+v", len(dead), dead)
+	// TWO dead generations now: the full-mesh zombie AND the ensure-only orphan
+	// (#102-c). The vendor plist (present binary, fails sig) is still excluded.
+	if len(dead) != 2 {
+		t.Fatalf("want exactly 2 dead generations (full-mesh + ensure-only), got %d: %+v", len(dead), dead)
 	}
-	d := dead[0]
-	if d.BinaryPath != deadBin {
-		t.Errorf("dead binary = %q, want %q", d.BinaryPath, deadBin)
+	byBin := map[string]DeadGeneration{}
+	for _, d := range dead {
+		byBin[d.BinaryPath] = d
 	}
-	if d.Workdir != deadWd {
-		t.Errorf("dead workdir = %q, want %q", d.Workdir, deadWd)
+	full, ok := byBin[deadBin]
+	if !ok {
+		t.Fatalf("full-mesh dead generation %q missing from %+v", deadBin, dead)
 	}
-	if len(d.Labels) != 3 || len(d.PlistPaths) != 3 {
-		t.Errorf("dead generation: want 3 labels/plists (incl. swept-in ensure), got %d/%d", len(d.Labels), len(d.PlistPaths))
+	if full.Workdir != deadWd {
+		t.Errorf("dead workdir = %q, want %q", full.Workdir, deadWd)
+	}
+	if len(full.Labels) != 3 || len(full.PlistPaths) != 3 {
+		t.Errorf("full-mesh dead generation: want 3 labels/plists (incl. swept-in ensure), got %d/%d", len(full.Labels), len(full.PlistPaths))
+	}
+	ens, ok := byBin[ensBin]
+	if !ok {
+		t.Fatalf("ensure-only dead orphan %q must now be recognised (#102-c), got %+v", ensBin, dead)
+	}
+	if len(ens.Labels) != 1 {
+		t.Errorf("ensure-only dead orphan: want 1 label, got %d", len(ens.Labels))
 	}
 }
 

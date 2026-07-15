@@ -8,6 +8,7 @@ import (
 	"io"
 	"io/fs"
 	"os"
+	"path/filepath"
 
 	"github.com/eliteGoblin/focusd/daemon/internal/mode"
 	"github.com/eliteGoblin/focusd/daemon/internal/relocate"
@@ -26,7 +27,14 @@ import (
 // remains the backstop. holdsLock is the caller's platform-singleton-lock state
 // (Executor.HoldsPlatformLock) — only the lock holder re-materializes, so mesh
 // roles A and B never both place.
-func EnsureBinaryPresent(spec Spec, holdsLock bool, retained *os.File) (newSelf string, changed bool, err error) {
+//
+// selfRole is the CALLER's own mesh role (issue #102): the reinstall repoints the
+// mesh via reinstallExceptSelf, which reloads every label EXCEPT the caller's own
+// (booting self out last, no bootstrap) — so no process ever bootstraps its own
+// executing label mid-install and SIGTERMs itself (the 102-a fault). The next
+// reconcile's EnsureAll re-bootstraps self onto the new binary. The self label is
+// derived from selfRole against the (roster-stable) spec.
+func EnsureBinaryPresent(spec Spec, selfRole Role, holdsLock bool, retained *os.File) (newSelf string, changed bool, err error) {
 	// Cheap no-op gates hoisted from the core so a non-participant skips the home
 	// resolution + fd work below (and never logs a spurious home error every tick).
 	// The core re-checks both, so its unit-tested guards remain authoritative.
@@ -48,16 +56,50 @@ func EnsureBinaryPresent(spec Spec, holdsLock bool, retained *os.File) (newSelf 
 		verify:        verifySignedBytes,
 		randName:      relocate.RandomBinaryName,
 		place:         binPlacerFS{}.place,
+		findAdoptable: findAdoptableBinary,
 		reinstall: func(ns Spec) error {
 			var rs rosterIO
 			if ns.Workdir != "" {
 				rs = newWorkdirRoster(ns.Workdir)
 			}
-			return installAll(ns, launchctlCtl{m: ns.Mode}, laFS{m: ns.Mode}, rs)
+			// Repoint via reinstallExceptSelf: reload every label EXCEPT the
+			// caller's own, boot self out last (no self-bootstrap) — the next
+			// EnsureAll re-bootstraps self onto the new binary. The self label is
+			// stable across the path rotation (the roster is unchanged), so
+			// ns.Label(selfRole) == spec.Label(selfRole).
+			return reinstallExceptSelf(ns, launchctlCtl{m: ns.Mode}, laFS{m: ns.Mode}, rs, ns.Label(selfRole))
 		},
 		supportRoot: mode.SupportRoot(spec.Mode, home),
 	}
 	return ensureBinaryPresent(d, spec, holdsLock)
+}
+
+// findAdoptableBinary scans the IMMEDIATE children of workdir for a regular file
+// (other than excludePath) whose bytes pass Ed25519 verification — an already-
+// placed, signed daemon binary a sibling re-materialized (issue #102-b). Returns
+// its path or "". A partial `.tmp` from an in-flight place, or any foreign file,
+// fails verification and is never adopted; only a signed release verifies.
+func findAdoptableBinary(workdir, excludePath string) string {
+	if workdir == "" {
+		return ""
+	}
+	entries, err := os.ReadDir(workdir)
+	if err != nil {
+		return ""
+	}
+	for _, e := range entries {
+		if e.IsDir() {
+			continue
+		}
+		p := filepath.Join(workdir, e.Name())
+		if p == excludePath {
+			continue
+		}
+		if ok, verr := sig.VerifyFile(p); verr == nil && ok {
+			return p
+		}
+	}
+	return ""
 }
 
 // verifySignedBytes splits a signed-release image (program ++ 64-byte trailer)

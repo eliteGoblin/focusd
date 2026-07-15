@@ -287,16 +287,9 @@ func MeshStatus(m mode.Mode) (loaded, total int, found bool, err error) {
 	if ferr != nil {
 		return 0, 0, false, ferr
 	}
-	if len(cur.Labels) == 0 {
-		return 0, 0, false, nil
-	}
 	c := launchctlCtl{m: m}
-	for _, lbl := range cur.Labels {
-		if c.loaded(lbl) {
-			loaded++
-		}
-	}
-	return loaded, len(cur.Labels), true, nil
+	loaded, total, found = meshStatusCounts(cur, c.loaded)
+	return loaded, total, found, nil
 }
 
 // UninstallProd removes a disguised user/system install whose labels are
@@ -408,8 +401,13 @@ func DiscoverAllGenerations(m mode.Mode, verify Verifier) (live []Generation, de
 	var deadOrder []string // dead (deleted) binary paths in first-seen order
 	deadByBin := map[string]*genAccum{}
 	// accumulate groups one plist into the given bin-keyed map, mirroring the
-	// live and dead grouping so the corroboration logic is identical.
-	accumulate := func(into map[string]*genAccum, ord *[]string, bin, label, pp string, argv []string, env map[string]string) {
+	// live and dead grouping. corroborate is the predicate that decides whether a
+	// plist marks its group as a real focusd mesh generation — it DIFFERS by branch:
+	//   - LIVE: isFocusdMeshWorkerPlist (strict worker-only; an ensure-only live
+	//     "generation" is not a real mesh — preserved from FEATURE 17).
+	//   - DEAD: isFocusdMeshOrEnsurePlist (also matches the ensurer, so a dead
+	//     generation left as ONLY its ensurer plist is swept, not stranded — #102-c).
+	accumulate := func(into map[string]*genAccum, ord *[]string, bin, label, pp string, argv []string, env map[string]string, corroborate func(map[string]string, []string) bool) {
 		g := into[bin]
 		if g == nil {
 			g = &genAccum{binaryPath: bin, workdir: WorkdirFromBinary(bin)}
@@ -418,11 +416,7 @@ func DiscoverAllGenerations(m mode.Mode, verify Verifier) (live []Generation, de
 		}
 		g.labels = append(g.labels, label)
 		g.plistPaths = append(g.plistPaths, pp)
-		// FEATURE 19 union: a NEW plist corroborates via its env worker marker
-		// (MeshEnvKey="run:<role>"), an OLD plist via the legacy --mesh argv.
-		// The ensure role corroborates neither — an ensure-only generation is
-		// not a real mesh (preserved from FEATURE 17).
-		if isFocusdMeshWorkerPlist(env, argv) {
+		if corroborate(env, argv) {
 			g.meshSeen = true
 		}
 	}
@@ -438,17 +432,19 @@ func DiscoverAllGenerations(m mode.Mode, verify Verifier) (live []Generation, de
 		ok, verr := verify(bin)
 		switch {
 		case verr == nil && ok:
-			// Live generation: a present, Ed25519-verified binary.
-			accumulate(byBin, &order, bin, label, pp, argv, env)
+			// Live generation: a present, Ed25519-verified binary. STRICT
+			// worker-only corroboration (no regression: an ensure-only live
+			// generation is still not a real mesh).
+			accumulate(byBin, &order, bin, label, pp, argv, env, isFocusdMeshWorkerPlist)
 		case verr != nil && errors.Is(verr, fs.ErrNotExist):
 			// Dead generation: ProgramArguments[0] names a binary that no
 			// longer exists (its workdir was deleted by a recovery cycle). A
-			// file that is gone cannot be Ed25519-verified, so the mesh worker
-			// marker is the ONLY signal this orphan plist is ours — group +
-			// corroborate it exactly like a live generation, keyed by the
-			// (now-dangling) bin path so the sibling ensure plist (no marker)
-			// is swept in via the shared path.
-			accumulate(deadByBin, &deadOrder, bin, label, pp, argv, env)
+			// file that is gone cannot be Ed25519-verified, so a focusd-specific
+			// env/argv marker is the ONLY signal this orphan plist is ours.
+			// #102-c: corroborate with isFocusdMeshOrEnsurePlist (also the
+			// ensurer) so a dead generation left as ONLY its ensurer plist is
+			// swept instead of stranded launchd-active with a missing binary.
+			accumulate(deadByBin, &deadOrder, bin, label, pp, argv, env, isFocusdMeshOrEnsurePlist)
 		default:
 			// ok==false: a binary that EXISTS but fails the signature (a real
 			// vendor binary) → never ours. A non-ENOENT verify error (a present
