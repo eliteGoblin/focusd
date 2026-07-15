@@ -19,23 +19,28 @@ import (
 	"time"
 
 	"github.com/eliteGoblin/focusd/daemon/internal/companion"
-	"github.com/eliteGoblin/focusd/daemon/internal/mode"
 	"github.com/eliteGoblin/focusd/daemon/internal/sig"
 )
 
 func main() { os.Exit(run()) }
 
 func run() int {
-	m := mode.Resolve()
-	home, err := os.UserHomeDir()
+	// Issue #101: SELF-DERIVE the companion folder from our OWN binary path — NOT
+	// from $HOME or mode. All companion files are siblings of this binary under
+	// Dir.root, and Dir.root == filepath.Dir(os.Executable()) in both user and
+	// system installs (the daemon placed this binary under the mode-correct root).
+	// A system LaunchDaemon runs with NO $HOME, so the old os.UserHomeDir() call
+	// errored EVERY interval and returned BEFORE reaching recover() — leaving the
+	// sole out-of-band recovery rail permanently dead. We now refuse ONLY if we
+	// cannot resolve our own executable (which would make every sibling path
+	// wrong); mode/home no longer enter the picture.
+	exe, err := os.Executable()
 	if err != nil {
-		// No resolvable home → the companion folder path would be relative;
-		// refuse rather than touch the wrong place. launchd re-runs us next
-		// interval. PATH-FREE: print nothing identifying.
-		os.Stderr.WriteString("companion: cannot resolve home directory\n")
+		// PATH-FREE: never print identifying paths; launchd re-runs us next interval.
+		os.Stderr.WriteString("companion: cannot resolve own executable path\n")
 		return 1
 	}
-	dir := companion.For(m, home)
+	dir := companion.DirFromBinary(exe)
 	if rerr := recover(dir, time.Now(), sig.VerifyFile, execWatchdog); rerr != nil {
 		// PATH-FREE: never print the disguised companion/daemon paths a
 		// weak-moment self would need. Keep it abstract; launchd captures this
