@@ -14,6 +14,7 @@ func Gather(workdirOverride string, jsonMode bool) (Snapshot, PlatformDetail) {
 		Mode:                runtime.GOOS,
 		MeshUnknown:         true,
 		VersionsUnknown:     true,
+		GenerationsUnknown:  true,
 		PlatformUnavailable: true,
 	}, PlatformDetail{Available: false}
 }

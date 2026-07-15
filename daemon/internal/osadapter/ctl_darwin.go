@@ -527,6 +527,58 @@ func RetireOtherGenerations(m mode.Mode, keepBinaryPath, supportRoot string) (in
 		c.bootout, os.Remove, pkillBinary, killGenerationPlatform(supportRoot), os.RemoveAll), nil
 }
 
+// CountOtherGenerations is the READ-ONLY counterpart of RetireOtherGenerations
+// (FEATURE 17 generation cleanliness / `daemon status`): it reuses the SAME
+// DiscoverAllGenerations scan but retires NOTHING, returning only how many
+// OTHER focusd generations exist besides the one rooted at keepBinaryPath. It is
+// the sanctioned way for status to answer the owner's "new version starts clean,
+// no dup / no old version" acceptance signal without enumerating processes.
+//
+// An "other" generation is either a LIVE generation whose Ed25519-verified
+// binary path differs from keepBinaryPath, or ANY dead/zombie generation (a
+// workdir-delete/recovery leftover whose plists + orphan processes persist). A
+// clean install returns 0 — the only generation present IS the keep.
+//
+// keepBinaryPath is the current good install's binary path (FindCurrentInstall's
+// FEATURE 14 correlation key); it MUST be non-empty — with no keep to compare
+// against, every discovered generation would count as "other", so an empty
+// keepBinaryPath is a caller bug and returns an error (status buckets it to
+// "unknown" rather than falsely counting the live generation as an orphan).
+//
+// Returns a COUNT ONLY — never the disguised labels/paths — so a caller like
+// `daemon status` physically cannot leak a teardown string. A filesystem
+// failure at the scan is surfaced as err so status buckets it to "unknown"
+// rather than ever fabricating a "clean" 0.
+func CountOtherGenerations(m mode.Mode, keepBinaryPath string) (others int, err error) {
+	if keepBinaryPath == "" {
+		return 0, fmt.Errorf("count generations: keepBinaryPath must not be empty")
+	}
+	live, dead, derr := DiscoverAllGenerations(m, sig.VerifyFile)
+	if derr != nil {
+		return 0, derr
+	}
+	return countOtherGenerations(live, dead, keepBinaryPath), nil
+}
+
+// countOtherGenerations is the pure core of CountOtherGenerations, split out so
+// the count logic is unit-tested with plain slices (no real launchd / FS scan),
+// mirroring how retireGenerations is the seam-injected core of
+// RetireOtherGenerations. An "other" generation is a live generation whose
+// binary path differs from keepBinaryPath, PLUS every dead generation (its
+// deleted binary can never equal the surviving keep). Paths are Clean'd before
+// comparison so a trailing-slash / non-canonical keep never mis-counts the keep
+// itself as an orphan.
+func countOtherGenerations(live []Generation, dead []DeadGeneration, keepBinaryPath string) int {
+	keep := filepath.Clean(keepBinaryPath)
+	others := 0
+	for _, g := range live {
+		if filepath.Clean(g.BinaryPath) != keep {
+			others++
+		}
+	}
+	return others + len(dead)
+}
+
 // SweepOrphanWorkdirs deletes daemon-home workdirs that survive on disk with NO
 // loaded plist or running process backing them — the residual a teardown /
 // recovery / re-install cycle leaves behind (FEATURE 17 follow-up, TC-21).

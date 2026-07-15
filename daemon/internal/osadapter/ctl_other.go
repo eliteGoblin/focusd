@@ -60,6 +60,11 @@ func DiscoverAllGenerations(mode.Mode, Verifier) ([]Generation, []DeadGeneration
 // to do" rather than surfacing ErrUnsupported on every install.
 func RetireOtherGenerations(mode.Mode, string, string) (int, error) { return 0, nil }
 
+// CountOtherGenerations is unsupported on non-darwin (no launchd mesh to scan).
+// It returns ErrUnsupported so `daemon status` buckets generation cleanliness to
+// "unknown" (never a fabricated "clean" 0) off-platform.
+func CountOtherGenerations(mode.Mode, string) (int, error) { return 0, ErrUnsupported }
+
 // SweepOrphanWorkdirs is a no-op on non-darwin (no launchd mesh / generation
 // workdirs to sweep). Returns (0, nil) so the cross-platform install path treats
 // it as "nothing to do" rather than surfacing ErrUnsupported on every install.

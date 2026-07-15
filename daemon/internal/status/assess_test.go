@@ -1,6 +1,9 @@
 package status
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 func TestAssess_Verdicts(t *testing.T) {
 	cases := []struct {
@@ -82,6 +85,96 @@ func TestAssess_Verdicts(t *testing.T) {
 				t.Fatalf("Assess(%+v) verdict = %s; want %s", c.in, got, c.want)
 			}
 		})
+	}
+}
+
+// TestAssess_GenerationCleanliness pins the generation-cleanliness verdict: a
+// clean install (0 orphaned prior generations) keeps its current verdict; a
+// KNOWN orphan (>0) reads DEGRADED (the "new version should start clean, no old
+// version" anomaly); an UNKNOWN generation read folds to UNKNOWN, never up to
+// DEGRADED; and a live orphan never overrides a hard DOWN or a warming-up state.
+func TestAssess_GenerationCleanliness(t *testing.T) {
+	healthy := Snapshot{Found: true, MeshLoaded: 3, MeshTotal: 3, ProcCount: 1, Desired: "v1", Good: "v1"}
+	cases := []struct {
+		name string
+		in   Snapshot
+		want Verdict
+	}{
+		{
+			name: "zero orphans (known) leaves the healthy verdict unchanged",
+			in:   healthy, // OtherGenerations=0, GenerationsUnknown=false
+			want: Healthy,
+		},
+		{
+			name: "one orphaned prior generation is DEGRADED",
+			in:   withGen(healthy, 1, false),
+			want: Degraded,
+		},
+		{
+			name: "several orphaned prior generations is DEGRADED",
+			in:   withGen(healthy, 3, false),
+			want: Degraded,
+		},
+		{
+			name: "generation count UNKNOWN folds to UNKNOWN, not DEGRADED",
+			in:   withGen(healthy, 0, true),
+			want: Unknown,
+		},
+		{
+			name: "unknown must never upgrade a positive-looking count to DEGRADED",
+			in:   withGen(healthy, 3, true), // contradictory count while unknown → ignored
+			want: Unknown,
+		},
+		{
+			name: "an orphan never overrides a hard DOWN (process gone)",
+			in: withGen(Snapshot{Found: true, MeshLoaded: 3, MeshTotal: 3,
+				Good: "v1", Desired: "v1", ProcCount: 0}, 2, false),
+			want: Down,
+		},
+		{
+			name: "an orphan never overrides a genuine mesh-down",
+			in: withGen(Snapshot{Found: true, MeshLoaded: 0, MeshTotal: 3,
+				Good: "v1", Desired: "v1", ProcCount: 1}, 2, false),
+			want: Down,
+		},
+		{
+			name: "an orphan never overrides warming-up (stays HEALTHY)",
+			in: withGen(Snapshot{Found: true, MeshLoaded: 3, MeshTotal: 3,
+				WarmingUp: true, Good: "", ProcCount: 0}, 2, false),
+			want: Healthy,
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := Assess(c.in).Verdict; got != c.want {
+				t.Fatalf("Assess(%+v) verdict = %s; want %s", c.in, got, c.want)
+			}
+		})
+	}
+}
+
+// withGen returns a copy of s with the generation-cleanliness fields set —
+// keeping the immutable-copy convention (never mutate the shared base).
+func withGen(s Snapshot, others int, unknown bool) Snapshot {
+	s.OtherGenerations = others
+	s.GenerationsUnknown = unknown
+	return s
+}
+
+// TestAssess_GenerationDegradedMessage pins the human-facing note for a live
+// orphaned generation — it names the count and the "should have been retired"
+// intent without any disguised path.
+func TestAssess_GenerationDegradedMessage(t *testing.T) {
+	in := withGen(Snapshot{Found: true, MeshLoaded: 3, MeshTotal: 3,
+		ProcCount: 1, Desired: "v1", Good: "v1"}, 2, false)
+	res := Assess(in)
+	if res.Verdict != Degraded {
+		t.Fatalf("verdict = %s; want Degraded", res.Verdict)
+	}
+	for _, want := range []string{"2", "orphaned prior-generation", "retired"} {
+		if !strings.Contains(res.Note, want) {
+			t.Errorf("note %q missing %q", res.Note, want)
+		}
 	}
 }
 
