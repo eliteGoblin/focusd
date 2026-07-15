@@ -108,12 +108,21 @@ func resolveWorkdir(flag string) string {
 // embedded signed default is the KISS interim.)
 func parseCommon(name string, honorConfigFlag bool, args []string) app.Options {
 	fs := flag.NewFlagSet(name, flag.ExitOnError)
-	cfg := fs.String("config", "", "config.yaml path (dev `validate` only; ignored on the run path)")
+	cfg := fs.String("config", "", "config.yaml path (dev `validate` only; rejected on the run path)")
 	db := fs.String("state-db", "", "state.db path (default: derived from the workdir)")
 	pdir := fs.String("plugin-dir", "", "plugin scan dir (default: <platform-binary-dir>/plugins)")
 	mode := fs.String("mode", "", "force run mode: user|system")
 	wd := fs.String("workdir", "", "daemon-managed workdir; derives state-db/plugin-dir (release builds always self-derive it from the binary location, ignoring this flag)")
 	_ = fs.Parse(args)
+	// Config-lock: --config is a dev-inspection flag honored ONLY by
+	// `platform validate`. On the daemon-managed run path the enforced policy
+	// is the signed embedded default, so an explicit --config cannot take
+	// effect. Rather than silently ignore it (which could mislead a dev into
+	// thinking a custom policy is active), reject it loudly.
+	if !honorConfigFlag && *cfg != "" {
+		fmt.Fprintln(os.Stderr, "--config is not honored on the run path (policy is the signed embedded default); use `platform validate --config` for dev inspection")
+		os.Exit(2)
+	}
 	// HF4 (FEATURE 24): resolve the workdir WITHOUT ever exposing it on argv or in
 	// the environment. In a RELEASE build workdirOverride() ignores both the
 	// --workdir flag and the WorkdirEnvKey env var (returns "") so the child
@@ -229,10 +238,12 @@ func runValidate(args []string) int {
 //
 // It is deliberately READ-ONLY and side-effect-free: unlike validate/run
 // it does NOT bootstrap the app (no plugin extraction, no dir creation, no
-// migrations, no path logging). Config is read via the override loader and
-// run history via a read-only DB open. If the DB can't be read (missing,
-// or a root-owned system DB queried without sudo) it degrades to "no runs
-// yet" rather than failing — so a user can always check status.
+// migrations, no path logging). The job list is read from the signed embedded
+// default (defaultconfig.Load — there is no on-disk override; a workdir
+// config.yaml is inert), and run history via a read-only DB open. If the DB
+// can't be read (missing, or a root-owned system DB queried without sudo) it
+// degrades to "no runs yet" rather than failing — so a user can always check
+// status.
 //
 // --json emits machine output; --no-color (or NO_COLOR) suppresses ANSI.
 func runStatus(args []string) int {
