@@ -3,9 +3,13 @@
 // is INERT — never read — so a weak-moment edit (disable a job, delete a
 // job, flip enabled:false) has no effect on enforcement.
 //
-// This exercises the exact wiring the run path uses: parseCommon loads
-// policy via defaultconfig.Load() (path-free) and hands it to app.Bootstrap
-// through opts.Config. The old override-merge behavior (workdir config.yaml
+// This exercises the exact policy MECHANISM the run path relies on — the
+// same two calls the CLI's parseCommon makes on the daemon-managed path:
+// load policy via defaultconfig.Load() (path-free) and hand it to
+// app.Bootstrap through opts.Config, with a config.yaml sitting in the
+// workdir to prove it is never read. (It calls Load()/Bootstrap directly
+// rather than through parseCommon, which only adds flag parsing + os.Exit
+// error paths.) The old override-merge behavior (workdir config.yaml
 // overlaid on the default) was removed as a tamper surface.
 package integration
 

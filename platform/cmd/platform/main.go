@@ -155,16 +155,23 @@ func parseCommon(name string, honorConfigFlag bool, args []string) app.Options {
 			fmt.Fprintln(os.Stderr, "bundle extract:", err)
 			os.Exit(1)
 		}
-		// Policy = the signed embedded default ONLY. Load it directly and
-		// hand it to Bootstrap via opts.Config (so Bootstrap skips its own
-		// path-based load). A malformed embedded default is a build defect
-		// → fail fast.
-		loaded, err := defaultconfig.Load()
-		if err != nil {
-			fmt.Fprintln(os.Stderr, "config:", err)
-			os.Exit(1)
+		// Policy = the signed embedded default. Load it directly and hand it
+		// to Bootstrap via opts.Config (so Bootstrap skips its own path-based
+		// load). The ONE exception is dev inspection: `platform validate
+		// --config <path>` (honorConfigFlag && an explicit path) must load
+		// THAT file, so we leave opts.Config nil and let Bootstrap read
+		// opts.ConfigPath. On the daemon-managed run path honorConfigFlag is
+		// false, so the embedded default is always injected — a workdir
+		// config.yaml can never be consulted. A malformed embedded default is
+		// a build defect → fail fast.
+		if !(honorConfigFlag && opts.ConfigPath != "") {
+			loaded, err := defaultconfig.Load()
+			if err != nil {
+				fmt.Fprintln(os.Stderr, "config:", err)
+				os.Exit(1)
+			}
+			opts.Config = loaded
 		}
-		opts.Config = loaded
 	}
 	return opts
 }
