@@ -1,6 +1,6 @@
 # ADR-0021 — Two coverage tiers: the enforced platform vs a utility/fallback tier
 
-- **Status:** accepted (2026-07-02) · shipped
+- **Status:** accepted (2026-07-02) · shipped · **AMENDED in part by [ADR-0022](0022-one-browser-codebase-both-tiers.md) on 2026-07-15.** The two-tier model (enforced vs utility/fallback) **stands**; what changes is that the fallback tier now has **two** instances and the **same** browser codebase spans **both** tiers depending on how it is launched — so the "Fold it into the `browser-monitor` plugin — Rejected" alternative below is reversed in part (the codebase was unified; the execution paths stay distinct). See ADR-0022.
 - **Feature:** [FEATURE 20](../features/20-mac-browser-guard.md) (mac-browser-guard — first instance of the fallback tier)
 - **Decided by:** Frank (product owner), BA review
 - **Relates to:** register §5 "Layered enforcement" (enforced tier vs utility/fallback

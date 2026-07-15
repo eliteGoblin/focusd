@@ -4,6 +4,18 @@
 - **Tier:** **utility / degraded fallback** — NOT the maintained enforcement path
 - **Location:** `utils/mac-browser-guard/` (`browser_guard.py` + README)
 
+> **Positioning update (2026-07-15 · ADR-0022 · FEATURE 27 "browser-monitor Both").**
+> This script is **no longer the fallback tier's only instance.** The browser
+> enforcement codebase was unified: the `browser-monitor` binary can now also run as
+> a **standalone user-mode self-daemon** (utility tier) for a **personal Mac that has
+> no enforced platform**. This script keeps a **narrower, specific home** — the *one*
+> environment a binary can't run at all: a **locked-down / app-allowlisting corporate
+> Mac** (unsigned binaries blocked, but the OS-native scripting runtime is still
+> permitted). All three browser positions — the enforced plugin, the standalone
+> self-daemon, and this script — now share **one blocklist as the single source of
+> truth** (this script's list is generated from it and drift-checked), so they can't
+> diverge. See ADR-0022. *(This script's own behaviour below is unchanged.)*
+
 ## What
 
 A standalone, single-file macOS utility that **quits any browser sitting on a
