@@ -230,3 +230,46 @@ func TestBootstrapExplicitPathsOverride(t *testing.T) {
 		t.Errorf("state db not created at explicit path: %v", err)
 	}
 }
+
+// TestBootstrapNoLogFileSuppressesDiskLog asserts Options.NoLogFile leaves the
+// logger stderr-only: nothing is opened under DefaultLogDir. The daemon-managed
+// run path sets NoLogFile because the daemon already tees the child's stdio into
+// the disguised workdir — the engine's own DefaultLogDir file is redundant AND
+// the sole `focusd`-literal on-disk footprint (FEATURE 24 / HF-disguise).
+func TestBootstrapNoLogFileSuppressesDiskLog(t *testing.T) {
+	fa := testutil.NewFakeAdapter(t.TempDir())
+	writeUserConfig(t, fa, sampleConfig)
+
+	a, err := Bootstrap(Options{Adapter: fa, NoLogFile: true})
+	if err != nil {
+		t.Fatalf("Bootstrap: %v", err)
+	}
+	defer a.Close()
+	// The logger must remain usable — it degrades to stderr-only, not nil.
+	a.Log.Info("still logs to stderr")
+
+	logDir, _ := fa.DefaultLogDir(osadapter.ModeUser)
+	if entries, err := os.ReadDir(logDir); err == nil && len(entries) > 0 {
+		t.Errorf("NoLogFile opened %d file(s) under DefaultLogDir %s; want none", len(entries), logDir)
+	}
+}
+
+// TestBootstrapDefaultOpensDiskLog is the control: a direct-run Bootstrap (no
+// NoLogFile) keeps its DefaultLogDir file for dev ergonomics, so the suppression
+// test above is proving a real difference rather than a vacuous truth.
+func TestBootstrapDefaultOpensDiskLog(t *testing.T) {
+	fa := testutil.NewFakeAdapter(t.TempDir())
+	writeUserConfig(t, fa, sampleConfig)
+
+	a, err := Bootstrap(Options{Adapter: fa})
+	if err != nil {
+		t.Fatalf("Bootstrap: %v", err)
+	}
+	defer a.Close()
+
+	logDir, _ := fa.DefaultLogDir(osadapter.ModeUser)
+	entries, rerr := os.ReadDir(logDir)
+	if rerr != nil || len(entries) == 0 {
+		t.Errorf("default Bootstrap opened no log file under %s (entries=%d err=%v); want one", logDir, len(entries), rerr)
+	}
+}

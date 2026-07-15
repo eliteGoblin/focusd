@@ -156,6 +156,14 @@ func parseCommon(name string, honorConfigFlag bool, args []string) app.Options {
 	// SIGNED embedded default — the workdir's config.yaml is NOT consulted
 	// (it was a tamper surface and has been removed).
 	if *wd != "" {
+		// Daemon-managed run: the daemon already tees the child's stdout+stderr
+		// into the disguised workdir's svc.log, so the engine's own DefaultLogDir
+		// file (<supportRoot>/focusd/logs/svc.log) is redundant AND the sole
+		// `focusd`-literal on-disk footprint. Suppress it (FEATURE 24 /
+		// HF-disguise); the logger degrades to stderr-only, which the daemon
+		// captures. Direct-run (`platform validate/run` without --workdir) keeps
+		// DefaultLogDir for dev ergonomics.
+		opts.NoLogFile = true
 		if opts.StateDBPath == "" {
 			opts.StateDBPath = filepath.Join(*wd, "state.db")
 		}
