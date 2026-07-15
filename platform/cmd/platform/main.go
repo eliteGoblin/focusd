@@ -75,8 +75,8 @@ func usage() {
 usage:
   platform version
   platform validate [--config PATH] [--state-db PATH] [--plugin-dir DIR] [--mode user|system]
-  platform status   [--workdir DIR] [--config PATH] [--state-db PATH] [--mode user|system] [--json] [--no-color]
-  platform run      [--config PATH] [--state-db PATH] [--plugin-dir DIR] [--mode user|system]
+  platform status   [--workdir DIR] [--state-db PATH] [--mode user|system] [--json] [--no-color]
+  platform run      [--workdir DIR] [--state-db PATH] [--plugin-dir DIR] [--mode user|system]
 `)
 }
 
@@ -97,13 +97,22 @@ func resolveWorkdir(flag string) string {
 	return wd
 }
 
-func parseCommon(name string, args []string) app.Options {
+// parseCommon builds app.Options from the shared run/validate flags.
+//
+// honorConfigFlag gates the dev-only --config path: TRUE only for
+// `platform validate`, where a developer points --config at a config file
+// to inspect. On the daemon-managed run path it is FALSE — the enforced
+// policy is the SIGNED embedded default and nothing else. A config.yaml
+// dropped into the workdir is inert (never read), so a weak-moment edit
+// cannot loosen enforcement. (config→server is the future direction; the
+// embedded signed default is the KISS interim.)
+func parseCommon(name string, honorConfigFlag bool, args []string) app.Options {
 	fs := flag.NewFlagSet(name, flag.ExitOnError)
-	cfg := fs.String("config", "", "config.yaml path (default: <workdir>/config.yaml or OS layout)")
+	cfg := fs.String("config", "", "config.yaml path (dev `validate` only; ignored on the run path)")
 	db := fs.String("state-db", "", "state.db path (default: <workdir>/state.db or OS layout)")
 	pdir := fs.String("plugin-dir", "", "plugin scan dir (default: <platform-binary-dir>/plugins or OS layout)")
 	mode := fs.String("mode", "", "force run mode: user|system")
-	wd := fs.String("workdir", "", "daemon-managed workdir; derives config/state-db (default: empty = use OS layout)")
+	wd := fs.String("workdir", "", "daemon-managed workdir; derives state-db/plugin-dir (default: empty = use OS layout)")
 	_ = fs.Parse(args)
 	// HF4 (FEATURE 24): resolve the workdir WITHOUT ever exposing it on argv or in
 	// the environment. In a RELEASE build workdirOverride() ignores both the
@@ -115,21 +124,19 @@ func parseCommon(name string, args []string) app.Options {
 	// the wrong state dir (protection off).
 	*wd = resolveWorkdir(*wd)
 	opts := app.Options{
-		ConfigPath:  *cfg,
 		StateDBPath: *db,
 		PluginDir:   *pdir,
 		ForceMode:   osadapter.RunMode(*mode),
 	}
-	// --workdir is a convenience for the daemon-managed lifecycle: paths
-	// not explicitly set get derived from it, and the bundled plugins
-	// are extracted on disk. Config is loaded via the override-merge
-	// loader (embedded defaults + optional on-disk override) so new
-	// platform releases bring their own defaults without needing to
-	// overwrite the user's override.
+	if honorConfigFlag {
+		opts.ConfigPath = *cfg
+	}
+	// --workdir is a convenience for the daemon-managed lifecycle: state-db
+	// and the plugin dir not explicitly set get derived from it, and the
+	// bundled plugins are extracted on disk. The enforced policy is the
+	// SIGNED embedded default — the workdir's config.yaml is NOT consulted
+	// (it was a tamper surface and has been removed).
 	if *wd != "" {
-		if opts.ConfigPath == "" {
-			opts.ConfigPath = filepath.Join(*wd, "config.yaml")
-		}
 		if opts.StateDBPath == "" {
 			opts.StateDBPath = filepath.Join(*wd, "state.db")
 		}
@@ -148,20 +155,16 @@ func parseCommon(name string, args []string) app.Options {
 			fmt.Fprintln(os.Stderr, "bundle extract:", err)
 			os.Exit(1)
 		}
-		// Load embedded default merged with the optional override file.
-		// Pass through opts.Config so app.Bootstrap skips its own
-		// path-based load. A malformed override surfaces fail-fast here.
-		// Warnings (e.g. plugin-id typos in the override) print to
-		// stderr — visible without crashing.
-		cfg, warnings, err := defaultconfig.LoadWithOverrides(opts.ConfigPath)
+		// Policy = the signed embedded default ONLY. Load it directly and
+		// hand it to Bootstrap via opts.Config (so Bootstrap skips its own
+		// path-based load). A malformed embedded default is a build defect
+		// → fail fast.
+		loaded, err := defaultconfig.Load()
 		if err != nil {
 			fmt.Fprintln(os.Stderr, "config:", err)
 			os.Exit(1)
 		}
-		for _, w := range warnings {
-			fmt.Fprintln(os.Stderr, "config warning:", w)
-		}
-		opts.Config = cfg
+		opts.Config = loaded
 	}
 	return opts
 }
@@ -180,7 +183,7 @@ func defaultPluginDir(workdir string) string {
 }
 
 func runValidate(args []string) int {
-	a, err := app.Bootstrap(parseCommon("validate", args))
+	a, err := app.Bootstrap(parseCommon("validate", true, args))
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "validate failed:", err)
 		return 1
@@ -227,9 +230,8 @@ func runValidate(args []string) int {
 // --json emits machine output; --no-color (or NO_COLOR) suppresses ANSI.
 func runStatus(args []string) int {
 	fs := flag.NewFlagSet("status", flag.ContinueOnError)
-	cfgFlag := fs.String("config", "", "config.yaml path")
 	dbFlag := fs.String("state-db", "", "state.db path")
-	wd := fs.String("workdir", "", "daemon-managed workdir; derives config/state-db paths")
+	wd := fs.String("workdir", "", "daemon-managed workdir; derives state-db path")
 	modeFlag := fs.String("mode", "", "force run mode: user|system")
 	jsonOut := fs.Bool("json", false, "emit machine-readable JSON")
 	noColor := fs.Bool("no-color", false, "suppress ANSI colour")
@@ -245,22 +247,21 @@ func runStatus(args []string) int {
 
 	// HF4 (FEATURE 24): resolve the workdir off the binary's own location (release)
 	// or the caller override (e2e) — never from an env var, so `status` leaks no
-	// workdir. config/state-db derive from it unless explicitly overridden.
-	configPath, dbPath := *cfgFlag, *dbFlag
+	// workdir. state-db derives from it unless explicitly overridden. There is no
+	// config path to derive — the workdir config.yaml is inert (never read); the
+	// job list comes from the signed embedded default below.
+	dbPath := *dbFlag
 	statusWd := resolveWorkdir(*wd)
-	if configPath == "" {
-		configPath = filepath.Join(statusWd, "config.yaml")
-	}
 	if dbPath == "" {
 		dbPath = filepath.Join(statusWd, "state.db")
 	}
 
-	// Config (embedded defaults merged with the optional on-disk override)
-	// tells us the job list. This read is harmless and never writes.
-	cfg, _, err := defaultconfig.LoadWithOverrides(configPath)
+	// The job list comes from the SIGNED embedded default — the exact policy
+	// the running platform enforces. There is no on-disk override to read (a
+	// workdir config.yaml is inert), so status can never disagree with the
+	// enforced set. This read is harmless and never writes.
+	cfg, err := defaultconfig.Load()
 	if err != nil {
-		// REDACTION: LoadWithOverrides error strings embed the override path
-		// (the disguised workdir). Emit a generic message — never the err.
 		fmt.Fprintln(os.Stderr, "status: cannot read configuration")
 		return 1
 	}
@@ -339,7 +340,7 @@ func runStatus(args []string) int {
 }
 
 func runRun(args []string) int {
-	a, err := app.Bootstrap(parseCommon("run", args))
+	a, err := app.Bootstrap(parseCommon("run", false, args))
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "run failed:", err)
 		return 1

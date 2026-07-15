@@ -43,8 +43,8 @@ type Options struct {
 	Adapter osadapter.Adapter
 	// Config, if non-nil, is the pre-loaded Config the caller wants
 	// Bootstrap to use directly. This is the path the platform CLI
-	// uses to inject the result of defaultconfig.LoadWithOverrides
-	// (embedded default + optional on-disk override merged). When set,
+	// uses to inject the result of defaultconfig.Load (the signed
+	// embedded default; the workdir config.yaml is inert). When set,
 	// ConfigPath is ignored for the config load step.
 	Config *config.Config
 	// ConfigPath overrides the config file path. "" => adapter default.
@@ -99,9 +99,9 @@ func Bootstrap(opts Options) (*App, error) {
 	}
 
 	// Config resolution: prefer the pre-loaded one the CLI handed us
-	// (the result of defaultconfig.LoadWithOverrides — embedded
-	// defaults merged with optional override file). Fall back to a
-	// path-based load if no pre-loaded Config was provided.
+	// (the result of defaultconfig.Load — the signed embedded default;
+	// the workdir config.yaml is inert). Fall back to a path-based load
+	// if no pre-loaded Config was provided.
 	var (
 		cfg     *config.Config
 		cfgPath string // for the bootstrapped log line only

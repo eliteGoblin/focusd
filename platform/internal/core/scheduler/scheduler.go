@@ -114,11 +114,12 @@ func CanDispatch(runAs string, mode osadapter.RunMode) bool {
 func (s *Scheduler) Register(jobs []config.Job, plugins map[string]plugin.Discovered) (int, error) {
 	registered := 0
 	for _, j := range jobs {
-		// A disabled job is not scheduled. TIGHTEN-ONLY guarantee ("no inside
+		// A disabled job is not scheduled. CONFIG-LOCK guarantee ("no inside
 		// door handle"): a baked-enabled protection can never REACH this loop
-		// as disabled via unsigned config — defaultconfig.Merge refuses an
-		// override that flips a baked-enabled job to enabled:false. So the only
-		// jobs disabled here are ones baked disabled or newly added disabled.
+		// as disabled via unsigned config — the daemon-managed run path reads
+		// ONLY the signed embedded default (defaultconfig.Load); a workdir
+		// config.yaml is inert (never read). So the only jobs disabled here are
+		// ones baked disabled in the signed default.
 		if !j.Enabled {
 			continue
 		}
