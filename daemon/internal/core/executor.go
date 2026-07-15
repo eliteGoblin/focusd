@@ -64,6 +64,12 @@ type Executor struct {
 	fetchRetryVersion string
 	// now is the clock seam (defaults to time.Now); tests inject a fake.
 	now func() time.Time
+	// lastStartAt is when this executor last (re)started the platform child.
+	// The proactive workdir-wipe heal (GAP 1) suppresses its integrity check
+	// for platformSettleWindow after a (re)start so the brief window before a
+	// freshly-started platform has written state.db is not misread as a wipe.
+	// Zero value (never started) leaves the check un-suppressed.
+	lastStartAt time.Time
 	// Fallback is the baked, compiled-in platform version adopted ONLY when
 	// the on-disk store has no desired version (FEATURE 17, recovery
 	// resilience). A wiped workdir (store gone) would otherwise leave Decide
@@ -106,6 +112,25 @@ const crashThreshold = 3 // consecutive fast exits ⇒ mark version bad
 // fetch retry only — it does NOT change the mesh worker-heal cadence.
 const fetchRetryCooldown = 30 * time.Second
 
+// platformSettleWindow is how long after WE (re)start the platform the
+// proactive workdir-integrity check (GAP 1) is suppressed. A freshly-started
+// platform writes state.db within milliseconds, but until it does the workdir
+// briefly looks "wiped"; suppressing the check for this window avoids a
+// restart loop on a healthy just-started platform. It does NOT delay the FIRST
+// heal — a wipe hits an ESTABLISHED platform (started long ago), so the window
+// is already past.
+//
+// It is deliberately >= the default crash "unhealthy" window
+// (platformsvc.ProcSvc.Unhealthy, 3s): a heal-triggered Stop is always followed
+// by a same-tick Start, so the exited state never survives to the next tick's
+// crash check — but keeping the settle window at least as long as the unhealthy
+// window means a genuinely-failing restart is caught by crash-loop detection
+// (MarkBad), not by an endless re-heal. A real platform that starts but cannot
+// write state.db exits (platform refuses a partial start) → RunningVersion=="" →
+// the `running != ""` heal guard yields to crash detection, so heal churn can
+// never itself MarkBad the only version.
+const platformSettleWindow = 5 * time.Second
+
 // nowOrDefault returns the executor clock (time.Now unless a test injected
 // a fake), tolerating zero-valued executors built without NewExecutor.
 func (e *Executor) nowOrDefault() time.Time {
@@ -113,6 +138,17 @@ func (e *Executor) nowOrDefault() time.Time {
 		return e.now()
 	}
 	return time.Now()
+}
+
+// workdirWiped reports whether the shared workdir is gone/broken AND we are
+// past the post-start settle window — so a just-(re)started platform that has
+// not yet written state.db is not misdetected as a wipe (which would loop the
+// restart). See platformSettleWindow.
+func (e *Executor) workdirWiped() bool {
+	if !e.lastStartAt.IsZero() && e.nowOrDefault().Sub(e.lastStartAt) < platformSettleWindow {
+		return false
+	}
+	return !e.Store.WorkdirIntact()
 }
 
 // Tick performs exactly one reconcile step. Returns the Action taken.
@@ -141,6 +177,30 @@ func (e *Executor) Tick(ctx context.Context) (Action, error) {
 		case e.Plat.HealthyFor(cv):
 			e.crashHit[cv] = 0
 		}
+	}
+
+	// GAP 1 (v0.18.0 live): proactive workdir-wipe heal. A platform whose
+	// shared workdir was wiped (rm -rf) keeps running off the now-unlinked
+	// inode — RunningVersion() still reports it alive, so Decide returns Steady
+	// and the wipe goes UNHEALED and UNLOGGED until the platform eventually
+	// crashes on its own (~minutes, blind). Detect the broken workdir here and
+	// force a restart+rebuild THIS tick: Stop the limping platform so the
+	// EnsureRunning path below recreates the workdir (WriteDesired's MkdirAll +
+	// the baked Fallback) and the fresh platform re-initialises state.db. Only
+	// the daemon that owns the live platform child acts — a standby observes
+	// running=="" (its ProcSvc has no child) — so no two daemons can fight over
+	// the restart.
+	if running != "" && e.workdirWiped() {
+		e.logf("workdir wiped/broken while platform %s claims running → restart+rebuild", running)
+		// Stop the limping platform BEFORE starting a fresh one. If the stop
+		// fails we must NOT proceed to Start a second platform on the same
+		// workdir — two platforms would corrupt state.db and double-apply
+		// enforcement. Surface the error and retry next tick (matching apply's
+		// step-3 convention, which also treats a failed Stop as fatal).
+		if serr := e.Plat.Stop(); serr != nil {
+			return Action{}, fmt.Errorf("stop wiped-workdir platform %s: %w", running, serr)
+		}
+		running = ""
 	}
 
 	desired := e.Store.Desired()
@@ -277,6 +337,7 @@ func (e *Executor) apply(ctx context.Context, a Action) error {
 			if prevRunning != "" && prevRunning != v && e.Store.HaveBin(prevRunning) {
 				if rbErr := e.Plat.Start(e.Store.BinPath(prevRunning), prevRunning); rbErr == nil {
 					e.lastTarget = prevRunning
+					e.lastStartAt = e.nowOrDefault() // rollback (re)started the platform
 					if e.Log != nil {
 						e.Log.Warn("start failed; rolled back to previously-running version",
 							"target", v, "rolled_back_to", prevRunning, "err", err)
@@ -291,6 +352,7 @@ func (e *Executor) apply(ctx context.Context, a Action) error {
 			}
 			return fmt.Errorf("start %s: %w", v, err)
 		}
+		e.lastStartAt = e.nowOrDefault() // platform (re)started successfully
 		e.logf("%s → running %s", a.Kind, v)
 		return nil
 

@@ -22,6 +22,17 @@ type Store struct{ Dir string }
 // this single source of truth rather than hardcoding the literal.
 const VersionFile = "version.json"
 
+// PlatformStateDBName is the platform engine's state-database basename inside
+// the SHARED workdir. The daemon starts the platform with `--workdir <dir>`;
+// the platform derives its state DB as `<dir>/state.db` (its cmd default). The
+// daemon treats the PRESENCE of this file as the marker that the workdir is
+// intact and the platform has initialised it — so its ABSENCE while a platform
+// process still claims to be running is the signature of a wiped workdir (the
+// platform limping off a now-unlinked inode). This is a workdir-layout contract
+// between daemon and platform, not plugin knowledge (the daemon stays
+// plugin-agnostic).
+const PlatformStateDBName = "state.db"
+
 // RosterFile is the basename of the masked mesh-label roster under the
 // workdir (FEATURE 10 / ADR-0014). It holds the three independent mesh
 // labels XOR-masked so a casual `cat` shows non-plaintext bytes; a
@@ -36,6 +47,24 @@ type versionConfig struct {
 func (s *Store) versionPath() string { return filepath.Join(s.Dir, VersionFile) }
 func (s *Store) goodPath() string    { return filepath.Join(s.Dir, "good") }
 func (s *Store) badDir() string      { return filepath.Join(s.Dir, "bad") }
+func (s *Store) stateDBPath() string { return filepath.Join(s.Dir, PlatformStateDBName) }
+
+// WorkdirIntact reports whether the shared workdir is present on disk AND
+// initialised: the workdir directory exists and the platform's state DB is
+// present inside it. A false result while a platform process still claims to be
+// running means the workdir was wiped (rm -rf) and the running platform is
+// limping off a now-unlinked inode — the reconcile loop uses this to trigger a
+// proactive restart+rebuild rather than wait (blind) for the platform to
+// eventually crash on its own.
+func (s *Store) WorkdirIntact() bool {
+	if fi, err := os.Stat(s.Dir); err != nil || !fi.IsDir() {
+		return false
+	}
+	if fi, err := os.Stat(s.stateDBPath()); err != nil || fi.IsDir() {
+		return false
+	}
+	return true
+}
 
 // RosterPath is the absolute path of the masked mesh-label roster file
 // under the workdir. Exported so the osadapter mesh layer can read/write

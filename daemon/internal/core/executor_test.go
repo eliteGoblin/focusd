@@ -1,11 +1,14 @@
 package core
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 )
@@ -107,6 +110,11 @@ func newExec(t *testing.T) (*Executor, *Store, *fakeFetch, *fakePlat) {
 	st := &Store{Dir: t.TempDir()}
 	f := &fakeFetch{}
 	p := &fakePlat{}
+	// Seed an intact workdir (state.db present) so the default reflects a
+	// genuinely-initialised install — a running platform (p.running set) is
+	// then not misread as a wiped workdir by the GAP-1 integrity check. Tests
+	// that exercise a wipe remove it explicitly.
+	writeStateDB(t, st)
 	// Default lock wins (ok=true) so existing tests behave exactly as before.
 	return NewExecutor(st, f, p, &fakeLock{acquireOK: true}, nil), st, f, p
 }
@@ -441,6 +449,8 @@ func TestExecutorFetchFailureDoesNotTouchRunningPlatform(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	writeStateDB(t, st) // intact workdir so v1 reads as genuinely running
+
 	wantErr := errors.New("simulated signature mismatch on v2")
 	f := &fakeFetch{ensureErr: map[string]error{"v2": wantErr}}
 	p := &fakePlat{running: "v1"}
@@ -486,6 +496,8 @@ func TestExecutorStartFailureRollsBackToPrevRunning(t *testing.T) {
 		}
 	}
 
+	writeStateDB(t, st) // intact workdir so v1 reads as genuinely running
+
 	startV2Err := errors.New("v2 start exec error")
 	f := &fakeFetch{}
 	p := &fakePlat{
@@ -528,6 +540,8 @@ func TestExecutorStartFailureRollbackAlsoFailsLeavesNothingRunning(t *testing.T)
 			t.Fatal(err)
 		}
 	}
+
+	writeStateDB(t, st) // intact workdir so v1 reads as genuinely running
 
 	startV2Err := errors.New("v2 start exec error")
 	startV1Err := errors.New("v1 rollback also failed")
@@ -673,5 +687,145 @@ func TestExecutorLockAcquireErrorPropagates(t *testing.T) {
 	}
 	if len(p.started) != 0 {
 		t.Fatalf("lock error ⇒ platform must not start, started=%v", p.started)
+	}
+}
+
+// writeStateDB creates the platform's state.db inside the shared workdir so
+// WorkdirIntact() reads the workdir as present + initialised (a real platform
+// writes this on start; the fake platform doesn't, so tests seed it).
+func writeStateDB(t *testing.T, st *Store) {
+	t.Helper()
+	if err := os.MkdirAll(st.Dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(st.Dir, PlatformStateDBName), []byte("db"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// GAP 1 (v0.18.0 live): a running platform whose shared workdir is wiped
+// (rm -rf) keeps running off the deleted inode, so RunningVersion() reports it
+// alive and the reconcile loop would otherwise sit Steady (blind) until the
+// platform crashes on its own. The daemon must PROACTIVELY detect the wiped
+// workdir, stop the limping platform, and restart+rebuild it — recreating the
+// workdir + a fresh state.db — within a bounded window, with a log line.
+func TestExecutorHealsWipedWorkdir(t *testing.T) {
+	st := &Store{Dir: t.TempDir()}
+	f := &fakeFetch{}
+	p := &fakePlat{}
+	var logbuf bytes.Buffer
+	log := slog.New(slog.NewTextHandler(&logbuf, &slog.HandlerOptions{Level: slog.LevelInfo}))
+	e := NewExecutor(st, f, p, &fakeLock{acquireOK: true}, log)
+	e.Fallback = "v1"
+
+	// Controllable clock so the settle window is exercised deterministically.
+	clk := time.Now()
+	e.now = func() time.Time { return clk }
+
+	// Establish a healthy, running platform on an intact workdir.
+	if err := st.WriteDesired("v1"); err != nil {
+		t.Fatal(err)
+	}
+	writeStateDB(t, st)
+	p.running = "v1"
+	p.healthyV = "v1"
+
+	// Tick 1: steady — workdir intact, nothing to heal.
+	if a, err := e.Tick(context.Background()); err != nil || a.Kind != Steady {
+		t.Fatalf("tick 1: want Steady, got %+v err=%v", a, err)
+	}
+	if p.stopped != 0 {
+		t.Fatalf("tick 1 must not stop a healthy platform, stopped=%d", p.stopped)
+	}
+
+	// Wipe the shared workdir out from under the running platform (rm -rf).
+	if err := os.RemoveAll(st.Dir); err != nil {
+		t.Fatal(err)
+	}
+
+	// Tick 2: detect the wiped workdir → stop the limping platform, recreate
+	// the workdir, and restart the platform fresh.
+	a, err := e.Tick(context.Background())
+	if err != nil {
+		t.Fatalf("tick 2: %v", err)
+	}
+	if p.stopped != 1 {
+		t.Fatalf("tick 2 must STOP the limping platform, stopped=%d", p.stopped)
+	}
+	if a.Kind != EnsureRunning || a.Target != "v1" {
+		t.Fatalf("tick 2: want EnsureRunning v1, got %+v", a)
+	}
+	if p.running != "v1" {
+		t.Fatalf("tick 2 must restart the platform, running=%q", p.running)
+	}
+	if st.Desired() != "v1" {
+		t.Fatalf("tick 2 must recreate the wiped workdir (re-pin desired), got %q", st.Desired())
+	}
+	if !strings.Contains(logbuf.String(), "workdir wiped") {
+		t.Fatalf("heal must emit a workdir-wiped log line, got:\n%s", logbuf.String())
+	}
+
+	// The fresh platform re-initialises state.db; advance past the settle
+	// window. The next tick must converge to Steady and NOT re-heal (no loop).
+	writeStateDB(t, st)
+	clk = clk.Add(platformSettleWindow + time.Second)
+	if a, err := e.Tick(context.Background()); err != nil || a.Kind != Steady {
+		t.Fatalf("tick 3: want Steady after heal, got %+v err=%v", a, err)
+	}
+	if p.stopped != 1 {
+		t.Fatalf("tick 3 must not re-stop a healed platform, stopped=%d", p.stopped)
+	}
+	// The heal's Stop+Start churn must never MarkBad the version it is trying
+	// to restore (crash detection keys off the platform's exited state, which
+	// the same-tick Start overwrites).
+	if st.BadSet()["v1"] {
+		t.Fatalf("heal churn must NOT mark the restored version bad")
+	}
+}
+
+// A standby daemon (one that lost the singleton lock and never started its own
+// platform child) observes running=="" from its OWN ProcSvc, so the GAP-1 heal
+// guard (`running != ""`) means it never stops/starts anything even when the
+// shared workdir is wiped — only the platform-owning daemon acts, so two
+// daemons can never fight over the restart.
+func TestExecutorStandbyNeverHealsWipedWorkdir(t *testing.T) {
+	st := &Store{Dir: t.TempDir()} // no state.db → workdir reads as broken
+	if err := st.WriteDesired("v1"); err != nil {
+		t.Fatal(err)
+	}
+	f := &fakeFetch{}
+	p := &fakePlat{running: ""} // standby: never started its own child
+	// Lock is held by the peer (acquireOK=false) so this executor yields.
+	e := NewExecutor(st, f, p, &fakeLock{acquireOK: false}, nil)
+	e.Fallback = "v1"
+
+	if _, err := e.Tick(context.Background()); err != nil {
+		t.Fatalf("standby tick: %v", err)
+	}
+	if p.stopped != 0 {
+		t.Fatalf("standby must NOT stop any platform, stopped=%d", p.stopped)
+	}
+	if len(p.started) != 0 {
+		t.Fatalf("standby must NOT start any platform (peer owns the lock), started=%v", p.started)
+	}
+}
+
+// The workdir-integrity check is SUPPRESSED for platformSettleWindow after WE
+// (re)start the platform — a freshly-started platform that has not yet written
+// state.db must not be misread as a wipe (which would loop the restart). Past
+// the window with state.db still absent, it reads as wiped.
+func TestExecutorWorkdirCheckSuppressedDuringSettle(t *testing.T) {
+	st := &Store{Dir: t.TempDir()} // dir exists, no state.db
+	e := NewExecutor(st, &fakeFetch{}, &fakePlat{}, &fakeLock{acquireOK: true}, nil)
+	clk := time.Now()
+	e.now = func() time.Time { return clk }
+	e.lastStartAt = clk // simulate: platform just (re)started
+
+	if e.workdirWiped() {
+		t.Fatalf("within settle window: workdir must NOT read as wiped")
+	}
+	clk = clk.Add(platformSettleWindow + time.Second)
+	if !e.workdirWiped() {
+		t.Fatalf("past settle window with no state.db: must read as wiped")
 	}
 }

@@ -1,6 +1,7 @@
 package core
 
 import (
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -68,6 +69,40 @@ func TestMarkBadRoundtripsSanitisedVersion(t *testing.T) {
 	}
 	if !s.BadSet()["v 1.0/beta"] {
 		t.Fatalf("bad lookup must match original version, got %v", s.BadSet())
+	}
+}
+
+// WorkdirIntact is the GAP-1 wipe detector: it requires BOTH the workdir dir
+// and the platform's state.db to be present. A missing dir (rm -rf) or a
+// missing/absent state.db reads as broken.
+func TestStoreWorkdirIntact(t *testing.T) {
+	// Missing workdir dir → not intact.
+	missing := &Store{Dir: filepath.Join(t.TempDir(), "gone")}
+	if missing.WorkdirIntact() {
+		t.Fatal("absent workdir must not read as intact")
+	}
+
+	// Dir present but no state.db → not intact.
+	s := &Store{Dir: t.TempDir()}
+	if s.WorkdirIntact() {
+		t.Fatal("workdir with no state.db must not read as intact")
+	}
+
+	// Dir + state.db present → intact.
+	if err := os.WriteFile(filepath.Join(s.Dir, PlatformStateDBName), []byte("db"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if !s.WorkdirIntact() {
+		t.Fatal("workdir with state.db present must read as intact")
+	}
+
+	// state.db as a directory (not a file) → not intact.
+	s2 := &Store{Dir: t.TempDir()}
+	if err := os.Mkdir(filepath.Join(s2.Dir, PlatformStateDBName), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if s2.WorkdirIntact() {
+		t.Fatal("state.db that is a directory must not read as intact")
 	}
 }
 
