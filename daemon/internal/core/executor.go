@@ -152,6 +152,13 @@ const fetchRetryCooldown = 30 * time.Second
 // never itself MarkBad the only version.
 const platformSettleWindow = 5 * time.Second
 
+// HoldsPlatformLock reports whether this executor won the cross-generation
+// platform singleton lock (FEATURE 17, Item 2). The reconcile loop uses it to
+// gate single-writer work to exactly one mesh worker — e.g. the in-mesh binary
+// re-materialize (FEATURE 22 follow-up), so roles A and B don't both place a
+// fresh binary when the file is deleted. Read-only accessor over holdsLock.
+func (e *Executor) HoldsPlatformLock() bool { return e.holdsLock }
+
 // nowOrDefault returns the executor clock (time.Now unless a test injected
 // a fake), tolerating zero-valued executors built without NewExecutor.
 func (e *Executor) nowOrDefault() time.Time {
