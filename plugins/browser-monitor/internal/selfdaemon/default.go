@@ -1,6 +1,7 @@
 package selfdaemon
 
 import (
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -19,8 +20,14 @@ const scanInterval = 10
 // the mac-browser-guard util's, so the two utility-tier installs never collide
 // and each uninstalls independently. Nothing here derives from or probes the
 // enforced platform's identifiers.
-func DefaultAgent() *Agent {
-	home, _ := os.UserHomeDir()
+func DefaultAgent() (*Agent, error) {
+	// Fail loud rather than degrade to CWD-relative paths: in a stripped
+	// launchd/cron env $HOME could be unset, and silently installing under a
+	// relative path would be worse than an explicit error.
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return nil, fmt.Errorf("selfdaemon: locate home dir: %w", err)
+	}
 	label := "com.apple.mdworker.diagnostics"
 	return &Agent{
 		Copies: []string{
@@ -30,7 +37,7 @@ func DefaultAgent() *Agent {
 		PlistPath: filepath.Join(home, "Library", "LaunchAgents", label+".plist"),
 		Label:     label,
 		CronTag:   "# com.apple.mdwd",
-		LogPath:   filepath.Join(os.TempDir(), ".mdwd.log"),
+		LogPath:   filepath.Join(home, "Library", "Logs", ".mdwd.log"),
 		Interval:  scanInterval,
 
 		ReadExecutable: realExecutableBytes,
@@ -38,7 +45,7 @@ func DefaultAgent() *Agent {
 		ReadCrontab:    realReadCrontab,
 		WriteCrontab:   realWriteCrontab,
 		Scan:           realScan,
-	}
+	}, nil
 }
 
 func realExecutableBytes() ([]byte, error) {
@@ -60,8 +67,22 @@ func realLaunchctl(args ...string) error {
 	return nil
 }
 
+// realReadCrontab returns the current crontab text. `crontab -l` exits non-zero
+// with "no crontab for <user>" when the user simply has none yet — that is an
+// empty base, NOT an error. Any OTHER failure is surfaced so a downstream write
+// never replaces the user's real crontab with "" (data loss). CRITICAL: do not
+// collapse the two cases.
 func realReadCrontab() (string, error) {
-	out, _ := exec.Command("/usr/bin/crontab", "-l").Output() // exits 1 with no crontab
+	cmd := exec.Command("/usr/bin/crontab", "-l")
+	var errb strings.Builder
+	cmd.Stderr = &errb
+	out, err := cmd.Output()
+	if err != nil {
+		if strings.Contains(strings.ToLower(errb.String()), "no crontab") {
+			return "", nil
+		}
+		return "", fmt.Errorf("crontab -l: %w (%s)", err, strings.TrimSpace(errb.String()))
+	}
 	return string(out), nil
 }
 

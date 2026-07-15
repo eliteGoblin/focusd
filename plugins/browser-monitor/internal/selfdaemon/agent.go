@@ -19,6 +19,7 @@
 package selfdaemon
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -55,11 +56,11 @@ func (a *Agent) Install() error {
 	}
 	for _, c := range a.Copies {
 		if err := writeFile(c, data, 0o755); err != nil {
-			return err
+			return fmt.Errorf("write copy %s: %w", c, err)
 		}
 	}
 	if err := writeFile(a.PlistPath, []byte(a.plistXML()), 0o644); err != nil {
-		return err
+		return fmt.Errorf("write plist %s: %w", a.PlistPath, err)
 	}
 	if err := a.Heal(); err != nil {
 		return err
@@ -80,20 +81,22 @@ func (a *Agent) Heal() error {
 	for _, c := range a.Copies {
 		if !fileExists(c) {
 			if err := writeFile(c, data, 0o755); err != nil {
-				return err
+				return fmt.Errorf("heal copy %s: %w", c, err)
 			}
 		}
 	}
 	if !fileExists(a.PlistPath) {
 		if err := writeFile(a.PlistPath, []byte(a.plistXML()), 0o644); err != nil {
-			return err
+			return fmt.Errorf("heal plist %s: %w", a.PlistPath, err)
 		}
 		_ = a.Launchctl("load", a.PlistPath)
 	}
-	cur, _ := a.ReadCrontab()
-	if !strings.Contains(cur, a.CronTag) {
-		if err := a.WriteCrontab(appendCron(cur, a.cronLine())); err != nil {
-			return err
+	// Only touch the crontab when we could READ it — writing "" back on a read
+	// error would wipe the user's unrelated cron jobs. The cron rail is a
+	// best-effort fallback, so a read failure just skips it this tick.
+	if cur, rerr := a.ReadCrontab(); rerr == nil && !strings.Contains(cur, a.CronTag) {
+		if werr := a.WriteCrontab(appendCron(cur, a.cronLine())); werr != nil {
+			return fmt.Errorf("heal crontab: %w", werr)
 		}
 	}
 	return nil
@@ -105,23 +108,32 @@ func (a *Agent) Heal() error {
 func (a *Agent) Uninstall() error {
 	_ = a.Launchctl("unload", a.PlistPath)
 	_ = a.Launchctl("remove", a.Label) // label-based; works even if the plist is gone
+
+	// Attempt EVERY removal even if one fails, so a single permission error on
+	// one piece doesn't leave the rest (e.g. the hidden copies) behind. Collect
+	// and return the aggregate.
+	var errs []error
 	if cur, err := a.ReadCrontab(); err == nil && strings.Contains(cur, a.CronTag) {
 		if werr := a.WriteCrontab(removeCron(cur, a.CronTag)); werr != nil {
-			return werr
+			errs = append(errs, fmt.Errorf("rewrite crontab: %w", werr))
 		}
 	}
 	for _, p := range append([]string{a.PlistPath, a.LogPath}, a.Copies...) {
 		if err := os.Remove(p); err != nil && !os.IsNotExist(err) {
-			return err
+			errs = append(errs, fmt.Errorf("remove %s: %w", p, err))
 		}
 	}
-	return nil
+	return errors.Join(errs...)
 }
 
 // Tick is what the schedule invokes: heal first (best-effort), then scan.
 // Returns the scan exit code (0 ok · 1 a kill failed · 2 runtime error).
 func (a *Agent) Tick() int {
-	_ = a.Heal()
+	// Heal failures must not block the scan, but they ARE actionable, so log
+	// them to stderr (the LaunchAgent captures it to LogPath).
+	if err := a.Heal(); err != nil {
+		fmt.Fprintln(os.Stderr, "selfdaemon: heal:", err)
+	}
 	if a.Scan == nil {
 		return 2
 	}
@@ -194,17 +206,42 @@ func removeCron(cur, tag string) string {
 
 func fileExists(p string) bool { _, err := os.Stat(p); return err == nil }
 
-// writeFile creates parent dirs, writes data, and enforces mode even when the
-// file pre-existed with a different mode (a copy that lost +x must not silently
-// fail to exec).
+// writeFile writes data to path ATOMICALLY (temp file in the same dir + rename)
+// with the given mode. The LaunchAgent (~10s) and cron (~5m) are independent
+// schedules that may each heal concurrently in separate processes; an atomic
+// rename means a reader/executor of a copy never observes a torn/truncated
+// binary, and a running copy keeps its old inode across the swap (safe on
+// macOS). Mode is enforced even when the file pre-existed (a copy that lost +x
+// must not silently fail to exec).
 func writeFile(path string, data []byte, mode os.FileMode) error {
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+	dir := filepath.Dir(path)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return err
 	}
-	if err := os.WriteFile(path, data, mode); err != nil {
+	tmp, err := os.CreateTemp(dir, ".sd-*")
+	if err != nil {
 		return err
 	}
-	return os.Chmod(path, mode)
+	tmpName := tmp.Name()
+	cleanup := func() { _ = os.Remove(tmpName) }
+	if _, err := tmp.Write(data); err != nil {
+		tmp.Close()
+		cleanup()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		cleanup()
+		return err
+	}
+	if err := os.Chmod(tmpName, mode); err != nil {
+		cleanup()
+		return err
+	}
+	if err := os.Rename(tmpName, path); err != nil {
+		cleanup()
+		return err
+	}
+	return nil
 }
 
 func xmlEscape(s string) string {

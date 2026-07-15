@@ -82,7 +82,7 @@ func run(args []string) int {
 	case "daemon-install":
 		return daemonInstall()
 	case "self-tick":
-		return agentFactory().Tick()
+		return selfTick()
 	case "daemon-uninstall":
 		return daemonUninstall()
 	default:
@@ -129,7 +129,12 @@ func daemonInstall() int {
 	fmt.Fprintln(os.Stderr, "note: if the focusd enforced platform is already active on this machine,")
 	fmt.Fprintln(os.Stderr, "      it already runs browser-monitor; this standalone daemon is then redundant")
 	fmt.Fprintln(os.Stderr, "      (harmless). It is intended for machines WITHOUT the enforced platform.")
-	if err := agentFactory().Install(); err != nil {
+	a, err := agentFactory()
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "install failed:", err)
+		return 2
+	}
+	if err := a.Install(); err != nil {
 		fmt.Fprintln(os.Stderr, "install failed:", err)
 		return 2
 	}
@@ -137,8 +142,22 @@ func daemonInstall() int {
 	return 0
 }
 
+func selfTick() int {
+	a, err := agentFactory()
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "self-tick:", err)
+		return 2
+	}
+	return a.Tick()
+}
+
 func daemonUninstall() int {
-	if err := agentFactory().Uninstall(); err != nil {
+	a, err := agentFactory()
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "uninstall failed:", err)
+		return 2
+	}
+	if err := a.Uninstall(); err != nil {
 		fmt.Fprintln(os.Stderr, "uninstall failed:", err)
 		return 2
 	}

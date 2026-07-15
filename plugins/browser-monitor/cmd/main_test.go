@@ -194,7 +194,7 @@ func TestDaemonSubcommandsDispatch(t *testing.T) {
 	orig := agentFactory
 	defer func() { agentFactory = orig }()
 	var cron string
-	agentFactory = func() *selfdaemon.Agent {
+	agentFactory = func() (*selfdaemon.Agent, error) {
 		return &selfdaemon.Agent{
 			Copies:         copies,
 			PlistPath:      filepath.Join(dir, "agent.plist"),
@@ -207,7 +207,7 @@ func TestDaemonSubcommandsDispatch(t *testing.T) {
 			ReadCrontab:    func() (string, error) { return cron, nil },
 			WriteCrontab:   func(s string) error { cron = s; return nil },
 			Scan:           func() int { ticked++; return 0 },
-		}
+		}, nil
 	}
 
 	if code := run([]string{"daemon-install"}); code != 0 {

@@ -27,9 +27,10 @@ const (
 // marker line (to end of that line). (?s) lets . span newlines.
 var blockRe = regexp.MustCompile(`(?s)` + regexp.QuoteMeta(BeginMarker) + `.*?` + regexp.QuoteMeta(EndMarker) + `[^\n]*`)
 
-// entryRe pulls each double-quoted domain from the generated block. Only the
-// blocklist entries are quoted inside the block, so this is unambiguous.
-var entryRe = regexp.MustCompile(`"([^"]+)"`)
+// entryRe pulls each double-quoted domain from the generated block. Anchored to
+// list-entry lines (leading whitespace + a quoted string) so it can never pick
+// up a quoted token that a future edit adds to a marker/comment line.
+var entryRe = regexp.MustCompile(`(?m)^\s+"([^"]+)"`)
 
 // RenderPython renders the marked, generated BLOCKLIST block (both markers
 // included) from entries. Output is valid Python: a `BLOCKLIST = [ ... ]` list.

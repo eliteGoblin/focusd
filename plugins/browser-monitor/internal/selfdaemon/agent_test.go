@@ -1,6 +1,7 @@
 package selfdaemon
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -135,6 +136,22 @@ func TestUninstallIsIdempotent(t *testing.T) {
 	// Never installed — uninstall must not error on already-gone pieces.
 	if err := a.Uninstall(); err != nil {
 		t.Fatalf("Uninstall on empty state: %v", err)
+	}
+}
+
+// TestHealDoesNotClobberCrontabOnReadError pins the CRITICAL fix: if the
+// crontab can't be READ, Heal must NOT write it (writing "" back would wipe the
+// user's unrelated cron jobs). It skips the cron rail this tick, best-effort.
+func TestHealDoesNotClobberCrontabOnReadError(t *testing.T) {
+	dir := t.TempDir()
+	a, _ := newTestAgent(t, dir)
+	a.ReadCrontab = func() (string, error) { return "", errors.New("crontab locked") }
+	a.WriteCrontab = func(string) error {
+		t.Fatal("WriteCrontab must not be called when the crontab could not be read")
+		return nil
+	}
+	if err := a.Heal(); err != nil {
+		t.Fatalf("Heal should stay best-effort on a crontab read error, got %v", err)
 	}
 }
 
