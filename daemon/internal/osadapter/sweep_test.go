@@ -8,21 +8,21 @@ import (
 	"testing"
 
 	"github.com/eliteGoblin/focusd/daemon/internal/mode"
+	"github.com/eliteGoblin/focusd/daemon/internal/platdir"
 )
 
-// mkWorkdir creates a hidden-dot directory under root and, when withDB is set,
-// drops a state.db file inside it (the generation-workdir signature). Returns
-// the dir path.
-func mkWorkdir(t *testing.T, root, name string, withDB bool) string {
+// mkDaemonHome creates a directory under root and, when marked is set, stamps it
+// with the DAEMON-HOME content sentinel (FEATURE 26 — the ONLY signal
+// SweepOrphanWorkdirs gates a delete on). Unmarked dirs stand in for the watchdog
+// copy dir and for real app folders — neither carries the magic.
+func mkDaemonHome(t *testing.T, root, name string, marked bool) string {
 	t.Helper()
 	dir := filepath.Join(root, name)
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if withDB {
-		if err := os.WriteFile(filepath.Join(dir, stateDBFile), []byte("FAKE-DB"), 0o644); err != nil {
-			t.Fatal(err)
-		}
+	if marked {
+		platdir.MarkDaemonHome(dir)
 	}
 	return dir
 }
@@ -41,13 +41,13 @@ func supportRootUnderHome(t *testing.T) (home, root string) {
 	return home, root
 }
 
-// TestSweepOrphanWorkdirsRemovesOrphanKeepsKeep: an orphan generation workdir
-// (hidden-dot + state.db, != keep) is removed; the keep workdir is preserved.
+// TestSweepOrphanWorkdirsRemovesOrphanKeepsKeep: an orphan daemon-home (magic, !=
+// keep) is removed; the keep daemon-home is preserved.
 func TestSweepOrphanWorkdirsRemovesOrphanKeepsKeep(t *testing.T) {
 	_, root := supportRootUnderHome(t)
 
-	keep := mkWorkdir(t, root, ".keep.gen", true)
-	orphan := mkWorkdir(t, root, ".orphan.gen", true)
+	keep := mkDaemonHome(t, root, "KeepVendorAgent", true)
+	orphan := mkDaemonHome(t, root, "OrphanVendorAgent", true)
 
 	removed, err := SweepOrphanWorkdirs(root, keep)
 	if err != nil {
@@ -64,17 +64,22 @@ func TestSweepOrphanWorkdirsRemovesOrphanKeepsKeep(t *testing.T) {
 	}
 }
 
-// TestSweepOrphanWorkdirsSkipsNonSignatureDirs: dirs that are NOT the generation
-// signature are left alone — a hidden-dot dir WITHOUT state.db (the watchdog
-// copy dir), and a non-hidden dir WITH state.db (a legit app dir is never
-// hidden-dot). Only the true orphan is removed.
+// TestSweepOrphanWorkdirsSkipsNonSignatureDirs: dirs WITHOUT the daemon-home magic
+// are left alone — the watchdog copy dir (no magic), and CRITICALLY a real app dir
+// that merely holds a file named state.db (the OLD heuristic would have deleted it;
+// the content-magic gate never does). Only the true magic-marked orphan is removed.
 func TestSweepOrphanWorkdirsSkipsNonSignatureDirs(t *testing.T) {
 	_, root := supportRootUnderHome(t)
 
-	keep := mkWorkdir(t, root, ".keep.gen", true)
-	watchdog := mkWorkdir(t, root, ".watchdog.copy", false) // hidden-dot, NO state.db
-	plainApp := mkWorkdir(t, root, "SomeVendorApp", true)   // state.db but not hidden-dot
-	orphan := mkWorkdir(t, root, ".orphan.gen", true)
+	keep := mkDaemonHome(t, root, "KeepVendorAgent", true)
+	watchdog := mkDaemonHome(t, root, "com.watchdog.copy", false) // no magic
+	plainApp := mkDaemonHome(t, root, "SomeVendorApp", false)     // real app lookalike
+	// The real-app lookalike even holds a state.db — the exact bait the removed
+	// heuristic keyed on. It must STILL survive (no magic).
+	if err := os.WriteFile(filepath.Join(plainApp, "state.db"), []byte("REAL"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	orphan := mkDaemonHome(t, root, "OrphanVendorAgent", true)
 
 	removed, err := SweepOrphanWorkdirs(root, keep)
 	if err != nil {
@@ -101,7 +106,7 @@ func TestSweepOrphanWorkdirsNoSupportRoot(t *testing.T) {
 	// Do NOT create ~/Library/Application Support.
 
 	root := mode.SupportRoot(mode.User, home)
-	removed, err := SweepOrphanWorkdirs(root, filepath.Join(root, ".keep"))
+	removed, err := SweepOrphanWorkdirs(root, filepath.Join(root, "keep"))
 	if err != nil {
 		t.Fatalf("missing support root should be (0,nil), got err %v", err)
 	}
@@ -110,19 +115,14 @@ func TestSweepOrphanWorkdirsNoSupportRoot(t *testing.T) {
 	}
 }
 
-// TestSweepOrphanWorkdirsGateBlocksKeep: even if the keep path were somehow a
-// candidate, the keep-exclusion + safeToRemoveWorkdir belt prevents deleting it.
-// Here we sweep with an EMPTY keep + a state.db-bearing dir whose path is the
-// support root's only child; safeToRemoveWorkdir still permits a strictly-nested
-// orphan, so it is removed — confirming the gate allows legitimate targets while
-// the prior tests confirm it blocks the keep.
+// TestSweepOrphanWorkdirsGateAllowsNestedOrphan: a strictly-nested magic-marked
+// orphan (not the keep, not an ancestor of it) is permitted by safeToRemoveWorkdir
+// and removed.
 func TestSweepOrphanWorkdirsGateAllowsNestedOrphan(t *testing.T) {
 	_, root := supportRootUnderHome(t)
-	orphan := mkWorkdir(t, root, ".lonely.orphan", true)
+	orphan := mkDaemonHome(t, root, "LonelyOrphanAgent", true)
 
-	// keepWorkdir under root but a different dir → orphan is strictly-nested,
-	// not the keep, not an ancestor → safeToRemoveWorkdir permits removal.
-	keep := filepath.Join(root, ".keep.gen")
+	keep := filepath.Join(root, "KeepVendorAgent") // a different (nonexistent) dir under root
 
 	removed, err := SweepOrphanWorkdirs(root, keep)
 	if err != nil {
@@ -137,36 +137,26 @@ func TestSweepOrphanWorkdirsGateAllowsNestedOrphan(t *testing.T) {
 }
 
 // TestSweepOrphanWorkdirsTestModeCannotDeleteRealDir is the HF1 CRITICAL
-// storage-separation regression. BEFORE the fix, SweepOrphanWorkdirs recomputed
-// its scan root as mode.SupportRoot(m, home) — and mode.SupportRoot(mode.Test, …)
-// resolves to the REAL ~/Library/Application Support (mode.go only special-cases
-// System). So a `daemon install --test-mode` swept and DELETED real-install
-// generation workdirs under the operator's actual HOME. The scan root is now an
-// EXPLICIT param the caller (installMesh) fills with its sandbox local, so a
-// test-mode sweep can never even SEE the real tree.
-//
-// The test plants a decoy "real install" generation-workdir (hidden-dot +
-// state.db) under mode.SupportRoot(mode.Test, HOME) — the exact directory the old
-// bug scanned — and runs the sweep scoped to a SEPARATE sandbox root. The decoy
-// must SURVIVE; only the sandbox orphan is swept.
+// storage-separation regression. The scan root is an EXPLICIT param the caller
+// (installMesh) fills with its sandbox local, so a test-mode sweep can never even
+// SEE the real tree. The decoy real generation-workdir is a MARKED daemon-home
+// (so it WOULD be swept if scanned) planted under mode.SupportRoot(mode.Test, HOME)
+// — the exact directory the old bug scanned — and must SURVIVE because the sweep
+// is scoped to a SEPARATE sandbox root.
 func TestSweepOrphanWorkdirsTestModeCannotDeleteRealDir(t *testing.T) {
-	// HOME points at a decoy tree. mode.SupportRoot(mode.Test, HOME) resolves
-	// HERE — the real-install location the pre-fix sweep would have scanned.
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 	realRoot := mode.SupportRoot(mode.Test, home)
 	if err := os.MkdirAll(realRoot, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	realGen := mkWorkdir(t, realRoot, ".real.install.gen", true) // decoy real generation-workdir
+	realGen := mkDaemonHome(t, realRoot, "RealInstallAgent", true) // decoy real daemon-home (marked)
 
-	// The test-mode install lives in a SEPARATE sandbox root (spec.Workdir),
-	// with its own daemon-home + a genuine orphan generation-workdir.
+	// The test-mode install lives in a SEPARATE sandbox root (spec.Workdir).
 	sandbox := t.TempDir()
-	sandboxDaemonHome := mkWorkdir(t, sandbox, ".daemon-home", false)
-	sandboxOrphan := mkWorkdir(t, sandbox, ".sandbox.orphan.gen", true)
+	sandboxDaemonHome := mkDaemonHome(t, sandbox, "daemon-home", true)
+	sandboxOrphan := mkDaemonHome(t, sandbox, "SandboxOrphanAgent", true)
 
-	// installMesh now passes its sandboxed supportRoot local — NOT mode.SupportRoot.
 	removed, err := SweepOrphanWorkdirs(sandbox, sandboxDaemonHome)
 	if err != nil {
 		t.Fatalf("SweepOrphanWorkdirs: %v", err)
@@ -174,10 +164,9 @@ func TestSweepOrphanWorkdirsTestModeCannotDeleteRealDir(t *testing.T) {
 
 	// THE REGRESSION ASSERTION: the decoy real-install workdir must SURVIVE.
 	if _, serr := os.Stat(realGen); serr != nil {
-		t.Fatalf("REGRESSION: real-install generation workdir under %q was deleted by a "+
+		t.Fatalf("REGRESSION: real-install daemon-home under %q was deleted by a "+
 			"test-mode sweep (stat err = %v)", realRoot, serr)
 	}
-	// The sandbox orphan is the only thing swept.
 	if _, serr := os.Stat(sandboxOrphan); !os.IsNotExist(serr) {
 		t.Fatalf("sandbox orphan should be swept, stat err = %v", serr)
 	}

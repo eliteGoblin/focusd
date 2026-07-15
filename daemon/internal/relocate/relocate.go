@@ -271,12 +271,19 @@ func GenerateRoster() []string {
 	}
 }
 
-// HiddenWorkdir is a dotted, Apple-metadata-looking directory under the
-// given Application Support root (hidden from casual Finder/`ls`). The
-// root is mode-specific (user → ~/Library/..., system → /Library/...),
-// so a user and a system install never share a directory.
+// HiddenWorkdir returns a disguised directory PATH under the given Application
+// Support root. FEATURE 26: the name is now a shape-ensemble blend that reads as
+// an ordinary app-support entry (no leading dot, no shared hex tail — see
+// disguisedDirName), so no single glob spans the daemon-home and the
+// platform-workdir generations. The root is mode-specific (user → ~/Library/...,
+// system → /Library/...), so a user and a system install never share a directory.
+//
+// This is a PURE name generator (used by name-shape tests). Callers that create
+// the directory on disk must use [FreshHiddenDir] instead — it EXCLUSIVELY
+// creates (os.Mkdir), which is the destructive-safety invariant that stops us
+// ever adopting/sentinel-marking a real app's folder.
 func HiddenWorkdir(supportRoot string) string {
-	return filepath.Join(supportRoot, "."+pick(prefixes)+"."+randHex(6))
+	return filepath.Join(supportRoot, disguisedDirName())
 }
 
 // RandomBinaryName is the disguised basename for the daemon binary inside its

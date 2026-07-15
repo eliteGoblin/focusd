@@ -271,7 +271,7 @@ func pgrepCountExact(pattern string) int {
 // child is orphaned, so the caller falls back to pgrep (which also counts the
 // orphan). The path is never surfaced.
 func platformPidUp(daemonHome string) bool {
-	b, err := os.ReadFile(filepath.Join(daemonHome, core.PlatformPidFile))
+	b, err := os.ReadFile((&core.Store{Dir: daemonHome}).PidFilePath())
 	if err != nil {
 		return false
 	}
