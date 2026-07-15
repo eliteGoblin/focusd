@@ -48,6 +48,7 @@ func TestDirPathsUnderRootDistinct(t *testing.T) {
 		"promote":   d.Promote(),
 		"label":     d.LabelFile(),
 		"log":       d.Log(),
+		"ranmarker": d.RanMarker(),
 	}
 	seen := map[string]string{}
 	for name, p := range paths {
@@ -58,6 +59,25 @@ func TestDirPathsUnderRootDistinct(t *testing.T) {
 			t.Fatalf("%s and %s collide on path %q", name, other, p)
 		}
 		seen[p] = name
+	}
+}
+
+// TestDirFromBinaryMatchesFor is the #101 correctness invariant: deriving the
+// companion Dir from the companion BINARY's path (HOME-free, mode-free) resolves
+// the EXACT same folder For() installed it into — in BOTH user and system modes.
+// This is what lets a system LaunchDaemon (no $HOME) re-find its own folder.
+func TestDirFromBinaryMatchesFor(t *testing.T) {
+	for _, m := range []mode.Mode{mode.User, mode.System} {
+		want := For(m, "/home/u")
+		got := DirFromBinary(want.Binary())
+		if got.Root() != want.Root() {
+			t.Fatalf("mode %s: DirFromBinary(%q).Root() = %q, want %q",
+				m, want.Binary(), got.Root(), want.Root())
+		}
+		// Every derived sibling path must match too (the binary's parent IS the root).
+		if got.Backup() != want.Backup() || got.Heartbeat() != want.Heartbeat() || got.Desired() != want.Desired() {
+			t.Fatalf("mode %s: DirFromBinary sibling paths diverge from For", m)
+		}
 	}
 }
 

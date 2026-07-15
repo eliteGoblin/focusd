@@ -10,7 +10,8 @@ type fakeCtl struct {
 	loadedSet       map[string]bool
 	boots           []string
 	bouts           []string
-	bootstrapFailOn string           // plist path that should fail bootstrap
+	bootstrapFailOn string           // plist path that should fail bootstrap (always)
+	bootstrapFailN  map[string]int   // plist path → # of times to fail before succeeding (transient)
 	bootoutErrOn    map[string]error // label → error to return from bootout
 }
 
@@ -19,6 +20,12 @@ func newFakeCtl() *fakeCtl { return &fakeCtl{loadedSet: map[string]bool{}} }
 func (f *fakeCtl) loaded(l string) bool { return f.loadedSet[l] }
 func (f *fakeCtl) bootstrap(pp string) error {
 	if pp == f.bootstrapFailOn {
+		return errCtlSynthetic
+	}
+	// Transient failure: model launchd's async "already-loaded"/EIO window that a
+	// robustReload retry (bootout+backoff+bootstrap) is meant to absorb.
+	if f.bootstrapFailN != nil && f.bootstrapFailN[pp] > 0 {
+		f.bootstrapFailN[pp]--
 		return errCtlSynthetic
 	}
 	f.boots = append(f.boots, pp)
@@ -166,6 +173,143 @@ func TestEnsureAllHealsRosterFromMemory(t *testing.T) {
 	}
 	if !rs.present || !sameRoster(rs.labels, rosterLabels(spec())) {
 		t.Fatalf("missing roster must be rewritten from memory, got %v", rs.labels)
+	}
+}
+
+// noSleep is a no-op sleep so robustReload's retry path is exercised without real
+// time in unit tests.
+func noSleep(time.Duration) {}
+
+// TestRobustReloadRetriesTransientBootstrap (issue #102-a): on a LIVE mesh, an
+// immediate bootstrap after bootout can return EIO ("already loaded") while
+// launchd finishes its async teardown. robustReload re-issues bootout + retries
+// and succeeds within reloadAttempts — a single bootout+bootstrap would have
+// failed (the 2/3 mesh fault).
+func TestRobustReloadRetriesTransientBootstrap(t *testing.T) {
+	c := newFakeCtl()
+	label := "com.vendor.alpha"
+	pp := "/p/" + label + ".plist"
+	c.bootstrapFailN = map[string]int{pp: reloadAttempts - 1} // fail all but the last try
+
+	if err := robustReload(c, label, pp, noSleep); err != nil {
+		t.Fatalf("robustReload should succeed after transient failures, got %v", err)
+	}
+	if !c.loaded(label) {
+		t.Fatalf("label must be loaded after a successful robustReload")
+	}
+	// bootout is idempotent and re-issued each attempt: reloadAttempts bootouts.
+	if len(c.bouts) != reloadAttempts {
+		t.Fatalf("want %d bootouts (one per attempt), got %d (%v)", reloadAttempts, len(c.bouts), c.bouts)
+	}
+}
+
+// TestRobustReloadGivesUpAfterMaxAttempts: a bootstrap that NEVER succeeds returns
+// the underlying error after reloadAttempts tries (does not loop forever).
+func TestRobustReloadGivesUpAfterMaxAttempts(t *testing.T) {
+	c := newFakeCtl()
+	label := "com.vendor.bravo"
+	pp := "/p/" + label + ".plist"
+	c.bootstrapFailOn = pp // always fails
+
+	if err := robustReload(c, label, pp, noSleep); err == nil {
+		t.Fatal("robustReload must surface the error when every attempt fails")
+	}
+	if c.loaded(label) {
+		t.Fatal("label must NOT be loaded when every bootstrap failed")
+	}
+}
+
+// TestReinstallExceptSelfNeverBootstrapsSelf (issue #102-a/b): the re-materialize
+// path must reload every mesh label EXCEPT the caller's own, and boot self OUT
+// (no bootstrap) — so no process ever restarts its OWN executing label mid-install
+// (the self-SIGTERM that released the lock and let a sibling double-place). Self
+// ends genuinely !loaded; the next EnsureAll re-bootstraps it.
+func TestReinstallExceptSelfNeverBootstrapsSelf(t *testing.T) {
+	s := spec()
+	// Pre-load all three (simulate the running mesh at the OLD path).
+	c, fs, rs := newFakeCtl(), newFakeFS(), &fakeRoster{}
+	if err := installAll(s, c, fs, rs); err != nil {
+		t.Fatal(err)
+	}
+	selfRole := RoleA
+	selfLabel := s.Label(selfRole)
+
+	// Re-materialize at a NEW binary path (roster/labels unchanged).
+	ns := s
+	ns.SelfPath = "/wd/fresh-binary"
+	c.boots = nil // reset to observe only the reinstall's bootstraps
+	if err := reinstallExceptSelf(ns, c, fs, rs, selfLabel, noSleep); err != nil {
+		t.Fatalf("reinstallExceptSelf: %v", err)
+	}
+
+	// Self must NOT have been bootstrapped, and must be genuinely !loaded now.
+	for _, pp := range c.boots {
+		if labelFromPath(pp) == selfLabel {
+			t.Fatalf("self label %q must NEVER be bootstrapped by reinstallExceptSelf", selfLabel)
+		}
+	}
+	if c.loaded(selfLabel) {
+		t.Fatalf("self label %q must be booted OUT (!loaded) after reinstallExceptSelf", selfLabel)
+	}
+	// The two non-self labels ARE reloaded and loaded.
+	for _, r := range []Role{RoleB, RoleEnsure} {
+		if !c.loaded(s.Label(r)) {
+			t.Fatalf("non-self role %s must be reloaded by reinstallExceptSelf", r)
+		}
+	}
+	// All three plists were (re)written at the new path (the roster + plists agree).
+	if len(fs.files) != 3 {
+		t.Fatalf("want 3 plists written at the new path, got %d", len(fs.files))
+	}
+	// The next EnsureAll re-bootstraps self onto the new binary (the mesh converges).
+	rec, err := ensureAll(ns, c, fs, rs)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rec) != 1 || rec[0] != selfRole {
+		t.Fatalf("EnsureAll must re-bootstrap ONLY self, got %v", rec)
+	}
+	if !c.loaded(selfLabel) {
+		t.Fatalf("self must be loaded again after the next EnsureAll")
+	}
+}
+
+// TestReinstallExceptSelfSiblingFailureKeepsSelfLoaded (go-review MEDIUM #3): if a
+// NON-self label's reload permanently fails, reinstallExceptSelf must return the
+// error BEFORE booting self out — so self stays loaded (never left down) and is
+// never bootstrapped by the reinstall. This is the safety-critical guarantee: a
+// partial failure must not take the surviving actor down. The caller then adopts
+// the already-placed new path and the next tick's EnsureAll retries the failed
+// sibling against the correct path.
+func TestReinstallExceptSelfSiblingFailureKeepsSelfLoaded(t *testing.T) {
+	s := spec()
+	c, fs, rs := newFakeCtl(), newFakeFS(), &fakeRoster{}
+	if err := installAll(s, c, fs, rs); err != nil {
+		t.Fatal(err)
+	}
+	selfRole := RoleA
+	selfLabel := s.Label(selfRole)
+
+	// A NON-self sibling (RoleB) permanently fails to reload.
+	ns := s
+	ns.SelfPath = "/wd/fresh-binary"
+	c.bootstrapFailOn = fs.plistPath(s.Label(RoleB))
+	c.boots = nil
+
+	err := reinstallExceptSelf(ns, c, fs, rs, selfLabel, noSleep)
+	if err == nil {
+		t.Fatal("a permanent sibling-reload failure must surface as an error")
+	}
+	// Self must NOT have been booted out (we returned before the self bootout),
+	// so it stays loaded from the original install — never taken down.
+	if !c.loaded(selfLabel) {
+		t.Fatalf("self %q must stay loaded when a sibling reload fails", selfLabel)
+	}
+	// Self must never have been bootstrapped by the reinstall either.
+	for _, pp := range c.boots {
+		if labelFromPath(pp) == selfLabel {
+			t.Fatalf("self %q must never be bootstrapped by reinstallExceptSelf", selfLabel)
+		}
 	}
 }
 

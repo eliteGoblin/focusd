@@ -517,11 +517,22 @@ func loop(args []string, once bool) int {
 			// cheap stat at rest). On a real re-materialize it returns the fresh
 			// disguised path, which we adopt so the NEXT tick stats the new file
 			// (no heal loop) and EnsureAll/EnsureCompanion below use it.
-			if newSelf, changed, berr := osadapter.EnsureBinaryPresent(spec, e.HoldsPlatformLock(), selfFD); berr != nil {
-				log.Warn("ensure-binary-present", "err", berr)
-			} else if changed {
+			newSelf, changed, berr := osadapter.EnsureBinaryPresent(spec, osadapter.Role(o.role), e.HoldsPlatformLock(), selfFD)
+			// Adopt the fresh path whenever the binary was PLACED — INDEPENDENT of
+			// berr. binpresent's contract: changed=true with a non-nil err means the
+			// binary WAS placed but the launchd re-bootstrap partially failed; the
+			// caller adopts newSelfPath and the next tick retries the launchd side.
+			// Adopting BEFORE EnsureAll(spec) below is critical: otherwise EnsureAll
+			// would run with the STALE spec.SelfPath (the just-deleted binary) and
+			// rewrite a partially-reloaded role's plist back to the dead path,
+			// spawning it onto ENOENT while falsely logging "mesh recreated".
+			if changed {
 				self = newSelf
 				spec.SelfPath = newSelf
+			}
+			if berr != nil {
+				log.Warn("ensure-binary-present", "err", berr)
+			} else if changed {
 				log.Info("daemon binary re-materialized") // no path (redaction-safe)
 			}
 			if rec, eerr := osadapter.EnsureAll(spec); eerr != nil {

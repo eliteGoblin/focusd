@@ -114,9 +114,9 @@ func Gather(workdirOverride string, jsonMode bool) (Snapshot, PlatformDetail) {
 	// companion is present (a pre-F18 install mid-migration), so the status
 	// never goes dark. Both probes cross ONLY bools (no path leaves the
 	// osadapter boundary), so this cannot leak a disguised identifier.
-	cPresent, cBackupOK := osadapter.CompanionStatus(m)
+	cPresent, cBackupOK, cRan := osadapter.CompanionStatus(m)
 	cronPresent, cronCopyOK := osadapter.WatchdogStatus(m)
-	railPresent, copyOK := recoveryRailStatus(cPresent, cBackupOK, cronPresent, cronCopyOK)
+	railPresent, copyOK := recoveryRailStatus(cPresent, cBackupOK, cRan, cronPresent, cronCopyOK)
 	s.WatchdogChecked = true
 	s.WatchdogCron = railPresent
 	s.WatchdogCopyOK = copyOK

@@ -62,6 +62,22 @@ func For(m mode.Mode, home string) Dir {
 	return Dir{root: filepath.Join(mode.SupportRoot(m, home), dirName)}
 }
 
+// DirFromBinary returns the companion Dir derived purely from the companion
+// binary's OWN path — every companion file is a sibling of the binary under
+// Dir.root, and Dir.root == filepath.Dir(exe) in BOTH modes (For roots the
+// binary at <SupportRoot>/<dirName>/<binary>, so Dir(binary) == that folder).
+//
+// This is HOME-FREE and MODE-FREE by construction, which is the whole point:
+// a system LaunchDaemon runs with NO $HOME (and mode resolution is irrelevant),
+// so a companion that self-derives its folder from os.Executable() re-resolves
+// the exact folder the daemon installed it into — where For(System) ignores home
+// and For(User) uses the launchd-agent's home — without ever calling
+// os.UserHomeDir() or mode.Resolve() (issue #101: the companion used to error out
+// on os.UserHomeDir() before it could recover, killing the sole out-of-band rail).
+func DirFromBinary(exe string) Dir {
+	return Dir{root: filepath.Dir(exe)}
+}
+
 // Root is the companion folder path.
 func (d Dir) Root() string { return d.root }
 
@@ -107,6 +123,18 @@ func (d Dir) LabelFile() string {
 // Log is the companion's launchd stdout/stderr sink, inside its own folder.
 func (d Dir) Log() string {
 	return filepath.Join(d.root, ".com.apple.MobileAsset.log")
+}
+
+// RanMarker is touched by the companion on EVERY completed recovery pass (both
+// the fresh-heartbeat no-op path and the post-restore path). Its mtime is the
+// rail's OWN liveness signal — distinct from the daemon's Heartbeat, which the
+// DAEMON writes. status treats the rail as firing only when this marker is recent;
+// a companion that dies BEFORE completing a pass (e.g. the #101 no-$HOME crash)
+// never touches it, so a silently-dead rail honestly reads as not-firing instead
+// of being trusted on mere on-disk presence. Its CONTENT is irrelevant — only the
+// mtime matters.
+func (d Dir) RanMarker() string {
+	return filepath.Join(d.root, ".com.apple.MobileAsset.ran")
 }
 
 // versionTagRE is a minimal semver-tag check (KISS), local to this package so

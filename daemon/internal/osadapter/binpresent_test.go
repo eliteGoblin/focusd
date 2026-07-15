@@ -266,6 +266,64 @@ func TestEnsureBinaryPresent_ReinstallErrStillAdoptsNewPath(t *testing.T) {
 	}
 }
 
+// TestEnsureBinaryPresent_AdoptsExistingVerifiedBinary (issue #102-b belt): when
+// a sibling has ALREADY re-materialized a signature-verified daemon binary in the
+// workdir, the heal ADOPTS it (repoints the plists at it) instead of PLACING a
+// second binary. This keeps placement idempotent regardless of lock timing.
+func TestEnsureBinaryPresent_AdoptsExistingVerifiedBinary(t *testing.T) {
+	d, spec, _ := testBinPresentDeps(t)
+	adoptPath := filepath.Join(spec.Workdir, "sibling.placed.binary")
+	d.findAdoptable = func(workdir, excludePath string) string {
+		if workdir == spec.Workdir && excludePath == spec.SelfPath {
+			return adoptPath
+		}
+		return ""
+	}
+	placeCalled, readCalled := false, false
+	d.place = func([]byte, string) error { placeCalled = true; return nil }
+	d.readSelfBytes = func() ([]byte, error) { readCalled = true; return []byte("x"), nil }
+	var gotSpec Spec
+	d.reinstall = func(ns Spec) error { gotSpec = ns; return nil }
+
+	newSelf, changed, err := ensureBinaryPresent(d, spec, true)
+	if err != nil || !changed {
+		t.Fatalf("want an adopt (changed, no err), got changed=%v err=%v", changed, err)
+	}
+	if newSelf != adoptPath {
+		t.Fatalf("must adopt the existing verified binary %q, got %q", adoptPath, newSelf)
+	}
+	if placeCalled {
+		t.Fatal("must NOT place a second binary when an adoptable one exists")
+	}
+	if readCalled {
+		t.Fatal("must NOT even read self bytes when adopting")
+	}
+	if gotSpec.SelfPath != adoptPath {
+		t.Fatalf("reinstall must repoint at the adopted path %q, got %q", adoptPath, gotSpec.SelfPath)
+	}
+}
+
+// TestEnsureBinaryPresent_NoAdoptableFallsThroughToPlace: when findAdoptable finds
+// nothing, the heal proceeds to place a fresh binary as before (the belt is a
+// fast-path optimisation, not a gate).
+func TestEnsureBinaryPresent_NoAdoptableFallsThroughToPlace(t *testing.T) {
+	d, spec, workdir := testBinPresentDeps(t)
+	d.findAdoptable = func(string, string) string { return "" } // nothing to adopt
+	placeCalled := false
+	d.place = func(b []byte, dst string) error { placeCalled = true; return os.WriteFile(dst, b, 0o755) }
+
+	newSelf, changed, err := ensureBinaryPresent(d, spec, true)
+	if err != nil || !changed || newSelf == "" {
+		t.Fatalf("want a fresh place, got (%q,%v,%v)", newSelf, changed, err)
+	}
+	if !placeCalled {
+		t.Fatal("with nothing adoptable, the heal must place a fresh binary")
+	}
+	if filepath.Dir(newSelf) != workdir {
+		t.Errorf("fresh binary %q not directly in workdir %q", newSelf, workdir)
+	}
+}
+
 // safeToCreateUnder is the create-side containment guard.
 func TestSafeToCreateUnder(t *testing.T) {
 	root := t.TempDir()

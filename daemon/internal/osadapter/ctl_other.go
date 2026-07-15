@@ -22,8 +22,8 @@ func UninstallProd() ([]string, error) { return nil, ErrUnsupported }
 
 // EnsureBinaryPresent is a no-op on non-darwin (no launchd mesh binary to
 // re-materialize). Returns ("", false, nil) so the reconcile loop wires it
-// uniformly (FEATURE 22 follow-up).
-func EnsureBinaryPresent(Spec, bool, *os.File) (string, bool, error) { return "", false, nil }
+// uniformly (FEATURE 22 follow-up). selfRole mirrors the darwin signature (#102).
+func EnsureBinaryPresent(Spec, Role, bool, *os.File) (string, bool, error) { return "", false, nil }
 
 // Verifier is the signature-check seam (no-op on non-darwin since
 // FindCurrentInstall returns ErrUnsupported here).

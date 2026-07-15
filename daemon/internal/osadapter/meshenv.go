@@ -82,3 +82,53 @@ func ArgvFromEnv() []string {
 func isFocusdMeshWorkerPlist(env map[string]string, argv []string) bool {
 	return strings.HasPrefix(env[MeshEnvKey], meshEnvRunPrefix) || hasMeshFlag(argv)
 }
+
+// testModeFlag is the focusd-specific test-mode marker the installer bakes into a
+// TEST-mode plist's argv (see plist.go args(): "--test-mode-flag"). It is what
+// makes the test-mode ensurer argv focusd-specific — a bare "ensure" token is NOT.
+const testModeFlag = "--test-mode-flag"
+
+// isTestModeEnsureArgv reports whether argv is focusd's TEST-mode ensurer argv:
+// the "ensure" subcommand ALONGSIDE the focusd-specific "--test-mode-flag". A bare
+// "ensure" token on its own is NOT focusd-specific — a third-party orphan plist
+// could carry it — so requiring the test-mode marker keeps the dead-branch match
+// focusd-specific (Copilot review). A PROD ensurer does not rely on this at all:
+// it carries MeshEnvKey="ensure" in env, matched by decodeMeshEnv below.
+func isTestModeEnsureArgv(argv []string) bool {
+	hasEnsure, hasTestFlag := false, false
+	for _, a := range argv {
+		switch a {
+		case string(RoleEnsure): // "ensure"
+			hasEnsure = true
+		case testModeFlag:
+			hasTestFlag = true
+		}
+	}
+	return hasEnsure && hasTestFlag
+}
+
+// isFocusdMeshOrEnsurePlist is the DEAD-branch corroboration predicate for
+// DiscoverAllGenerations (issue #102-c). Unlike the strict worker-only
+// isFocusdMeshWorkerPlist used on the LIVE branch, it ALSO matches the ENSURER —
+// because a dead generation left as ONLY its ensurer plist (its workers already
+// swept, its binary gone) would otherwise be dropped and stay launchd-active with
+// a missing binary. It corroborates via, in order, three FOCUSD-SPECIFIC markers:
+//   - a focusd mesh env value a/b/ensure (decodeMeshEnv != nil) — the marker a
+//     PROD ensurer/worker carries in MeshEnvKey ("APP_LAUNCH_CONTEXT", a
+//     focusd-invented key no vendor plist sets); this handles the real #102-c case;
+//   - the legacy --mesh argv (OLD prod workers);
+//   - the TEST-mode ensurer argv (ensure + --test-mode-flag, focusd-specific).
+//
+// A bare "ensure" argv token is deliberately NOT sufficient: it is not
+// focusd-specific, so a third-party orphan plist whose missing-binary argv happens
+// to contain "ensure" must never be misclassified as ours and retired (Copilot
+// review).
+//
+// SAFETY: this is used ONLY where the binary is ALREADY proven missing
+// (fs.ErrNotExist) AND the plist is grouped by that dangling path, corroborated by
+// a focusd-specific marker above — so a third-party plist whose binary merely
+// happens to be absent is never treated as ours. The LIVE branch stays strict
+// worker-only (no regression: a live ensure-only "generation" is still excluded).
+func isFocusdMeshOrEnsurePlist(env map[string]string, argv []string) bool {
+	return decodeMeshEnv(env[MeshEnvKey]) != nil || hasMeshFlag(argv) || isTestModeEnsureArgv(argv)
+}

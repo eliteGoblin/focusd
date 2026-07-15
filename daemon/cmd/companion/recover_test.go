@@ -2,6 +2,7 @@ package main
 
 import (
 	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -37,6 +38,74 @@ type recorder struct {
 }
 
 const goodDesired = "v0.16.3"
+
+// TestRecoverWorksWithoutHOME is the #101 regression guard: the companion's
+// recovery pass must run with the Dir derived from its OWN binary path and NO
+// $HOME set (a system LaunchDaemon has none). It proves recover never depends on
+// os.UserHomeDir()/mode — the DOA-on-system-launchd bug that killed the sole
+// out-of-band rail. It also asserts the RanMarker is stamped on a completed pass
+// (the firing signal status reads), on BOTH the no-op and the restore path.
+func TestRecoverWorksWithoutHOME(t *testing.T) {
+	// Unset HOME for the duration; restore after (os.Unsetenv is a raw global
+	// mutation, but these tests are non-parallel).
+	oldHome, had := os.LookupEnv("HOME")
+	os.Unsetenv("HOME")
+	t.Cleanup(func() {
+		if had {
+			os.Setenv("HOME", oldHome)
+		}
+	})
+
+	// Dir derived purely from a binary path (HOME-free), rooted at a temp dir.
+	root := t.TempDir()
+	dir := companion.DirFromBinary(filepath.Join(root, "companion-bin"))
+	if dir.Root() != root {
+		t.Fatalf("DirFromBinary root = %q, want %q", dir.Root(), root)
+	}
+
+	t.Run("fresh heartbeat no-op still stamps RanMarker", func(t *testing.T) {
+		writeFile(t, dir.Heartbeat(), "") // just touched (mtime = now) ⇒ fresh
+		rec := &recorder{}
+		err := recover(dir, time.Now(),
+			func(p string) (bool, error) { rec.verified = append(rec.verified, p); return true, nil },
+			func(bin, desired string) error { rec.execCalls++; return nil },
+		)
+		if err != nil {
+			t.Fatalf("recover without HOME = %v, want nil", err)
+		}
+		if rec.execCalls != 0 {
+			t.Fatalf("fresh heartbeat must be a no-op, execCalls=%d", rec.execCalls)
+		}
+		if _, statErr := os.Stat(dir.RanMarker()); statErr != nil {
+			t.Fatalf("RanMarker not stamped on a completed no-op pass: %v", statErr)
+		}
+	})
+
+	t.Run("stale heartbeat restore stamps RanMarker", func(t *testing.T) {
+		os.Remove(dir.RanMarker()) // clear the marker from the previous sub-case
+		staleMtime := time.Now().Add(-companion.StaleThreshold - time.Minute)
+		writeFile(t, dir.Heartbeat(), "")
+		if err := os.Chtimes(dir.Heartbeat(), staleMtime, staleMtime); err != nil {
+			t.Fatal(err)
+		}
+		writeFile(t, dir.Desired(), goodDesired)
+		writeFile(t, dir.Backup(), "SIGNED-DAEMON")
+		rec := &recorder{}
+		err := recover(dir, time.Now(),
+			func(p string) (bool, error) { rec.verified = append(rec.verified, p); return true, nil },
+			func(bin, desired string) error { rec.execCalls++; return nil },
+		)
+		if err != nil {
+			t.Fatalf("recover (stale, no HOME) = %v, want nil", err)
+		}
+		if rec.execCalls != 1 {
+			t.Fatalf("stale heartbeat must restore, execCalls=%d", rec.execCalls)
+		}
+		if _, statErr := os.Stat(dir.RanMarker()); statErr != nil {
+			t.Fatalf("RanMarker not stamped on a completed restore pass: %v", statErr)
+		}
+	})
+}
 
 // TestRecoverFreshHeartbeatNoOp: a fresh heartbeat means the daemon is alive —
 // recover must be a pure no-op: it never verifies the backup and never execs.

@@ -1,8 +1,10 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"strings"
 	"time"
@@ -37,6 +39,7 @@ func recover(
 	//    error) falls through to the restore path (treated as stale).
 	if fi, err := os.Stat(dir.Heartbeat()); err == nil {
 		if !companion.DecideStale(fi.ModTime(), now) {
+			touchRan(dir, now) // completed pass (no-op path): record the rail is firing
 			return nil
 		}
 	}
@@ -59,7 +62,28 @@ func recover(
 	if err := placeExecutable(dir.Backup(), dir.Promote()); err != nil {
 		return fmt.Errorf("companion: place backup failed")
 	}
-	return execDaemon(dir.Promote(), desired)
+	if err := execDaemon(dir.Promote(), desired); err != nil {
+		return err
+	}
+	touchRan(dir, now) // completed pass (restore path): record the rail is firing
+	return nil
+}
+
+// touchRan sets the RanMarker's mtime to now (best-effort), recording that this
+// recovery pass COMPLETED. status treats the rail as firing only when this marker
+// is recent — so a companion that dies before reaching a completion point (the
+// #101 no-$HOME class exited before recover ran at all) never touches it and the
+// rail honestly reads as not-firing. Only the mtime matters; content is empty.
+func touchRan(dir companion.Dir, now time.Time) {
+	p := dir.RanMarker()
+	if err := os.Chtimes(p, now, now); err != nil && errors.Is(err, fs.ErrNotExist) {
+		// Create it, then stamp the intended mtime (a fresh create's mtime is the
+		// real wall clock; align it to now for deterministic staleness checks).
+		if f, cerr := os.OpenFile(p, os.O_CREATE|os.O_WRONLY, 0o644); cerr == nil {
+			_ = f.Close()
+			_ = os.Chtimes(p, now, now)
+		}
+	}
 }
 
 // readTrimmed reads a small file and trims surrounding whitespace.

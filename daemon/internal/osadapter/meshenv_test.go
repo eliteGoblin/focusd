@@ -34,6 +34,37 @@ func TestIsFocusdMeshWorkerPlist(t *testing.T) {
 	}
 }
 
+// TestIsFocusdMeshOrEnsurePlist asserts the DEAD-branch corroboration predicate
+// (issue #102-c): unlike the strict worker-only live predicate, it ALSO matches
+// the ENSURER — so a dead generation left as only its ensurer plist is swept, not
+// stranded. It still excludes a vendor plist (no focusd marker).
+func TestIsFocusdMeshOrEnsurePlist(t *testing.T) {
+	cases := []struct {
+		name string
+		env  map[string]string
+		argv []string
+		want bool
+	}{
+		{"new worker A (env run:a)", map[string]string{MeshEnvKey: "run:a"}, []string{"/bin/x"}, true},
+		{"new worker B (env run:b)", map[string]string{MeshEnvKey: "run:b"}, []string{"/bin/x"}, true},
+		{"new ensurer (env ensure) — the #102-c case", map[string]string{MeshEnvKey: "ensure"}, []string{"/bin/x"}, true},
+		{"old worker (--mesh argv)", nil, []string{"/bin/x", "run", "--r", "a", "--mesh"}, true},
+		{"test-mode ensurer (ensure + --test-mode-flag)", nil, []string{"/bin/x", "ensure", "--test-mode-flag", "true"}, true},
+		// A bare "ensure" token is NOT focusd-specific → must NOT corroborate, so a
+		// third-party orphan carrying "ensure" is never misclassified (Copilot review).
+		{"third-party bare ensure argv (no focusd marker)", nil, []string{"/usr/bin/thing", "ensure"}, false},
+		{"vendor plist (neither)", map[string]string{"OTHER": "x"}, []string{"/bin/x", "--foo"}, false},
+		{"empty", nil, nil, false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := isFocusdMeshOrEnsurePlist(c.env, c.argv); got != c.want {
+				t.Fatalf("isFocusdMeshOrEnsurePlist(%v, %v) = %v, want %v", c.env, c.argv, got, c.want)
+			}
+		})
+	}
+}
+
 // TestEncodeRoleExact pins the exact env values the round-trip depends on, so a
 // rename of a role string can never silently desync encode/decode.
 func TestEncodeRoleExact(t *testing.T) {
