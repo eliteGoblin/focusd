@@ -107,6 +107,14 @@ func RenderText(s Snapshot, res Result, pd PlatformDetail, out io.Writer, color 
 	fmt.Fprintf(out, "  %-22s %s\n", "platform process", procLine(s))
 	fmt.Fprintf(out, "  %-22s %s\n", "platform version", versionLine(s))
 
+	// Generation cleanliness — an affirmative "no orphaned old version" signal.
+	// Shown only when an install exists (the "not installed" engine line already
+	// covers the empty case); clean / degraded / unknown per generationsLine.
+	// Counts only — no disguised path is ever printed.
+	if s.Found {
+		fmt.Fprintf(out, "  %-22s %s\n", "generations", generationsLine(s))
+	}
+
 	// Out-of-band watchdog rail liveness (FEATURE 12 / ADR-0016). PRESENT-ONLY:
 	// the watchdog is a best-effort, flaky secondary rail — it must never read
 	// as a problem on the CURRENT-state status. We print the line ONLY when the
@@ -161,6 +169,22 @@ func procLine(s Snapshot) string {
 	}
 }
 
+// generationsLine describes generation cleanliness: "1 (clean)" when the current
+// good generation is the only one present, a ⚠ warning naming how many orphaned
+// prior generations linger when the reaper's read-only count is >0, and an honest
+// "unknown" when the scan could not run. Counts only — never a disguised path.
+func generationsLine(s Snapshot) string {
+	if s.GenerationsUnknown {
+		return "unknown (re-run with sudo)"
+	}
+	if s.OtherGenerations == 0 {
+		return "1 (clean)"
+	}
+	// total present = the keep + the orphaned others.
+	return fmt.Sprintf("⚠ %d — %d orphaned prior generation(s)",
+		s.OtherGenerations+1, s.OtherGenerations)
+}
+
 // watchdogPresent reports whether the out-of-band watchdog rail is fully up
 // (checked, cron line present, AND its binary copy on disk). It is the single
 // gate for whether the watchdog line renders at all (present-only): absent /
@@ -189,21 +213,23 @@ func versionLine(s Snapshot) string {
 // daemonJSON is the daemon-owned half of the combined JSON. All primitives,
 // no disguised identifier — safe to marshal directly.
 type daemonJSON struct {
-	Mode            string `json:"mode"`
-	MeshLoaded      int    `json:"mesh_loaded"`
-	MeshTotal       int    `json:"mesh_total"`
-	MeshUnknown     bool   `json:"mesh_unknown"`
-	ProcCount       int    `json:"proc_count"`
-	Desired         string `json:"desired"`
-	Good            string `json:"good"`
-	VersionsUnknown bool   `json:"versions_unknown"`
-	WarmingUp       bool   `json:"warming_up"`
-	Found           bool   `json:"found"`
-	WatchdogChecked bool   `json:"watchdog_checked"`
-	WatchdogCron    bool   `json:"watchdog_rail"` // rail presence; mechanism name deliberately not exposed
-	WatchdogCopyOK  bool   `json:"watchdog_copy_ok"`
-	Verdict         string `json:"verdict"`
-	Note            string `json:"note"`
+	Mode               string `json:"mode"`
+	MeshLoaded         int    `json:"mesh_loaded"`
+	MeshTotal          int    `json:"mesh_total"`
+	MeshUnknown        bool   `json:"mesh_unknown"`
+	ProcCount          int    `json:"proc_count"`
+	OtherGenerations   int    `json:"other_generations"`
+	GenerationsUnknown bool   `json:"generations_unknown"`
+	Desired            string `json:"desired"`
+	Good               string `json:"good"`
+	VersionsUnknown    bool   `json:"versions_unknown"`
+	WarmingUp          bool   `json:"warming_up"`
+	Found              bool   `json:"found"`
+	WatchdogChecked    bool   `json:"watchdog_checked"`
+	WatchdogCron       bool   `json:"watchdog_rail"` // rail presence; mechanism name deliberately not exposed
+	WatchdogCopyOK     bool   `json:"watchdog_copy_ok"`
+	Verdict            string `json:"verdict"`
+	Note               string `json:"note"`
 }
 
 // combinedJSON is the structural composition of the daemon snapshot and the
@@ -221,21 +247,23 @@ type combinedJSON struct {
 func RenderJSON(s Snapshot, res Result, pd PlatformDetail, out io.Writer) {
 	c := combinedJSON{
 		Daemon: daemonJSON{
-			Mode:            s.Mode,
-			MeshLoaded:      s.MeshLoaded,
-			MeshTotal:       s.MeshTotal,
-			MeshUnknown:     s.MeshUnknown,
-			ProcCount:       s.ProcCount,
-			Desired:         s.Desired,
-			Good:            s.Good,
-			VersionsUnknown: s.VersionsUnknown,
-			WarmingUp:       s.WarmingUp,
-			Found:           s.Found,
-			WatchdogChecked: s.WatchdogChecked,
-			WatchdogCron:    s.WatchdogCron,
-			WatchdogCopyOK:  s.WatchdogCopyOK,
-			Verdict:         string(res.Verdict),
-			Note:            res.Note,
+			Mode:               s.Mode,
+			MeshLoaded:         s.MeshLoaded,
+			MeshTotal:          s.MeshTotal,
+			MeshUnknown:        s.MeshUnknown,
+			ProcCount:          s.ProcCount,
+			OtherGenerations:   s.OtherGenerations,
+			GenerationsUnknown: s.GenerationsUnknown,
+			Desired:            s.Desired,
+			Good:               s.Good,
+			VersionsUnknown:    s.VersionsUnknown,
+			WarmingUp:          s.WarmingUp,
+			Found:              s.Found,
+			WatchdogChecked:    s.WatchdogChecked,
+			WatchdogCron:       s.WatchdogCron,
+			WatchdogCopyOK:     s.WatchdogCopyOK,
+			Verdict:            string(res.Verdict),
+			Note:               res.Note,
 		},
 		Overall: string(res.Verdict),
 	}

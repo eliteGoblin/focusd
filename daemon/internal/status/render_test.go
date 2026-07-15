@@ -281,6 +281,96 @@ func TestRender_WatchdogPresentOnly(t *testing.T) {
 	}
 }
 
+// TestRender_GenerationsLine verifies the generation-cleanliness line: a clean
+// install reads "1 (clean)", a lingering orphan reads a ⚠ warning naming the
+// count, an unreadable scan reads honest "unknown", and a not-installed box
+// omits the line entirely (the "not installed" engine line already covers it).
+// Every rendered form stays free of disguised identifiers.
+func TestRender_GenerationsLine(t *testing.T) {
+	base := realisticSnapshot() // Found=true
+	cases := []struct {
+		name      string
+		mutate    func(Snapshot) Snapshot
+		wantLine  bool
+		wantValue string
+	}{
+		{
+			name:      "clean → generations 1 (clean)",
+			mutate:    func(s Snapshot) Snapshot { s.OtherGenerations = 0; s.GenerationsUnknown = false; return s },
+			wantLine:  true,
+			wantValue: "1 (clean)",
+		},
+		{
+			name:      "one orphan → warning names the count",
+			mutate:    func(s Snapshot) Snapshot { s.OtherGenerations = 1; s.GenerationsUnknown = false; return s },
+			wantLine:  true,
+			wantValue: "1 orphaned prior generation(s)",
+		},
+		{
+			name:      "two orphans → total and orphan count",
+			mutate:    func(s Snapshot) Snapshot { s.OtherGenerations = 2; s.GenerationsUnknown = false; return s },
+			wantLine:  true,
+			wantValue: "⚠ 3 — 2 orphaned prior generation(s)",
+		},
+		{
+			name:      "unknown scan → honest unknown",
+			mutate:    func(s Snapshot) Snapshot { s.GenerationsUnknown = true; return s },
+			wantLine:  true,
+			wantValue: "unknown (re-run with sudo)",
+		},
+		{
+			name:      "not installed → generations line omitted",
+			mutate:    func(s Snapshot) Snapshot { s.Found = false; s.GenerationsUnknown = true; return s },
+			wantLine:  false,
+			wantValue: "",
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			s := c.mutate(base)
+			var txt bytes.Buffer
+			RenderText(s, Assess(s), PlatformDetail{Available: false}, &txt, false)
+			out := txt.String()
+			hasLine := strings.Contains(out, "generations")
+			if hasLine != c.wantLine {
+				t.Fatalf("generations line present=%v want %v:\n%s", hasLine, c.wantLine, out)
+			}
+			if c.wantValue != "" && !strings.Contains(out, c.wantValue) {
+				t.Errorf("generations line missing %q:\n%s", c.wantValue, out)
+			}
+			assertNoLeak(t, "generations text", out)
+		})
+	}
+}
+
+// TestRenderJSON_GenerationsFields verifies the machine report carries the raw
+// generation-cleanliness signal (count + unknown flag) for consumers.
+func TestRenderJSON_GenerationsFields(t *testing.T) {
+	s := realisticSnapshot()
+	s.OtherGenerations = 2
+	s.GenerationsUnknown = false
+
+	var buf bytes.Buffer
+	RenderJSON(s, Assess(s), PlatformDetail{Available: false}, &buf)
+
+	var top struct {
+		Daemon struct {
+			OtherGenerations   int  `json:"other_generations"`
+			GenerationsUnknown bool `json:"generations_unknown"`
+		} `json:"daemon"`
+	}
+	if err := json.Unmarshal(buf.Bytes(), &top); err != nil {
+		t.Fatalf("invalid JSON: %v\n%s", err, buf.String())
+	}
+	if top.Daemon.OtherGenerations != 2 {
+		t.Errorf("other_generations = %d; want 2", top.Daemon.OtherGenerations)
+	}
+	if top.Daemon.GenerationsUnknown {
+		t.Errorf("generations_unknown = true; want false")
+	}
+	assertNoLeak(t, "generations json", buf.String())
+}
+
 // TestCombine_DisabledAndRecoveredPluginNotDegraded verifies the cross-layer
 // agreement: when the platform reports a healthy roll-up (a recovered-tamper
 // plugin reads "ok" → Healthy, and an intentionally-disabled plugin is
@@ -321,7 +411,7 @@ func TestCombine_DisabledAndRecoveredPluginNotDegraded(t *testing.T) {
 // honest "unknown (re-run with sudo)" lines and exits via Unknown→0, not a
 // hard failure or a DOWN.
 func TestRender_UnknownLinesHonest(t *testing.T) {
-	s := Snapshot{Mode: "system", Found: true, MeshUnknown: true, VersionsUnknown: true}
+	s := Snapshot{Mode: "system", Found: true, MeshUnknown: true, VersionsUnknown: true, GenerationsUnknown: true}
 	res := Assess(s)
 	if res.Verdict != Unknown {
 		t.Fatalf("verdict = %s; want Unknown", res.Verdict)

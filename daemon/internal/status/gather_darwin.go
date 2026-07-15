@@ -85,6 +85,10 @@ const platformStatusTimeout = 8 * time.Second
 func Gather(workdirOverride string, jsonMode bool) (Snapshot, PlatformDetail) {
 	m := mode.Resolve()
 	s := Snapshot{Mode: string(m)}
+	// Generation cleanliness defaults to UNKNOWN until we successfully scan +
+	// count (below). An unreadable / not-yet-computed state must never fabricate
+	// a "clean" 0 — mirror the VersionsUnknown/MeshUnknown honesty pattern.
+	s.GenerationsUnknown = true
 
 	// --- Mesh roles (counts only cross the osadapter boundary) ---
 	loaded, total, found, err := osadapter.MeshStatus(m)
@@ -130,6 +134,21 @@ func Gather(workdirOverride string, jsonMode bool) (Snapshot, PlatformDetail) {
 		} else if cur.Workdir != "" {
 			workdirTok = redact.New(cur.Workdir)
 			s.Found = s.Found || cur.BinaryPath != ""
+		}
+
+		// --- Generation cleanliness (counts only, reuses the reaper's scan) ---
+		// Reuse osadapter.CountOtherGenerations (the READ-ONLY twin of the
+		// reaper's RetireOtherGenerations enumeration) to affirmatively report
+		// whether any ORPHANED prior-generation install lingers besides the
+		// current good one. Only answerable once the current install's binary
+		// (the keep) is identified; on any read failure (or no keep) we leave
+		// GenerationsUnknown=true rather than fabricate a "clean" 0. Only a COUNT
+		// crosses the boundary — no disguised path enters the Snapshot.
+		if cur.BinaryPath != "" {
+			if others, cerr := osadapter.CountOtherGenerations(m, cur.BinaryPath); cerr == nil {
+				s.OtherGenerations = others
+				s.GenerationsUnknown = false
+			}
 		}
 	}
 

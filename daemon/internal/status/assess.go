@@ -15,6 +15,8 @@
 // So nothing the assessor or renderer touches can leak a teardown string.
 package status
 
+import "fmt"
+
 // Verdict is the daemon-status health classification. Reused names mirror
 // the platform's verdict vocabulary so the combined output reads coherently.
 type Verdict string
@@ -43,6 +45,18 @@ type Snapshot struct {
 	// ProcCount is how many live processes match the good platform binary
 	// (exact path match). Expected 1 in steady state; 0 ⇒ down; >1 ⇒ anomaly.
 	ProcCount int
+
+	// OtherGenerations is how many ORPHANED prior-generation focusd installs
+	// exist besides the current good one (the reaper's read-only enumeration —
+	// osadapter.CountOtherGenerations). 0 ⇒ clean ("new version started clean,
+	// no dup / no old version"); >0 ⇒ a prior generation that should have been
+	// retired is still present (a real anomaly). It counts LIVE other-binary
+	// generations AND dead/zombie generations. GenerationsUnknown means the scan
+	// could not run (no current install identified, off-platform, or an IO
+	// failure) — distinct from a genuine "clean 0"; an unknown read must never
+	// be reported as clean OR as degraded (mirrors VersionsUnknown/MeshUnknown).
+	OtherGenerations   int
+	GenerationsUnknown bool
 
 	// Desired / Good are the platform version the daemon wants vs the last
 	// version it promoted to good. VersionsUnknown means the workdir couldn't
@@ -144,9 +158,21 @@ func Assess(s Snapshot) Result {
 		return Result{Degraded, "more than one platform process running (anomaly)"}
 	}
 
-	// Could not read mesh and/or versions, but nothing read as broken →
-	// honest unknown (e.g. system install without sudo). Folds to exit 0.
-	if s.MeshUnknown || s.VersionsUnknown {
+	// Generation cleanliness — an orphaned prior generation is still present
+	// (should have been retired). Ranked alongside the ProcCount>1 anomaly: a
+	// live leftover generation is a real anomaly (DEGRADED), but it never
+	// overrides a hard DOWN above. Gated on the count being KNOWN: an unknown
+	// generation read must never upgrade to Degraded (folds to Unknown below).
+	if s.OtherGenerations > 0 && !s.GenerationsUnknown {
+		return Result{Degraded, fmt.Sprintf(
+			"%d orphaned prior-generation install(s) present (should have been retired)",
+			s.OtherGenerations)}
+	}
+
+	// Could not read mesh, versions, and/or the generation scan, but nothing
+	// read as broken → honest unknown (e.g. system install without sudo). Folds
+	// to exit 0.
+	if s.MeshUnknown || s.VersionsUnknown || s.GenerationsUnknown {
 		return Result{Unknown, "some facts unknown (re-run with sudo for full read)"}
 	}
 
