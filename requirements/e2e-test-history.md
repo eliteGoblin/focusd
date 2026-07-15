@@ -22,11 +22,67 @@
 > convergence — PASS) + TC-22 (status never false-UNKNOWN — DB run-history
 > concurrency — PASS) + TC-24 (churn-window status-vs-disk skew — WATCH).
 > TC-23 confirmed open with decisive evidence (bug #83).
+> **Hardening epic (2026-07-14, live-demonstrated bypasses — register §6
+> limitation 13):** FEATURE 21 (HF1) ↔ TC-25 (platform-folder wipe can't disable
+> the daemon; daemon re-establishes the platform — **PASS at the sandbox/test-mode
+> tier on branch `hardening/hf1-storage-separation`, live-tier + deploy pending**);
+> FEATURE 22 (HF2) ↔ TC-26
+> (combined teardown recovers via out-of-band seed — issue #87); FEATURE 23 (HF3)
+> ↔ TC-27 (dummy plugin binary cannot persist — **overlaps F15/TC-06, human to
+> reconcile regression-vs-new-gap**); FEATURE 24 (HF4) ↔ TC-28 (no plugin/process
+> identity tell maps to the working folder — **PASS at the sandbox/test-mode tier on
+> branch `hardening/hf4-disguise`, live-tier + deploy pending**); **FEATURE 25
+> (single-instance convergence + in-place upgrade) ↔ TC-29** (one daemon + one
+> platform after install/upgrade; no CLI teardown door; steady-state reconcile reaps a
+> duplicate — extends F17 + ADR-0013). **TC-26/27/29 TO VERIFY (not built);
+> TC-25 + TC-28 PASS at the sandbox/test-mode tier (built, branches), live-tier +
+> deploy pending — all sandbox/test-mode only, never the real install.**
+> **VITAL bars (2026-07-14): FEATURE 24 (HF4) ↔ TC-30** — process-table & casual-probe
+> invisibility of the workdir (nothing in argv **or** env locates it; no `--workdir`;
+> no common word); **sharpens/supersedes TC-28's narrower sweep** (TC-28 didn't
+> exercise the `ps -E` env-dump vector, so the env-var `--workdir` leak survives —
+> current build **PRE-FIX**, TC-30 **OPEN**). **FEATURE 21 (HF1) / FEATURE 17 ↔ TC-31**
+> — deleting the working folder (`rm -rf`) self-recovers a **FRESH** artifact (new
+> mtime/pid), no manual help, bounded window; consolidates the VITAL recovery bar
+> already part-covered by TC-14 (live-PASS) + TC-25 (test-mode PASS); **OPEN**,
+> live-tier. **FEATURE 25 × FEATURE 24 ↔ TC-32** — upgrade end-state: exactly one
+> fresh disguised process, zero old/duplicate/orphan, no leftover pre-disguise
+> `--workdir` line, and the survivor passes the TC-30 bar (no-duplicate-on-upgrade is
+> **both** a resilience property F25 **and** a disguise property F24); **OPEN**. All
+> three are standing red-team + e2e gates, each verified TEST-MODE first THEN LIVE.
+> **Anti-tamper VITAL (2026-07-14, layered supervision — register §5):** **TC-33** — a
+> tampered platform binary (empty+chmod+x / fake / delete) **should** auto-revert to the
+> genuine **signed platform** before it runs (daemon→platform) — **test-mode FAIL
+> (empirical):** a **fake** platform binary was **exec'd UNVERIFIED** and an **empty** swap
+> took the platform **DOWN** (verify gated on binary-presence, no sig-check on the exec
+> path); **verify-before-exec fix IN PROGRESS — stays OPEN until it re-tests PASS**.
+> **TC-34** — a tampered **bundled** plugin binary auto-reverts to the genuine **embedded**
+> binary before it runs (platform→plugins; HF3 / FEATURE 23, relates TC-27 + TC-06/F15 —
+> human to reconcile the F15-vs-F23 framing) — **test-mode PASS** (all 3 variants restore
+> genuine before run, fake never runs, tamper event recorded; **live e2e still owed** for
+> final sign-off). Scope: signed platform + **bundled** plugins only — **unbundled**
+> browser-monitor (anti-tamper-GAP in **user** mode; **closed in system mode** by the
+> bundled-only allowlist, verify live) / freedom-protector are NOT covered by HF3.
+> Evidence: `scripts/testmode/tc-layered-antitamper.sh`.
 > **FEATURE 20 (mac-browser-guard) ↔ TC-U1 — a UTILITY-tier case (ADR-0021),
 > kept OUTSIDE the platform mesh suite: it exercises a user-mode script on a
 > different execution path, not the signed daemon/platform mesh, so its run model
 > is not the mesh "walk every TC each deploy" model — see the Utility-tier
 > section below.**
+>
+> **v0.18.0 consolidated-hardening LIVE record (2026-07-15).** First live verification
+> of the consolidated build: **TC-30 PASS live (FEATURE 24 VITAL invisibility bar MET —
+> workdir in neither argv nor env)**, **TC-32 PASS live** (one fresh disguised instance
+> after upgrade, respawns, no old `--workdir` line), **TC-33 PASS live via the restart
+> path** (verify-before-exec — tampered platform never runs unverified), plus signed
+> release + one-generation confirmed. **Still open:** **TC-31 FAIL** (wiped folder
+> self-heals only on platform restart, not proactively → FEATURE 21 stays BUILDING),
+> and **NEW TC-35 FAIL** (`watchdog_copy_ok=false` — the FEATURE 18 companion offline
+> backup rail is broken; needs a bug ticket). New DEFINING specs mapped: **FEATURE 26
+> (disguise blend-in) ↔ TC-36** (TO VERIFY) and **FEATURE 27 (browser-monitor
+> standalone) ↔ TC-U2** (utility tier, TO VERIFY). Observation: net-block disabled by
+> baked default + config/policy integrity ABSENT (TC-10 iceboxed; config→server
+> direction, register §9).
 >
 > **Redaction (non-negotiable).** Verify as a developer, but NEVER print the
 > disguised workdir, labels, rotated binary paths, or plugin paths. Report
@@ -399,6 +455,327 @@ mesh; macOS gives no API to re-enable), (d) **kill all processes**, plus their
 
 ---
 
+## Hardening-epic test cases (HF1–HF4) — *FEATURE 21–24*  `[added 2026-07-14 — live-demonstrated bypasses]`
+
+> These map the four bypasses the owner demonstrated **live** (register §6
+> limitation 13). TC-26/27/28 are **TO VERIFY (not built)**; **TC-25 is PASS at the
+> sandbox/test-mode tier** (built on branch `hardening/hf1-storage-separation`),
+> with live-tier follow-ups + an actual deploy still pending. **TC-30 (VITAL
+> process-table invisibility) and TC-31 (VITAL workdir-delete fresh recovery) are
+> OPEN standing gates** — TC-30 sharpens TC-28 (current build PRE-FIX: the
+> `--workdir` env-var leak survives the `ps -E` env dump). **Verify each on a
+> sandbox/test-mode instance ONLY — never by tearing down the owner's real
+> install.** A sandbox/test-mode PASS is a real failure-and-recover run on a
+> disposable instance (baseline-OPEN-on-master → CLOSED-on-fix), **not** test-mode
+> green alone; it is an intermediate tier — a feature ships only after its
+> **live-tier** follow-ups pass on the real install + an actual deploy (§5).
+
+### TC-25 🟢 Platform-folder wipe can't disable the daemon; daemon re-establishes the platform — *FEATURE 21 (HF1)*  `[found 2026-07-14 — TEST-MODE PASS, live-tier pending]`
+- **Origin:** deleting the platform working folder took the **whole system** down,
+  including the daemon meant to rebuild the platform (recoverer shares fate).
+- **Check (sandbox/test-mode only):** remove the platform's working storage →
+  the daemon's own identity + storage stays present, the daemon stays running, and
+  it re-establishes the platform **fresh** within a bounded, stated window with no
+  manual action.
+- **Expect:** daemon survives + platform back, fresh, bounded time.
+- **Status: 🟢 PASS at the SANDBOX / test-mode tier — NOT yet live-verified**
+  (branch `hardening/hf1-storage-separation`, fix commit `f0593fb`, 2026-07-14).
+  Baseline-then-fix, both weaknesses reproduced **OPEN on master** and **CLOSED on
+  the fix**, twice each, clean isolation:
+  - **25a** (shared-fate): master baseline — deleting the platform folder **KILLS
+    the daemon** (binary co-located) [OPEN]; fix — daemon **SURVIVES** and
+    **re-establishes the platform at a FRESH path** (new inode/mtime/sentinel)
+    [CLOSED]. Evidence: pids `67149→67339`; new platform-workdir path P1≠P0; the
+    daemon binary in daemon-home survived the wipe. (Acceptance 1, 2, 3.)
+  - **25b** (independent storage): daemon-home ≠ platform-workdir — **sibling
+    roots, neither nested** in the other [PASS].
+  - **25c** (blast-radius, CRITICAL): a decoy real-install dir (hidden-dot +
+    state.db) under `~/Library` was **DELETED on master** by `install`, but
+    **SURVIVES on the fix** (sweep scoped to the explicit support root) [PASS —
+    the delete-danger is fixed].
+  - **25d** (no regression): clean instance — single supervisor, mesh mutual-respawn
+    intact [PASS]. (Acceptance 4.)
+  - **25e** (truthfulness): status reports **down honestly**, no green-over-dead [PASS].
+- **Reusable script:** `scripts/testmode/TC-25-storage-separation.sh` (safe_rm-gated —
+  every destructive step asserts the exact target exists first).
+- **Honesty caveat (why this is a tier, not done):** test mode does **not**
+  auto-relocate the binary, so the baseline **emulated** the production single-root
+  shared-fate rather than exercising the real relocate. The sandbox proves the
+  separation logic; **live must confirm the real relocate.**
+- **Live-tier follow-ups (for the e2e-verifier, before FEATURE 21 can ship):**
+  1. a real disguised generation-workdir under the **actual** `~/Library` survives
+     a **real** install (real relocate, not emulated);
+  2. status stays truthful when a **genuinely-running** platform's workdir is
+     deleted (no green-over-dead with a live platform).
+
+### TC-26 ⬜ Recovery survives combined teardown (auto-start off + folder wiped) via an out-of-band seed — *FEATURE 22 (HF2)*  `[found 2026-07-14 — TO VERIFY]` (issue **#87**)
+- **Origin:** disabling auto-start (login item) **AND** deleting the platform folder
+  stopped everything and did not reliably recover.
+- **Check (sandbox/test-mode only):** with auto-start disabled **and** the platform
+  folder removed, protection re-establishes within a bounded window; the recovery
+  seed is **not discoverable by enumerating running processes**; the recovered
+  install is a **fresh rebuild**, not a survivor; disabling any single start
+  mechanism does not prevent recovery.
+- **Expect:** combined teardown recovers, seed out-of-band, fresh, redundant starts.
+  **Status: ⬜ TO VERIFY (not built).** Relates to issue **#87**.
+
+### TC-27 ⬜ Dummy plugin binary cannot persist — re-verify every cycle, refuse + re-fetch — *FEATURE 23 (HF3)*  `[found 2026-07-14 — TO VERIFY]`
+- **Origin:** a plugin binary swapped with a dummy **persisted and ran** (false-green
+  enforcement bypass). **⚠️ Overlaps FEATURE 15 / TC-06, recorded PASS** — reconcile
+  with the human whether this is a regression of F15 or a new gap.
+- **Check (sandbox/test-mode only):** replace a plugin binary with a different
+  (dummy) one → detected on the **next reconcile cycle** (not install-only), refused
+  (never run), replaced from the signed source; the dummy does **not** persist across
+  cycles; the tamper is recorded (audit); health does not read ok while unrestored.
+- **Expect:** dummy detected + refused + re-fetched within a bounded number of
+  cycles; recorded; no false green. **Status: ⬜ TO VERIFY (not built).**
+
+### TC-28 ⬜ No plugin/process identity tell maps to the working folder — *FEATURE 24 (HF4)*  `[found 2026-07-14 — TO VERIFY]`
+- **Origin:** `grep` of the process list for the target app revealed the
+  process-killer; a process name/version (e.g. `v0.16`) led the owner to the working
+  folder.
+- **Check (sandbox/test-mode only, redaction-safe counts):** a search of the live
+  process list for the enforcement keywords (target-app name, "kill", "platform")
+  **and** for a version string returns **0** hits that identify the install; plugin
+  argv carries zero identifying info; no running-process string maps to the working
+  folder.
+- **Expect:** 0 identifying hits; argv clean; no path to the folder.
+  **Status: 🟢 PASS at the sandbox/test-mode tier** (branch `hardening/hf4-disguise`,
+  commit `f5a157c` on the HF1 base). Zero-leak greppability checks (criteria 1–3)
+  come up **empty** — a sweep of the running system for the enforcement keywords, a
+  version string, "focusd"/"platform", plugin names, and the working-folder location
+  finds nothing that maps to the install; the platform process shows a generic name,
+  plugin config is carried off the command line, on-disk plugin folders + logs use
+  neutral names, and mesh labels no longer cluster. **NOT live-verified, NOT
+  deployed** — a live e2e pass on the real install + a signed deploy remain (done in
+  the hardening-epic consolidation). **Honest limit:** casual-grade only — `argv[0]`
+  (the binary path) stays root-visible via low-level APIs; the goal is only that
+  nothing *greppable* maps to the install in a `ps`/`grep` sweep.
+
+### TC-29 ⬜ One daemon + one platform after install/upgrade; no CLI teardown door — *FEATURE 25*  `[found 2026-07-14 — TO VERIFY]`
+- **Origin:** duplicate accumulation observed live (~16 "platform" processes at one
+  point) + stale old-version daemons left after upgrades — upgrades stacked instead
+  of replacing. Extends FEATURE 17 (generation retirement) + ADR-0013 (single-platform
+  lock).
+- **Check (sandbox/test-mode only, redaction-safe counts):**
+  (1) after an install/upgrade → exactly **one** daemon generation + **one** platform
+  process, no orphans / no old-version daemon;
+  (2) install over an existing install → prior generation(s) retired + the daemon
+  binary **replaced in place** (not a second live stack);
+  (3) introduce a **second/duplicate** platform at steady state → the reconcile loop
+  **retires it** (returns to one) unprompted, within a bounded number of cycles;
+  (4) **no CLI verb** exists that a user can invoke to stop / clean up / kill
+  protection — the convergence is internal to install/reconcile; the uninstall ritual
+  is the sole sanctioned removal;
+  (5) no regression to recovery/self-heal (TC-14/16/17) or enforcement.
+- **Expect:** exactly one daemon + one platform at steady state; in-place upgrade;
+  planted duplicate reaped; no stop/cleanup command; no regression. A transient
+  handover-overlap window during upgrade is acceptable (steady-state guarantee).
+  **Status: ⬜ TO VERIFY (not built).** See **TC-32** for the upgrade end-state
+  coupled with the disguise/invisibility bar (single-instance is also a disguise
+  property, not only resilience).
+
+### TC-30 🟠 Process-table & casual-probe invisibility — nothing locates the workdir; no `--workdir` in argv/env — *FEATURE 24 (HF4), **VITAL***  `[found 2026-07-14 — ✅ PASS live 2026-07-15, v0.18.0]`
+- **Origin (the owner's single most-used exploit):** `grep` the process list for a
+  meaningful word → **read the workdir path off the process** → `rm -rf` it →
+  protection down. The `--workdir` **argument** was the tell; the half-fix only moved
+  it into an **environment variable**, which the environment-dump form of `ps` still
+  prints. Closing this **grep → workdir → `rm`** chain is a core friction
+  requirement, not cosmetic.
+- **Check (redaction-safe counts) — the literal contract:** the
+  exploit `sudo ps aux | grep -i support | grep -i application | grep '<release-tag>'`
+  **and** its `ps -E` / `ps eww` (environment dump), `ps -o comm`, `find`, and `lsof`
+  variants each return **0** hits that locate the working directory or identify the
+  binary. `--workdir` appears as **neither** a command-line argument **nor** an
+  environment variable in a production build. No common word — the target-app name,
+  `platform`, `daemon`, `block`, `dns`, `kill`, `focusd`, or the source-repo path /
+  release tag — appears in the process list or in on-disk names.
+- **Human-effort bar (the realistic threat).** A technically-competent adversary (the
+  owner) spending **10–20 minutes MANUALLY typing commands** — `ps aux`, `sudo ps -E`
+  / `ps eww`, `ps -o comm`, `grep` by any common word, `find`, `lsof`, a `launchctl`
+  listing — i.e. a realistic human probing session, **NOT** an exhaustive automated
+  sweep — must find **NO easy path** to the working directory or the process identity.
+  **If the human locates the working folder within that window, it is a FAIL** (they
+  will then delete it). **PASS = no easy leak in a 10–20 min manual session.**
+- **Expect:** 0 hits from every probe; no `--workdir` in argv or env; no common-word
+  tell; no easy path found by hand in 10–20 min. **Status: ✅ PASS — live-verified
+  (v0.18.0 consolidated hardening build, 2026-07-15).** The workdir appears in
+  **neither argv nor env** on the live build — the env-dump (`ps -E`) form no longer
+  prints a `--workdir` env var, closing the leak TC-28 never exercised. VITAL
+  invisibility bar **MET live** (FEATURE 24). Sharpens/supersedes **TC-28**, whose
+  earlier test-mode PASS did **not** exercise the `ps -E` environment-dump vector.
+  **Blend-in naming quality (FEATURE 26 / TC-36) is the next disguise bar** — this TC
+  closes the process-table leak, not the on-disk matching-set/hex-suffix signature.
+- **Verification order (BOTH stages required to close):** verified in **TEST-MODE /
+  sandbox FIRST** (testmode-verifier + the red-team manual sandbox session), **THEN
+  confirmed on the LIVE deploy** (e2e-verifier re-runs the same probes + the manual
+  session against the real running install). **A test-mode pass alone does NOT close
+  this TC** — the live confirmation is required (test-mode green ≠ live healthy). The
+  live probe here is read-only (`ps`/`find`/`lsof`/`launchctl` listing), so it needs
+  no teardown of the owner's install. Flip to PASS **only** on a real build where
+  every probe returns nothing at **both** stages.
+
+### TC-31 🟠 Deleting the working folder self-recovers a FRESH artifact — *FEATURE 21 (HF1) / FEATURE 17, **VITAL recovery***  `[found 2026-07-14 — 🔴 FAIL live 2026-07-15, v0.18.0]`
+- **Origin:** the working folder is the obvious `rm -rf` target once found (TC-30);
+  deleting it must not permanently break protection — the supervisor must
+  re-establish it **fresh** from the baked fallback + daemon/platform storage
+  separation (FEATURE 17 + 21).
+- **Check:** `rm -rf` the working folder → protection self-recovers with **no manual
+  help** within a **bounded, stated window**, and the recovered artifact is **FRESH**
+  (new mtime / new pid), not a survivor. Must be **exercised, not assumed**
+  (existence-gate every destructive step on the exact target first).
+- **Human-effort bar (the realistic threat).** A technically-competent adversary (the
+  owner) spending **10–20 minutes MANUALLY typing commands** — `ps aux`, `sudo ps -E`
+  / `ps eww`, `ps -o comm`, `grep` by any common word, `find`, `lsof`, a `launchctl`
+  listing — i.e. a realistic human probing session, **NOT** an exhaustive automated
+  sweep — must find **NO easy path** to the working directory or the process identity.
+  **If the human locates the working folder within that window, it is a FAIL** (they
+  will then delete it). **PASS = no easy leak in a 10–20 min manual session** — and if
+  they do delete it, recovery restores a FRESH artifact within the window (unaided).
+- **Expect:** fresh recovery (new mtime/pid), no manual action, bounded window.
+  **Status: 🔴 FAIL — live (v0.18.0, 2026-07-15).** A wiped working folder is **not
+  proactively self-healed**: recovery happens **only on the next platform restart**,
+  not on its own while the platform is running — so a deleted folder can stay down
+  until something else restarts the platform. The VITAL recovery bar is **NOT met**;
+  **FEATURE 21 stays BUILDING, not shipped.** Consolidates the VITAL recovery bar
+  part-covered by **TC-14** (platform-workdir delete → baked-fallback recovery on
+  restart, live-PASS) and **TC-25** (daemon survives the platform-folder wipe +
+  re-establishes fresh — test-mode PASS). Fix direction: proactive self-heal of the
+  wiped folder within a bounded window without waiting for a restart.
+- **Verification order (BOTH stages required to close):** verified in **TEST-MODE /
+  sandbox FIRST** — the destructive `rm -rf` runs on a **disposable** instance
+  (testmode-verifier + red-team sandbox run), existence-gated — **THEN confirmed on
+  the LIVE deploy** (e2e-verifier exercises the real-deploy recovery, as TC-14 did:
+  the wiped folder self-recovers fresh, so it does not permanently harm the
+  commitment device). **A test-mode pass alone does NOT close this TC** — the live
+  confirmation is required (test-mode green ≠ live healthy). Flip to PASS only when a
+  FRESH artifact returns unaided within the window at **both** stages.
+
+### TC-32 🟠 Upgrade end-state — clean single-instance AND unidentifiable — *FEATURE 25 (single-instance) × FEATURE 24 (disguise), **VITAL***  `[found 2026-07-14 — ✅ PASS live 2026-07-15, v0.18.0]`
+- **Why coupled (the rationale):** a leftover **old, un-disguised** process after an
+  upgrade is **doubly harmful** — it leaks the old identity/workdir (the pre-disguise
+  `platform --workdir` line) **and** hands the owner a folder to delete, defeating the
+  disguise on the new process; and two near-identical processes is itself a disguise
+  **tell**. So "no duplicate/old process on upgrade" is **both** a resilience property
+  (F25) **and** a disguise property (F24) — they must pass **together**.
+- **Check (redaction-safe counts):** after upgrading from the prior version, `ps` shows
+  **EXACTLY ONE** current, disguised process — **ZERO** old-version / duplicate
+  processes, no orphans, and specifically **NO** leftover pre-disguise
+  `platform --workdir` line from the old generation. The surviving process **satisfies
+  the TC-30 invisibility bar + the 10–20-min human-effort bar**.
+- **Expect:** exactly one fresh disguised instance; zero old/duplicate/orphan; no old
+  `--workdir` tell; the survivor passes TC-30.
+- **Verification order (BOTH stages required to close):** **TEST-MODE / sandbox
+  FIRST** — stand up a prior-style generation, install/upgrade to the new build,
+  confirm the old generation is retired and exactly one fresh disguised instance
+  remains; **THEN LIVE** — deploy the consolidated build over the current pre-disguise
+  install (platform v0.16.7): baseline-then-verify that the old process is gone and
+  exactly one new disguised process is present. **A test-mode pass alone does NOT
+  close this TC.**
+- **Status: ✅ PASS — live-verified (v0.18.0 consolidated hardening build,
+  2026-07-15).** After the upgrade the process table shows **exactly one** fresh
+  disguised instance — **zero** old/duplicate/orphan processes, and it **respawns**
+  when killed (single-instance held live); no leftover pre-disguise `--workdir` line,
+  and the survivor satisfies the TC-30 invisibility bar. The F25 reaper recognised the
+  **disguised** new identity (register §9 F25↔HF4 coupling) and retired the old
+  generation instead of leaving two live stacks. Couples **TC-29** (F25 single-instance
+  / in-place upgrade / reaper) with **TC-30** (F24 invisibility bar). *Note: the e2e
+  handoff labelled this "respawn PASS"; recorded here as the upgrade-end-state
+  single-instance-×-disguise coupling — confirm if a narrower reading was intended.*
+
+### TC-33 🔴 Tampered platform binary should auto-revert to the genuine signed platform before it runs — *Layered supervision (daemon→platform), **VITAL anti-tamper***  `[found 2026-07-14 — ✅ PASS live 2026-07-15 (restart path), v0.18.0]`
+- **Origin (anti-tamper invariant, register §5):** the daemon owns the platform's
+  **authenticity**, not just its liveness — a running-but-tampered platform is a
+  false-green. This case pins that the daemon **verify-or-restores** the platform before
+  it runs.
+- **Check (sandbox/test-mode first, THEN LIVE, redaction-safe):** tamper the on-disk
+  platform binary three ways — **(a) emptied + `chmod +x`** (zero-byte executable),
+  **(b) swapped** for a different/dummy binary, **(c) deleted** — then let the daemon run
+  its next cycle. In each case the tampered/absent binary is **refused (never run)** and
+  the daemon **restores / re-fetches the genuine signed platform** (signature verified)
+  before the platform executes.
+- **Expect:** none of the three tamper variants runs; the genuine signed platform is what
+  actually runs, restored within a bounded window; no false green while unrestored.
+- **Status: ✅ PASS — live-verified (v0.18.0 consolidated hardening build,
+  2026-07-15), via the restart path.** The verify-before-exec fix landed: a tampered
+  platform binary is **no longer exec'd unverified** — the daemon restores / re-fetches
+  the genuine **signed** platform and it is that genuine binary which runs. Recovery is
+  via the **restart path** (tamper detected → restart into the verified genuine
+  platform) rather than fully inline. Reverses the 2026-07-14 empirical test-mode FAIL
+  (a **fake** binary had run unverified; an **empty** swap took the platform DOWN).
+- **Secondary finding — confirm resolved:** the prior gap where a fast-exiting fake
+  platform could **wedge the daemon into a permanent BLOCKED state** should be cleared
+  by the same restart path — confirm the wedge no longer occurs under the live fix.
+- **Evidence:** test-mode harness `scripts/testmode/tc-layered-antitamper.sh`.
+- **Honest limit (once closed):** friction + fast restore, not a seal — root can
+  re-tamper / race the restore in a tight loop; covers **signed platform binary**
+  authenticity.
+
+### TC-34 🔴 Tampered bundled plugin binary should auto-revert to the genuine embedded binary before it runs — *FEATURE 23 (HF3) / Layered supervision (platform→plugins), **VITAL anti-tamper***  `[found 2026-07-14 — test-mode PASS 2026-07-14; live e2e pending for final sign-off]`
+- **Origin:** a plugin binary swapped with a dummy **persisted and ran** (false-green
+  enforcement bypass, register §6 limitations 11 + 13c). The platform owns each plugin's
+  authenticity: **verify-or-restore the genuine embedded binary before every run.**
+- **Check (sandbox/test-mode first, THEN LIVE, redaction-safe):** tamper a **bundled**
+  plugin binary (**emptied + `chmod +x`** / **swapped** / **deleted**) → on the next run
+  the platform **refuses the tampered/absent binary** and **restores it from the genuine
+  embedded copy** (the plugin ships inside the Ed25519-signed, daemon-verified platform)
+  before the plugin runs; the dummy **cannot persist** across cycles.
+- **Expect:** the dummy never enforces in place of the genuine plugin; the genuine
+  embedded binary is restored + run; no false green while unrestored.
+- **Status: 🟢 test-mode PASS (2026-07-14) — live e2e still owed for final sign-off.**
+  All **three** tamper variants on a bundled plugin (**empty + `chmod +x`** / **fake** /
+  **delete**) → the genuine binary is **restored BEFORE the run**, the fake **never
+  ran**, a `plugin_tamper_repaired` event was recorded, all within **~1 schedule
+  interval**. This **PROVES in test-mode** the HF3 verify-or-restore behaviour that
+  **TC-27** defined and **TC-06 / FEATURE 15** first addressed. **NOT yet DONE:** live
+  e2e on the real install is still owed before final sign-off (register §5
+  release-acceptance — DONE = live-verified + working locally). **⚠️ Human still to
+  reconcile the F15-vs-F23 framing** (new feature vs regression of F15) — a separate
+  naming decision (register §6 limitation 13c), not resolved by this pass.
+- **Evidence:** test-mode harness `scripts/testmode/tc-layered-antitamper.sh`.
+- **Unbundled-plugin caveat (honest scope + empirical finding 2026-07-14):** HF3's
+  verify-or-restore covers **bundled / embedded** plugins only. **Unbundled** helpers —
+  **browser-monitor** and **freedom-protector** — do not ship inside the signed platform.
+  The verifier confirmed **browser-monitor is anti-tamper-GAP in USER mode** (its fake
+  ran); this is **closed in SYSTEM mode by the bundled-only allowlist** (root-only) —
+  **verify live**. **freedom-protector** authenticity remains a separate, still-open gap.
+- **Honest limit:** friction + fast restore, not a seal (root can re-tamper / race);
+  **binary** authenticity only — plugin **config/policy** integrity stays iceboxed (TC-10).
+
+### TC-35 🟠 Companion offline backup rail is present + VALID — *FEATURE 18*  `[found 2026-07-15 — live FAIL]`
+- **Origin (live finding, v0.18.0):** the out-of-band companion rebuilds the daemon
+  after a total teardown from a **signed offline backup copy** (the rail TC-16/TC-17
+  proved). On the v0.18.0 live build the companion's own health field reads
+  **`watchdog_copy_ok=false`** — the backup it would rebuild from is **INVALID/broken**.
+  A recovery rail that looks present but can't actually rebuild is the project's
+  signature latent-failure shape (a rail that reads present over a dead capability).
+- **Check (redaction-safe boolean):** the companion's signed offline backup exists and
+  **verifies** (`watchdog_copy_ok` true), so the TC-16/TC-17 offline rebuild path is
+  actually armed — not just reported present.
+- **Expect:** backup present + signature-valid. **Status: 🔴 FAIL — live (v0.18.0,
+  2026-07-15).** `watchdog_copy_ok=false`; the F18 offline-rebuild rail is **at risk**
+  until the backup is repaired/re-seeded. **Needs a bug ticket + fix.** TC-16/TC-17
+  stay PASS for the *mechanism* verified earlier, but their precondition (a valid
+  offline backup) is currently broken on the live build — re-run TC-16/TC-17 once the
+  backup is valid again.
+
+### TC-36 ⬜ Disguise blend-in — the install isn't a matching set / anomalous to an apps-folder survey — *FEATURE 26*  `[found 2026-07-15 — TO VERIFY, DEFINING]`
+- **Origin:** even with the process table clean (TC-30 PASS), the on-disk folders share
+  a common vendor-style prefix + **hex/UUID suffix** repeated across the daemon home,
+  the platform working folder, and the binaries — a single `grep`/eye-pattern over the
+  apps folder picks them all out as a matching set, and the hex suffix reads as "not a
+  real app."
+- **Check (redaction-safe, sandbox first then read-only live survey):** a casual
+  `grep`/`ls` survey of the apps folder cannot flag the install's folders as a matching
+  set or as anomalous; names read like ordinary word-based apps (no hex/UUID suffix);
+  no shared token/prefix/suffix ties the install's folders together; the shape is not
+  reused install-to-install.
+- **Expect:** install blends in — not a matching set, not anomalous. **Status: ⬜ TO
+  VERIFY** (FEATURE 26 is DEFINING / not yet scheduled). Extends TC-30 to the on-disk
+  naming layer.
+
+---
+
 ## Utility-tier test cases (OUTSIDE the platform mesh suite — different execution path)
 
 > **These do NOT belong to the platform mesh regression suite above.** The
@@ -426,6 +803,17 @@ mesh; macOS gives no API to re-enable), (d) **kill all processes**, plus their
 - **Honest limit (ADR-0021):** browser-only, user-mode, removable — thin friction,
   no signing/tamper-resistance/commitment-gate. Not a mesh guarantee.
 
+### TC-U2 ⬜ (utility tier) browser-monitor self-runs standalone when the platform isn't installed — *FEATURE 27*  `[found 2026-07-15 — TO VERIFY, DEFINING]`
+- **Tier:** utility / best-effort (user-mode), NOT the enforced mesh — see ADR-0021.
+- **Criterion:** with the platform **not** installed, the browser-monitor self-installs
+  a **user-level** runner (user launchd + cron fallback), **keeps running across
+  logout/restart**, self-restarts/heals on casual deletion, and still quits a browser
+  on a blocklisted tab — entirely user-mode (no sudo/admin). With the platform present,
+  it runs unchanged as the enforced plugin.
+- **Expect:** standalone self-run + self-heal delivers browser coverage where the stack
+  can't run. **Status: ⬜ TO VERIFY** (FEATURE 27 is DEFINING / needs the human gate on
+  its relationship to FEATURE 20 + ADR-0021).
+
 ---
 
 ## Run Log
@@ -440,4 +828,8 @@ mesh; macOS gives no API to re-enable), (d) **kill all processes**, plus their
 | 2026-06-29 | daemon-v0.5.7 (F19 + F17 convergence fix, #73) + platform v0.16.4 | TC-14 (re-confirmed under F19), TC-20 | TC-21 (still partial), TC-22 (new) | F19 live-verified: `ps` for the mesh marker + role flags returns **0** (role moved off argv into plist env); supervisor labels varied/non-clustering (TC-20 PASS). TC-14 re-confirmed under daemon-v0.5.7. F17 convergence fix (#73) retires dead-binary/zombie generations + ends orphan platforms — **convergence logic works live** (install "retired 2 → 1 platform"), but TC-21 stays PARTIAL: (a) stale workdir/state.db files left on disk, (b) status-flip → **TC-22 NEW** (run-history DB read/write concurrency → false OVERALL UNKNOWN; fix in progress), (c) manual cleanup helper not F19-env-aware |
 | 2026-06-29 | daemon-v0.5.9 (F18 + orphan-sweep, #76/#78/#80) + platform v0.16.7 (status snapshot, #79) | TC-16, TC-17, TC-21, TC-22 | TC-23 (new) | **F18 shipped + live-verified (Phase 1):** removed the entire in-band rail (daemon down, 0 platforms, 0 mesh plists) → the separate launchd companion (own folder, no FDA) detected the stale heartbeat and rebuilt the daemon from its signed offline backup (7.9MB, signature-checked) → mesh + platform back; companion excluded from mesh discovery/cleanup by construction (TC-16/TC-17 PASS; Phase 2 offline-platform restore deferred). **TC-21 PASS** — orphan-sweep (daemon-v0.5.8) verified live: after recovery/install churn exactly 1 state.db + 1 platform. **TC-22 PASS** — status snapshot (platform v0.16.7): 8 rapid reads stable, no false UNKNOWN; root cause was the status read contending with the reconcile writer, fixed by reading an atomic snapshot (3 prior attempts — orphan-sweep, WAL, rollback-journal — were dead-ends). **NEW TC-23 (FAIL):** the companion/watchdog rebuild path re-introduces the `--mesh` argv leak (F19 hides it only on the `daemon install` path) — `ps` shows `run --r a/b --mesh` after an out-of-band recovery until the next clean install; hygiene/friction, not a bypass |
 | 2026-07-01 | mac-browser-guard (FEATURE 20, utility tier — NOT a mesh deploy) | TC-U1 | — | Utility-tier live check on a real Mac (outside the platform mesh suite): user-mode guard saw all 7 open tabs incl. non-active, matched a blocklisted host, and quit Chrome (`tabs detected: 7` → `MATCH -> would kill … www.rba.com.au` → `Chrome is KILLED`). PASS. |
+| 2026-07-14 | HF1 / FEATURE 21 storage separation (branch `hardening/hf1-storage-separation`, fix `f0593fb`) — **SANDBOX / test-mode tier, NOT the real install, NOT deployed** | TC-25 (test-mode tier) | — | **TC-25 PASS at the sandbox/test-mode tier** — baseline-then-fix, both weaknesses reproduced OPEN on master + CLOSED on the fix, twice each, clean isolation. 25a: master baseline deleting the platform folder KILLS the daemon (co-located binary) → fix daemon SURVIVES + re-establishes the platform at a FRESH path (pids `67149→67339`, P1≠P0, daemon binary survived) [CLOSED]. 25b sibling roots (neither nested) PASS. 25c CRITICAL blast-radius: decoy real-install dir under `~/Library` DELETED on master by `install`, SURVIVES on the fix (sweep scoped to explicit support root) PASS. 25d no-regression (1 supervisor, mesh mutual-respawn) PASS. 25e status truthful (down honestly, no green-over-dead) PASS. Reusable script `scripts/testmode/TC-25-storage-separation.sh` (safe_rm-gated). **Honesty caveat:** test mode doesn't auto-relocate the binary → baseline EMULATED the prod single-root shared-fate; **live must confirm the real relocate.** **NOT yet live-verified** — 2 live-tier follow-ups: (1) a real disguised generation-workdir under the actual `~/Library` survives a REAL install; (2) status stays truthful when a genuinely-running platform's workdir is deleted. FEATURE 21 stays BUILDING (test-mode-tier PASS), NOT shipped. |
 | 2026-06-29 | daemon-v0.5.10 + platform v0.16.7 (independent e2e re-verification) | TC-14, TC-16, TC-17, TC-20, TC-21, TC-22 | TC-23 (confirmed, #83); TC-24 (WATCH, noted) | **Independent e2e-verifier re-ran the suite on daemon-v0.5.10.** **TC-14 PASS** — status `desired=none` (platform down, no BLOCK) → `desired=v0.16.3` (baked fallback) → `platform running` (old platform pid dead, fresh state.db); held stable on the fallback ~12 min, no permanent BLOCK. **TC-16/17 PASS** — entire in-band rail removed (0 mesh plists, 0 platforms, gen-roots deleted) → the preserved companion rebuilt the daemon **UNATTENDED** into a fresh single generation (3 plists, 1 state.db, 3/3 roles, platform back). **TC-20 PASS** — `ps … grep 'run --r\| --mesh'` = 0; 3/3 roles. **TC-21 PASS** — 1 state.db, 1 pid, no zombies. **TC-22 PASS** — 10/10 rapid reads identical, 0 changes. **TC-23 stays FAIL — now confirmed with DECISIVE evidence (#83):** direct plist read after the companion rebuild → mesh plists with `--mesh` = **2**, F19 env marker = **0** (rebuild writes pre-F19-format plists); ruled out test-mode **and** stale backup; root cause not yet pinned (both prior theories refuted); hygiene/friction, clean install clears it. **NEW TC-24 (WATCH):** churn-window status-vs-disk skew — `status` printed "3/3 roles running" while on-disk generations = 0 for one sample, self-corrected next sample (latent-failure class; FAIL if reproduced). |
+| 2026-07-14 | HF4 / FEATURE 24 disguise plugin & process identity (branch `hardening/hf4-disguise`, commit `f5a157c` on the HF1 base) — **SANDBOX / test-mode tier, NOT the real install, NOT deployed** | TC-28 (test-mode tier) | — | **TC-28 PASS at the sandbox/test-mode tier** — zero-leak greppability checks (criteria 1–3) come up **empty**: a sweep of the running system for the enforcement keywords, a version string, "focusd"/"platform", plugin names, and the working-folder location finds **nothing** that maps to the install. Platform process shows a generic name; plugin config carried off the command line; on-disk plugin folders + logs use neutral names; mesh labels no longer cluster; enforcement unchanged. **Honest limit:** casual-grade only — `argv[0]` (the binary path) stays root-visible via low-level APIs; goal is only that nothing *greppable* maps to the install in a `ps`/`grep` sweep. **NOT live-verified, NOT deployed** — a live e2e pass on the real install + a signed deploy remain (hardening-epic consolidation; note the F25 coupling: its orphan-reaper must be updated to recognise the disguised platform identity). FEATURE 24 stays BUILDING (test-mode-tier PASS), NOT shipped. |
+| 2026-07-14 | Anti-tamper layered-supervision verifier — **TEST-MODE only** (harness `scripts/testmode/tc-layered-antitamper.sh`) | TC-34 (test-mode) | TC-33 (test-mode, empirical) | **TC-34 test-mode PASS** — all 3 bundled-plugin tamper variants (empty+chmod+x / fake / delete) restore the genuine binary **BEFORE run**, the fake **never runs**, a `plugin_tamper_repaired` event is recorded, within ~1 schedule interval (HF3 verify-or-restore PROVEN in test-mode; **live e2e still owed** for final sign-off). **TC-33 test-mode FAIL (empirical)** — a **fake** platform binary was **exec'd UNVERIFIED** (arbitrary code ran as the platform); an **empty** swap took the platform **DOWN indefinitely**; root cause = executor verify gated on **binary-presence**, no sig-check on the exec path; **verify-before-exec fix IN PROGRESS**. Secondary findings: (1) a **fast-exiting fake platform can wedge the daemon into a permanent BLOCKED state** (needs a process restart) — fixed alongside; (2) unbundled **browser-monitor** anti-tamper-GAP in **USER** mode (its fake ran), **closed in SYSTEM mode** by the bundled-only allowlist (verify live). **TC-33 stays OPEN until the fix re-tests PASS.** |
+| 2026-07-15 | **v0.18.0 consolidated hardening build (HF1/HF3/HF4 + F25) — LIVE deploy, live-verified** | TC-30, TC-32, TC-33 | TC-31, TC-35 | **First LIVE verification of the consolidated hardening build.** **TC-30 PASS (live, VITAL)** — the workdir appears in **neither argv nor env**; the `ps -E` env-dump form no longer prints a `--workdir` env var → the exploit's grep→workdir→`rm` chain finds nothing. **FEATURE 24 VITAL invisibility bar MET live.** **TC-32 PASS (live)** — upgrade end-state: exactly **one** fresh disguised instance, zero old/duplicate/orphan, it **respawns** when killed (single-instance held), no leftover pre-disguise `--workdir` line; the F25 reaper recognised the disguised identity. **TC-33 PASS (live, restart path)** — verify-before-exec landed: a tampered platform binary is no longer exec'd unverified; the genuine **signed** platform is restored + runs (via the restart path). Also confirmed live: **signed release verified + exactly one generation** (single daemon + single platform). **TC-31 FAIL (live, VITAL recovery)** — a wiped working folder self-heals **only on the next platform restart**, NOT proactively → **FEATURE 21 stays BUILDING, not shipped**; needs proactive folder-delete self-heal. **TC-35 FAIL (live)** — companion offline backup rail reads **`watchdog_copy_ok=false`** → the F18 backup the companion rebuilds from is **broken** (recovery-rail-down; needs a bug ticket + fix; TC-16/17's precondition currently unmet on live). **Observation (not a TC flip): net-block DISABLED** — baked default with **no override present**, so packet-filter blocking is off, and **config/policy integrity is ABSENT** (no protection of the config itself — the iceboxed TC-10 gap; ties to the config→server direction, register §9). |
