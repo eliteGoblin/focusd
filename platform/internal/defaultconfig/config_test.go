@@ -1,6 +1,7 @@
 package defaultconfig
 
 import (
+	"reflect"
 	"testing"
 
 	"github.com/eliteGoblin/focusd/platform/internal/core/config"
@@ -29,8 +30,13 @@ func TestLoadIsDeterministicAndOverrideFree(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(a.Jobs) != len(b.Jobs) {
-		t.Fatalf("Load must be deterministic; got %d vs %d jobs", len(a.Jobs), len(b.Jobs))
+	// Compare the WHOLE config, not just the job count: two loads must be the
+	// identical enforced policy — same platform fields, same jobs in the same
+	// order with the same fields, same services — so non-determinism in job
+	// ordering/fields, services, or platform fields (e.g. map iteration order
+	// or mutation of a shared map) can't slip through a count-only check.
+	if !reflect.DeepEqual(a, b) {
+		t.Fatalf("Load must return an identical policy on every call;\n a=%+v\n b=%+v", a, b)
 	}
 }
 
