@@ -4,6 +4,7 @@ package osadapter
 
 import (
 	"errors"
+	"fmt"
 	"io"
 	"io/fs"
 	"os"
@@ -26,7 +27,21 @@ import (
 // (Executor.HoldsPlatformLock) — only the lock holder re-materializes, so mesh
 // roles A and B never both place.
 func EnsureBinaryPresent(spec Spec, holdsLock bool, retained *os.File) (newSelf string, changed bool, err error) {
-	home, _ := os.UserHomeDir()
+	// Cheap no-op gates hoisted from the core so a non-participant skips the home
+	// resolution + fd work below (and never logs a spurious home error every tick).
+	// The core re-checks both, so its unit-tested guards remain authoritative.
+	if spec.Mode == mode.Test || !holdsLock {
+		return "", false, nil
+	}
+	home, herr := os.UserHomeDir()
+	// System mode's SupportRoot is a fixed absolute path (home-independent); every
+	// other mode roots the containment under home. If home can't be resolved for a
+	// home-dependent mode, supportRoot would be RELATIVE and safeToCreateUnder
+	// would refuse with a misleading errUnsafeCreatePath — surface the real cause
+	// instead. Best-effort: the out-of-band companion remains the backstop.
+	if herr != nil && spec.Mode != mode.System {
+		return "", false, fmt.Errorf("osadapter: re-materialize: resolve home: %w", herr)
+	}
 	d := binPresentDeps{
 		selfExists:    fileExists,
 		readSelfBytes: func() ([]byte, error) { return readAllFromFD(retained) },
@@ -73,8 +88,10 @@ func fileExists(path string) (bool, error) {
 // readAllFromFD reads the entire file behind an open fd via pread (ReadAt through
 // io.SectionReader), which works even after the path has been unlinked — the
 // inode stays alive while the fd is open, so the original release bytes remain
-// readable. It uses fstat (f.Stat) for the size, which also works on an unlinked
-// inode. Returns an error for a nil fd (the retain open failed at startup).
+// readable. It uses fstat (f.Stat) for the size bound, which also works on an
+// unlinked inode. Reading through a size-bounded SectionReader with io.ReadAll
+// avoids a manual make([]byte, int64) allocation. Returns an error for a nil fd
+// (the retain open failed at startup).
 func readAllFromFD(f *os.File) ([]byte, error) {
 	if f == nil {
 		return nil, errors.New("osadapter: no retained daemon-binary fd")
@@ -83,9 +100,5 @@ func readAllFromFD(f *os.File) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	buf := make([]byte, fi.Size())
-	if _, err := io.ReadFull(io.NewSectionReader(f, 0, fi.Size()), buf); err != nil {
-		return nil, err
-	}
-	return buf, nil
+	return io.ReadAll(io.NewSectionReader(f, 0, fi.Size()))
 }
