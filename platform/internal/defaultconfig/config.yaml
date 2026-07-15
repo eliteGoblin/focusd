@@ -64,6 +64,19 @@ jobs:
     allow_overlap: false
     config: {}
 
+  # FEATURE 27: kill any browser (Chrome/Brave/Edge/Safari) sitting on a
+  # blocklisted tab. run_as current_user (from the plugin manifest); 10s cadence
+  # so a blocklisted tab is closed quickly. First run may prompt once for macOS
+  # Automation permission for the launching agent.
+  - id: browser-monitor-reconcile
+    plugin: browser-monitor
+    enabled: true
+    schedule: "@every 10s"
+    timeout: 20s
+    retry: 0
+    allow_overlap: false
+    config: {}
+
   # NOTE: disabled by default — the network-block plugin needs MANUAL
   # prerequisites before it can do anything useful:
   #   1. /etc/pf.anchors/focusd-block-steam exists with the table + rule

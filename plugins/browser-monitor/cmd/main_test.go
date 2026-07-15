@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/eliteGoblin/focusd/plugins/browser-monitor/internal/guard"
+	"github.com/eliteGoblin/focusd/plugins/browser-monitor/internal/selfdaemon"
 )
 
 // withStdin swaps os.Stdin for a pipe carrying data for the duration of
@@ -179,5 +180,58 @@ func TestRunErrorOnBadConfig(t *testing.T) {
 	os.WriteFile(bad, []byte(`{nope`), 0o644)
 	if code := run([]string{"run", "--config", bad}); code != 2 {
 		t.Errorf("bad config exit = %d, want 2", code)
+	}
+}
+
+// TestDaemonSubcommandsDispatch proves the standalone-mode subcommands route to
+// the self-daemon Agent (install → self-tick → uninstall) without touching the
+// real launchd/cron: agentFactory is swapped for a temp-dir agent.
+func TestDaemonSubcommandsDispatch(t *testing.T) {
+	dir := t.TempDir()
+	copies := []string{filepath.Join(dir, "a"), filepath.Join(dir, "b")}
+	ticked := 0
+
+	orig := agentFactory
+	defer func() { agentFactory = orig }()
+	var cron string
+	agentFactory = func() *selfdaemon.Agent {
+		return &selfdaemon.Agent{
+			Copies:         copies,
+			PlistPath:      filepath.Join(dir, "agent.plist"),
+			Label:          "com.example.test",
+			CronTag:        "# com.example.test",
+			LogPath:        filepath.Join(dir, "log"),
+			Interval:       10,
+			ReadExecutable: func() ([]byte, error) { return []byte("BIN"), nil },
+			Launchctl:      func(...string) error { return nil },
+			ReadCrontab:    func() (string, error) { return cron, nil },
+			WriteCrontab:   func(s string) error { cron = s; return nil },
+			Scan:           func() int { ticked++; return 0 },
+		}
+	}
+
+	if code := run([]string{"daemon-install"}); code != 0 {
+		t.Fatalf("daemon-install exit = %d, want 0", code)
+	}
+	for _, c := range copies {
+		if _, err := os.Stat(c); err != nil {
+			t.Errorf("daemon-install did not create copy %s: %v", c, err)
+		}
+	}
+
+	if code := run([]string{"self-tick"}); code != 0 {
+		t.Errorf("self-tick exit = %d, want 0", code)
+	}
+	if ticked != 1 {
+		t.Errorf("self-tick scanned %d times, want 1", ticked)
+	}
+
+	if code := run([]string{"daemon-uninstall"}); code != 0 {
+		t.Fatalf("daemon-uninstall exit = %d, want 0", code)
+	}
+	for _, c := range copies {
+		if _, err := os.Stat(c); !os.IsNotExist(err) {
+			t.Errorf("daemon-uninstall left copy %s behind", c)
+		}
 	}
 }
