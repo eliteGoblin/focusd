@@ -27,18 +27,40 @@ import time
 from xml.sax.saxutils import escape
 
 # ── Blocklist: killed if a tab's host EQUALS an entry or is a subdomain ───────
+# The list below is GENERATED from the Go guard.DefaultBlocklist (the single
+# source of truth). Do not edit the region between the markers by hand — run
+# `go generate ./...` in plugins/browser-monitor. A Go test fails if they drift.
+# >>> BEGIN GENERATED BLOCKLIST — source of truth: plugins/browser-monitor guard.DefaultBlocklist.
+# Do NOT edit by hand; run `go generate ./...` in plugins/browser-monitor. <<<
 BLOCKLIST = [
-    # search / video
-    "google.com", "youtube.com", "bilibili.com",
-    # gaming
-    "steampowered.com", "steamcommunity.com", "steamcontent.com", "steamstatic.com",
-    "dota2.com", "dota.com", "chronodivide.com", "dos.zone", "play-cs.com", "webrcade.com",
-    # news / doomscroll
-    "9news.com.au", "abc.net.au", "news.com.au", "smh.com.au", "espn.com.au",
-    "theaustralian.com.au", "163.com", "iranintl.com", "southcn.com", "tmtpost.com",
-    # misc
-    "zhihu.com", "heheda.top", "alibaba.com",
+    "google.com",
+    "youtube.com",
+    "bilibili.com",
+    "steampowered.com",
+    "steamcommunity.com",
+    "steamcontent.com",
+    "steamstatic.com",
+    "dota2.com",
+    "dota.com",
+    "chronodivide.com",
+    "dos.zone",
+    "play-cs.com",
+    "webrcade.com",
+    "9news.com.au",
+    "abc.net.au",
+    "news.com.au",
+    "smh.com.au",
+    "espn.com.au",
+    "theaustralian.com.au",
+    "163.com",
+    "iranintl.com",
+    "southcn.com",
+    "tmtpost.com",
+    "zhihu.com",
+    "heheda.top",
+    "alibaba.com",
 ]
+# >>> END GENERATED BLOCKLIST <<<
 
 BROWSERS = ["Google Chrome", "Brave Browser", "Microsoft Edge", "Safari"]
 
@@ -61,7 +83,19 @@ def host_of(url):
 
 
 def is_blocked(h):
-    return any(h == d or h.endswith("." + d) for d in BLOCKLIST)
+    # Semantics kept EQUAL to the Go guard.IsBlocked: empty host never matches;
+    # each entry is normalized (strip/lower) and skipped if empty; a host matches
+    # an entry exactly or as a dot-anchored subdomain (foo.example.com ~ example.com,
+    # but youtube.com.evil.com does NOT match youtube.com).
+    if not h:
+        return False
+    for d in BLOCKLIST:
+        d = d.strip().lower()
+        if not d:
+            continue
+        if h == d or h.endswith("." + d):
+            return True
+    return False
 
 
 def _running_apps():
