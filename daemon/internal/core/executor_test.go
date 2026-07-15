@@ -1062,6 +1062,10 @@ func TestExecutorHealsWipedWorkdir(t *testing.T) {
 	log := slog.New(slog.NewTextHandler(&logbuf, &slog.HandlerOptions{Level: slog.LevelInfo}))
 	e := NewExecutor(st, f, p, &fakeLock{acquireOK: true}, log)
 	e.Fallback = "v1"
+	// The fake fetch writes UNSIGNED stand-in binaries; treat them as genuine so
+	// the heal's Stop→Start restart passes the verify-before-exec anti-tamper
+	// re-check (in production the platform binary is genuinely signed).
+	e.VerifyBin = allowVerify
 
 	// Controllable clock so the settle window is exercised deterministically.
 	clk := time.Now()
