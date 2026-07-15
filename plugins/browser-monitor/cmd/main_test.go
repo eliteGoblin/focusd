@@ -1,9 +1,12 @@
 package main
 
 import (
+	"encoding/json"
 	"errors"
+	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/eliteGoblin/focusd/plugins/browser-monitor/internal/guard"
@@ -45,16 +48,52 @@ func TestReportControlledFailure(t *testing.T) {
 
 // A scan error means browser tabs can't be inspected in this context (no
 // aqua/GUI session or Automation permission — exactly the launchd-supervised
-// reconcile case). That is a healthy no-op skip (exit 0), NOT a hard runtime
-// error (exit 2) that would pin the job DEGRADED on every tick. Real
+// reconcile case). That is a healthy no-op (exit 0), NOT a hard runtime error
+// (exit 2) that would pin the job DEGRADED on every tick. It must also emit
+// Status "ok" (exit-code consistency — the runner annotates any non-"ok" body
+// on an exit-0 run) and carry the underlying reason in Message (the runner
+// surfaces Message, but not Details/stderr, on the status outcome). Real
 // enforcement runs from the standalone self-daemon in the user session.
 func TestReportScanErrorSkips(t *testing.T) {
 	g := guard.New(nil,
-		func() ([]guard.Tab, error) { return nil, errors.New("osascript denied") },
+		func() ([]guard.Tab, error) { return nil, errors.New("osascript denied: not authorized") },
 		func(string) error { return nil })
-	if code := report(g); code != 0 {
+
+	var code int
+	stdout := captureStdout(t, func() { code = report(g) })
+	if code != 0 {
 		t.Errorf("scan error => exit %d, want 0 (graceful skip)", code)
 	}
+
+	var res result
+	if err := json.Unmarshal([]byte(stdout), &res); err != nil {
+		t.Fatalf("report did not emit JSON: %v (stdout=%q)", err, stdout)
+	}
+	if res.Status != "ok" {
+		t.Errorf("scan-error skip Status = %q, want \"ok\" (exit-code consistency)", res.Status)
+	}
+	if !strings.Contains(res.Message, "osascript denied: not authorized") {
+		t.Errorf("scan-error skip Message = %q, want it to surface the underlying reason", res.Message)
+	}
+}
+
+// captureStdout redirects os.Stdout for the duration of fn and returns what was
+// written. report()'s emit() prints a single small JSON line (well under the
+// pipe buffer), so a read-after-close is deadlock-free.
+func captureStdout(t *testing.T, fn func()) string {
+	t.Helper()
+	old := os.Stdout
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	os.Stdout = w
+	fn()
+	_ = w.Close()
+	os.Stdout = old
+	b, _ := io.ReadAll(r)
+	_ = r.Close()
+	return string(b)
 }
 
 func TestReportBlockedAndKilled(t *testing.T) {

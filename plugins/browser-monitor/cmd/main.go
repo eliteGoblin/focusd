@@ -179,15 +179,23 @@ func report(g *guard.Guard) int {
 		// (privilege-dropped to the console user) and legitimately has
 		// neither an aqua session nor the Automation grant, so the very first
 		// System Events call fails and there is simply nothing this pass can
-		// enforce. Degrade to a healthy no-op (skip, exit 0) instead of a
-		// hard runtime error (exit 2) that would pin the job DEGRADED on
-		// every tick. Real browser enforcement comes from the standalone
-		// self-daemon, which runs inside the user's GUI session and owns the
-		// session + Automation grant (see internal/selfdaemon).
-		fmt.Fprintln(os.Stderr, "scan skipped (browser tabs not inspectable here):", err)
+		// enforce. Degrade to a healthy no-op (exit 0) instead of a hard
+		// runtime error (exit 2) that would pin the job DEGRADED on every
+		// tick. Real browser enforcement comes from the standalone self-daemon,
+		// which runs inside the user's GUI session and owns the session +
+		// Automation grant (see internal/selfdaemon).
+		//
+		// Status is "ok" (not "skipped") for exit-code consistency: the runner
+		// classifies the run purely on exit code, and an exit-0 body whose
+		// status != "ok" only earns a `(result.status=...)` mismatch note. The
+		// reason goes in Message because the runner surfaces Message on the
+		// status outcome but NOT Details or stderr (stderr isn't captured), so
+		// putting it there is what makes the cause visible on `platform status`.
+		reason := fmt.Sprintf("browser tabs not inspectable here (%v); nothing to enforce — see self-daemon for GUI-session enforcement", err)
+		fmt.Fprintln(os.Stderr, "scan skipped:", err)
 		emit(result{
-			Status:  "skipped",
-			Message: "browser tabs not inspectable in this context (no GUI session / Automation permission); nothing to enforce",
+			Status:  "ok",
+			Message: reason,
 			Details: map[string]any{"reason": err.Error()},
 		})
 		return 0
