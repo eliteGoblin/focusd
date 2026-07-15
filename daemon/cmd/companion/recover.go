@@ -1,8 +1,10 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"strings"
 	"time"
@@ -74,7 +76,7 @@ func recover(
 // rail honestly reads as not-firing. Only the mtime matters; content is empty.
 func touchRan(dir companion.Dir, now time.Time) {
 	p := dir.RanMarker()
-	if err := os.Chtimes(p, now, now); err != nil && os.IsNotExist(err) {
+	if err := os.Chtimes(p, now, now); err != nil && errors.Is(err, fs.ErrNotExist) {
 		// Create it, then stamp the intended mtime (a fresh create's mtime is the
 		// real wall clock; align it to now for deterministic staleness checks).
 		if f, cerr := os.OpenFile(p, os.O_CREATE|os.O_WRONLY, 0o644); cerr == nil {

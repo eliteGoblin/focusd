@@ -9,6 +9,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"time"
 
 	"github.com/eliteGoblin/focusd/daemon/internal/mode"
 	"github.com/eliteGoblin/focusd/daemon/internal/relocate"
@@ -67,7 +68,7 @@ func EnsureBinaryPresent(spec Spec, selfRole Role, holdsLock bool, retained *os.
 			// EnsureAll re-bootstraps self onto the new binary. The self label is
 			// stable across the path rotation (the roster is unchanged), so
 			// ns.Label(selfRole) == spec.Label(selfRole).
-			return reinstallExceptSelf(ns, launchctlCtl{m: ns.Mode}, laFS{m: ns.Mode}, rs, ns.Label(selfRole))
+			return reinstallExceptSelf(ns, launchctlCtl{m: ns.Mode}, laFS{m: ns.Mode}, rs, ns.Label(selfRole), time.Sleep)
 		},
 		supportRoot: mode.SupportRoot(spec.Mode, home),
 	}

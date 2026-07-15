@@ -238,7 +238,7 @@ func TestReinstallExceptSelfNeverBootstrapsSelf(t *testing.T) {
 	ns := s
 	ns.SelfPath = "/wd/fresh-binary"
 	c.boots = nil // reset to observe only the reinstall's bootstraps
-	if err := reinstallExceptSelf(ns, c, fs, rs, selfLabel); err != nil {
+	if err := reinstallExceptSelf(ns, c, fs, rs, selfLabel, noSleep); err != nil {
 		t.Fatalf("reinstallExceptSelf: %v", err)
 	}
 
@@ -271,6 +271,45 @@ func TestReinstallExceptSelfNeverBootstrapsSelf(t *testing.T) {
 	}
 	if !c.loaded(selfLabel) {
 		t.Fatalf("self must be loaded again after the next EnsureAll")
+	}
+}
+
+// TestReinstallExceptSelfSiblingFailureKeepsSelfLoaded (go-review MEDIUM #3): if a
+// NON-self label's reload permanently fails, reinstallExceptSelf must return the
+// error BEFORE booting self out — so self stays loaded (never left down) and is
+// never bootstrapped by the reinstall. This is the safety-critical guarantee: a
+// partial failure must not take the surviving actor down. The caller then adopts
+// the already-placed new path and the next tick's EnsureAll retries the failed
+// sibling against the correct path.
+func TestReinstallExceptSelfSiblingFailureKeepsSelfLoaded(t *testing.T) {
+	s := spec()
+	c, fs, rs := newFakeCtl(), newFakeFS(), &fakeRoster{}
+	if err := installAll(s, c, fs, rs); err != nil {
+		t.Fatal(err)
+	}
+	selfRole := RoleA
+	selfLabel := s.Label(selfRole)
+
+	// A NON-self sibling (RoleB) permanently fails to reload.
+	ns := s
+	ns.SelfPath = "/wd/fresh-binary"
+	c.bootstrapFailOn = fs.plistPath(s.Label(RoleB))
+	c.boots = nil
+
+	err := reinstallExceptSelf(ns, c, fs, rs, selfLabel, noSleep)
+	if err == nil {
+		t.Fatal("a permanent sibling-reload failure must surface as an error")
+	}
+	// Self must NOT have been booted out (we returned before the self bootout),
+	// so it stays loaded from the original install — never taken down.
+	if !c.loaded(selfLabel) {
+		t.Fatalf("self %q must stay loaded when a sibling reload fails", selfLabel)
+	}
+	// Self must never have been bootstrapped by the reinstall either.
+	for _, pp := range c.boots {
+		if labelFromPath(pp) == selfLabel {
+			t.Fatalf("self %q must never be bootstrapped by reinstallExceptSelf", selfLabel)
+		}
 	}
 }
 

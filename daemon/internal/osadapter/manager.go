@@ -119,7 +119,16 @@ func installAll(s Spec, c controller, fs fsio, rs rosterIO) error {
 // label. selfLabel must be a real role label; an empty selfLabel skips nothing
 // (defensive: the mesh still comes back, at the old self-kill risk — but the sole
 // caller is the lock-holding worker, whose role label is always known).
-func reinstallExceptSelf(s Spec, c controller, fs fsio, rs rosterIO, selfLabel string) error {
+//
+// CRITICAL failure semantics: if a NON-self label's reload permanently fails we
+// return the error BEFORE booting self out, so self stays loaded (never left
+// down). The binary was already placed by the caller (ensureBinaryPresent), which
+// reports changed=true regardless — the caller adopts the new path so the next
+// tick's ensureAll retries the launchd side against the CORRECT path.
+//
+// sleep is injected (mirrors robustReload) so the partial-failure path is
+// unit-tested without real backoff time; production passes time.Sleep.
+func reinstallExceptSelf(s Spec, c controller, fs fsio, rs rosterIO, selfLabel string, sleep func(time.Duration)) error {
 	if rs != nil {
 		if err := rs.writeRoster(rosterLabels(s)); err != nil {
 			return fmt.Errorf("osadapter: write roster: %w", err)
@@ -139,7 +148,7 @@ func reinstallExceptSelf(s Spec, c controller, fs fsio, rs rosterIO, selfLabel s
 		if label == selfLabel {
 			continue
 		}
-		if err := robustReload(c, label, fs.plistPath(label), time.Sleep); err != nil {
+		if err := robustReload(c, label, fs.plistPath(label), sleep); err != nil {
 			return fmt.Errorf("osadapter: bootstrap %s: %w", label, err)
 		}
 	}
