@@ -3,9 +3,11 @@
 package osadapter
 
 import (
+	"bytes"
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -303,6 +305,233 @@ func TestCompanionStatusCore(t *testing.T) {
 	}
 	if _, _, r := companionStatus(dir, loadedTrue, verifyReal, now); r {
 		t.Fatalf("a stale RanMarker (older than the window) must read ranRecently=false")
+	}
+}
+
+// TestFileContentDiffers exercises the content-aware refresh predicate that
+// replaces the old write-only-if-missing checks: absent / different-size /
+// different-content → differs (rewrite); byte-identical → does NOT differ (no-op).
+// A directory path reads as differs (defensive — never trust an unreadable copy).
+func TestFileContentDiffers(t *testing.T) {
+	tmp := t.TempDir()
+	p := filepath.Join(tmp, "f")
+	want := []byte("hello-world-companion-bytes")
+
+	if !fileContentDiffers(p, want) {
+		t.Fatalf("an absent file must read as differs")
+	}
+	if err := os.WriteFile(p, want, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if fileContentDiffers(p, want) {
+		t.Fatalf("byte-identical content must NOT differ")
+	}
+	sameLen := append([]byte(nil), want...)
+	sameLen[0] ^= 0xff
+	if !fileContentDiffers(p, sameLen) {
+		t.Fatalf("same-length, different-content must differ")
+	}
+	if !fileContentDiffers(p, append(want, 'x')) {
+		t.Fatalf("different-length must differ")
+	}
+	if !fileContentDiffers(tmp, want) {
+		t.Fatalf("a directory path must read as differs")
+	}
+}
+
+// reloadCalls records the injected launchd-control calls made by
+// ensureCompanionBinaryLoaded so the write-on-change + forced-reload contract is
+// asserted without a real launchctl.
+type reloadCalls struct{ bootout, bootstrap, plistWrite int }
+
+func newTestReloader(launchDir string, loaded *bool, c *reloadCalls) companionReloader {
+	return companionReloader{
+		loaded:  func(string) bool { return *loaded },
+		bootout: func(string) error { c.bootout++; *loaded = false; return nil },
+		bootstrap: func(string) error {
+			c.bootstrap++
+			*loaded = true
+			return nil
+		},
+		plistPath: func(label string) string { return filepath.Join(launchDir, label+".plist") },
+		writePlist: func(path, content string) error {
+			c.plistWrite++
+			return os.WriteFile(path, []byte(content), 0o644)
+		},
+	}
+}
+
+// TestEnsureCompanionBinaryLoadedRefreshAndReload is the core of the upgrade fix:
+// the embedded companion is materialized and its on-disk copy is REFRESHED when
+// the embed changes (the old write-only-if-missing froze a prior install's
+// companion forever, so embed-side code fixes like #101 never reached disk), and
+// a changed binary that is already loaded is force-reloaded (bootout+bootstrap) so
+// the fix runs next tick — while an identical embed is a pure no-op.
+func TestEnsureCompanionBinaryLoadedRefreshAndReload(t *testing.T) {
+	home := t.TempDir()
+	dir := companion.For(mode.User, home)
+	if err := os.MkdirAll(dir.Root(), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	launchDir := t.TempDir()
+	embedV1 := bytes.Repeat([]byte("A"), 2048)
+	embedV2 := bytes.Repeat([]byte("B"), 4096) // different size AND content
+
+	loaded := false
+
+	// Fresh install (binary absent) + job not loaded → write embed, bootstrap, and
+	// NO bootout (nothing was loaded to tear down).
+	var c1 reloadCalls
+	if err := ensureCompanionBinaryLoaded(dir, embedV1, newTestReloader(launchDir, &loaded, &c1), 30); err != nil {
+		t.Fatalf("ensureCompanionBinaryLoaded (fresh): %v", err)
+	}
+	if got, _ := os.ReadFile(dir.Binary()); !bytes.Equal(got, embedV1) {
+		t.Fatalf("companion binary not materialized to the embed")
+	}
+	if c1.bootout != 0 {
+		t.Fatalf("no job was loaded — bootout must not be called, got %+v", c1)
+	}
+	if c1.bootstrap != 1 || c1.plistWrite != 1 {
+		t.Fatalf("fresh install must write plist + bootstrap once, got %+v", c1)
+	}
+	if !loaded {
+		t.Fatalf("bootstrap should have marked the job loaded")
+	}
+
+	// Second pass, identical embed, job now loaded → PURE no-op (no write, no
+	// bootout, no bootstrap, no plist rewrite).
+	var c2 reloadCalls
+	if err := ensureCompanionBinaryLoaded(dir, embedV1, newTestReloader(launchDir, &loaded, &c2), 30); err != nil {
+		t.Fatalf("ensureCompanionBinaryLoaded (identical): %v", err)
+	}
+	if (c2 != reloadCalls{}) {
+		t.Fatalf("identical embed + loaded must be a pure no-op, got %+v", c2)
+	}
+	if got, _ := os.ReadFile(dir.Binary()); !bytes.Equal(got, embedV1) {
+		t.Fatalf("companion binary must not change on a no-op tick")
+	}
+
+	// Embed CHANGED (upgrade) while the job is loaded → refresh the on-disk binary
+	// AND force an immediate reload (bootout then bootstrap + plist rewrite).
+	var c3 reloadCalls
+	if err := ensureCompanionBinaryLoaded(dir, embedV2, newTestReloader(launchDir, &loaded, &c3), 30); err != nil {
+		t.Fatalf("ensureCompanionBinaryLoaded (changed): %v", err)
+	}
+	if got, _ := os.ReadFile(dir.Binary()); !bytes.Equal(got, embedV2) {
+		t.Fatalf("companion binary not refreshed to the new embed (the frozen-companion bug)")
+	}
+	if c3.bootout != 1 {
+		t.Fatalf("a changed binary that is loaded must be booted out to force reload, got %+v", c3)
+	}
+	if c3.bootstrap != 1 || c3.plistWrite != 1 {
+		t.Fatalf("forced reload must rewrite the plist + bootstrap once, got %+v", c3)
+	}
+	if !loaded {
+		t.Fatalf("job must be loaded again after the forced reload")
+	}
+}
+
+// inodeOf returns the inode of path (darwin) — a temp+rename replacement changes
+// the inode, so a stable inode proves the content-gate skipped the write.
+func inodeOf(t *testing.T, path string) uint64 {
+	t.Helper()
+	fi, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return fi.Sys().(*syscall.Stat_t).Ino
+}
+
+// TestEnsureCompanionRefreshesBackupOnChange: the offline daemon backup must
+// track the CURRENT running signed daemon — refreshed when it DIFFERS, not only
+// when missing (the frozen-backup bug that restored a 16-day-old daemon). An
+// unreadable daemonSelf must LEAVE a good backup intact rather than clobber it.
+func TestEnsureCompanionRefreshesBackupOnChange(t *testing.T) {
+	if companionReady() {
+		t.Skip("a real companion binary is embedded; the scaffold-only backup path is N/A")
+	}
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	dir := companion.For(mode.User, home)
+
+	selfBin := filepath.Join(home, "daemon-self")
+	v1 := []byte("SIGNED-DAEMON-BYTES-V1")
+	if err := os.WriteFile(selfBin, v1, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := EnsureCompanion(mode.User, selfBin, "v0.16.3"); err != nil {
+		t.Fatalf("EnsureCompanion (v1): %v", err)
+	}
+	if b, _ := os.ReadFile(dir.Backup()); !bytes.Equal(b, v1) {
+		t.Fatalf("backup = %q, want v1", b)
+	}
+
+	// Upgrade: the running signed daemon changes → the backup must REFRESH.
+	v2 := []byte("SIGNED-DAEMON-BYTES-V2-DIFFERENT-LENGTH")
+	if err := os.WriteFile(selfBin, v2, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := EnsureCompanion(mode.User, selfBin, "v0.16.3"); err != nil {
+		t.Fatalf("EnsureCompanion (v2): %v", err)
+	}
+	if b, _ := os.ReadFile(dir.Backup()); !bytes.Equal(b, v2) {
+		t.Fatalf("backup not refreshed on upgrade: got %q, want v2 (frozen-backup bug)", b)
+	}
+
+	// Idempotent: identical self → backup unchanged (same inode, no rewrite).
+	before := inodeOf(t, dir.Backup())
+	if err := EnsureCompanion(mode.User, selfBin, "v0.16.3"); err != nil {
+		t.Fatalf("EnsureCompanion (idempotent): %v", err)
+	}
+	if inodeOf(t, dir.Backup()) != before {
+		t.Fatalf("identical self churned the backup (rewrote an unchanged file)")
+	}
+
+	// Unreadable self → a good backup must be LEFT INTACT (never clobbered).
+	if err := EnsureCompanion(mode.User, filepath.Join(home, "nope"), "v0.16.3"); err != nil {
+		t.Fatalf("EnsureCompanion (unreadable self): %v", err)
+	}
+	if b, _ := os.ReadFile(dir.Backup()); !bytes.Equal(b, v2) {
+		t.Fatalf("backup clobbered when daemonSelf was unreadable: got %q", b)
+	}
+}
+
+// TestRefreshCompanionBackupWriteWhenChanged: the self-update backup refresh is
+// write-when-changed — empty bytes are refused, an identical refresh is a no-op
+// (same inode), and changed bytes replace the backup.
+func TestRefreshCompanionBackupWriteWhenChanged(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	dir := companion.For(mode.User, home)
+
+	if err := RefreshCompanionBackup(mode.User, nil, "v0.16.3"); err == nil {
+		t.Fatalf("empty bytes must be refused")
+	}
+
+	v1 := []byte("SIGNED-DAEMON-BYTES-V1")
+	if err := RefreshCompanionBackup(mode.User, v1, "v0.16.3"); err != nil {
+		t.Fatalf("RefreshCompanionBackup (v1): %v", err)
+	}
+	if b, _ := os.ReadFile(dir.Backup()); !bytes.Equal(b, v1) {
+		t.Fatalf("backup not written on first refresh")
+	}
+	before := inodeOf(t, dir.Backup())
+
+	// Identical → no rewrite (content-gate skips it).
+	if err := RefreshCompanionBackup(mode.User, v1, "v0.16.3"); err != nil {
+		t.Fatalf("RefreshCompanionBackup (identical): %v", err)
+	}
+	if inodeOf(t, dir.Backup()) != before {
+		t.Fatalf("an identical refresh rewrote the backup")
+	}
+
+	// Changed → replaced.
+	v2 := []byte("SIGNED-DAEMON-BYTES-V2-LONGER")
+	if err := RefreshCompanionBackup(mode.User, v2, "v0.16.3"); err != nil {
+		t.Fatalf("RefreshCompanionBackup (v2): %v", err)
+	}
+	if b, _ := os.ReadFile(dir.Backup()); !bytes.Equal(b, v2) {
+		t.Fatalf("backup not refreshed to v2")
 	}
 }
 
