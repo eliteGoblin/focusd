@@ -506,6 +506,91 @@ func TestRetireGenerationsSkipsPkillOnShortPath(t *testing.T) {
 	}
 }
 
+// TestRetireDeadGenerationsCoreDeadOnly (#106-a) pins the exact call
+// RetireDeadGenerations makes into the shared core: an EMPTY live slice + a dead
+// slice → ONLY the dead generations are retired (a live generation, had one been
+// passed, could never be touched because the live slice is nil). This is the
+// safety crux that makes continuous use safe against a self-update.
+func TestRetireDeadGenerationsCoreDeadOnly(t *testing.T) {
+	mkdir := func(p string) string {
+		t.Helper()
+		if err := os.MkdirAll(p, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		return p
+	}
+	root := t.TempDir()
+	keepBin := filepath.Join(mkdir(filepath.Join(root, ".keep")), "keep.bin")
+	deadWd1 := mkdir(filepath.Join(root, ".dead1"))
+	deadWd2 := mkdir(filepath.Join(root, ".dead2"))
+	dead := []DeadGeneration{
+		{BinaryPath: filepath.Join(deadWd1, "d1.bin"), Workdir: deadWd1,
+			Labels: []string{"d1a", "d1b", "d1c"}, PlistPaths: []string{"/p/d1a", "/p/d1b", "/p/d1c"}},
+		{BinaryPath: filepath.Join(deadWd2, "d2.bin"), Workdir: deadWd2,
+			Labels: []string{"d2a"}, PlistPaths: []string{"/p/d2a"}},
+	}
+	f := &fakeRetire{}
+	// nil live slice — exactly what RetireDeadGenerations passes.
+	n := retireGenerations(nil, dead, keepBin, root,
+		func(l string) error { f.bootedOut = append(f.bootedOut, l); return nil },
+		func(p string) error { f.removedPlist = append(f.removedPlist, p); return nil },
+		func(b string) { f.killed = append(f.killed, b) },
+		func(string) {},
+		func(d string) error { f.removedAll = append(f.removedAll, d); return nil },
+	)
+	if n != 2 {
+		t.Fatalf("dead-only retire count = %d, want 2", n)
+	}
+	for _, lbl := range []string{"d1a", "d1b", "d1c", "d2a"} {
+		if !contains(f.bootedOut, lbl) {
+			t.Fatalf("dead label %q must be booted out, got %v", lbl, f.bootedOut)
+		}
+	}
+	if !contains(f.removedAll, deadWd1) || !contains(f.removedAll, deadWd2) {
+		t.Fatalf("safe dead workdirs must be RemoveAll'd, got %v", f.removedAll)
+	}
+}
+
+// TestRetireDeadGenerationsEmptyKeepErrors (#106-a): an empty keepBinaryPath is a
+// caller bug (every generation would be "other"), so RetireDeadGenerations refuses
+// UP FRONT — before any discovery/launchd side effect.
+func TestRetireDeadGenerationsEmptyKeepErrors(t *testing.T) {
+	laDirUnderHome(t) // isolate HOME so no real LaunchAgents are scanned
+	n, err := RetireDeadGenerations(mode.User, "", filepath.Join(t.TempDir(), "root"))
+	if err == nil {
+		t.Fatalf("empty keep must error")
+	}
+	if n != 0 {
+		t.Fatalf("empty keep must retire 0, got %d", n)
+	}
+}
+
+// TestRetireDeadGenerationsSelfUpdateNoop (#106-a, never fights a self-update): a
+// self-update transiently leaves TWO generations whose binaries are BOTH PRESENT.
+// RetireDeadGenerations discovers ZERO dead generations there (a present binary is
+// never dead), so it retires NOTHING and leaves both generations' plists intact.
+func TestRetireDeadGenerationsSelfUpdateNoop(t *testing.T) {
+	home, laDir := laDirUnderHome(t)
+	r1 := []string{"com.apple.metadata.helper.1", "com.google.keystone.daemon.2", "org.mozilla.updater.agent.3"}
+	r2 := []string{"com.docker.helper.4", "us.zoom.ZoomDaemon.svc.5", "io.tailscale.ipnextension.relay.6"}
+	bin1, _ := writeGeneration(t, home, laDir, "genA", r1)
+	writeGeneration(t, home, laDir, "genB", r2)
+
+	// keepBin is one present generation's binary; the other is the transient peer.
+	n, err := RetireDeadGenerations(mode.User, bin1, filepath.Join(home, "Library", "Application Support"))
+	if err != nil {
+		t.Fatalf("RetireDeadGenerations: %v", err)
+	}
+	if n != 0 {
+		t.Fatalf("a self-update (two PRESENT-binary generations) must retire 0 dead, got %d", n)
+	}
+	// Both generations' plists must survive (present binaries are never retired).
+	ents, _ := os.ReadDir(laDir)
+	if len(ents) != len(AllRoles)*2 {
+		t.Fatalf("both present generations' plists must survive, got %d plists", len(ents))
+	}
+}
+
 func contains(xs []string, want string) bool {
 	for _, x := range xs {
 		if x == want {

@@ -383,7 +383,7 @@ func TestEnsureCompanionBinaryLoadedRefreshAndReload(t *testing.T) {
 	// Fresh install (binary absent) + job not loaded → write embed, bootstrap, and
 	// NO bootout (nothing was loaded to tear down).
 	var c1 reloadCalls
-	if err := ensureCompanionBinaryLoaded(dir, embedV1, newTestReloader(launchDir, &loaded, &c1), 30); err != nil {
+	if err := ensureCompanionBinaryLoaded(dir, embedV1, newTestReloader(launchDir, &loaded, &c1), 30, time.Now()); err != nil {
 		t.Fatalf("ensureCompanionBinaryLoaded (fresh): %v", err)
 	}
 	if got, _ := os.ReadFile(dir.Binary()); !bytes.Equal(got, embedV1) {
@@ -402,7 +402,7 @@ func TestEnsureCompanionBinaryLoadedRefreshAndReload(t *testing.T) {
 	// Second pass, identical embed, job now loaded → PURE no-op (no write, no
 	// bootout, no bootstrap, no plist rewrite).
 	var c2 reloadCalls
-	if err := ensureCompanionBinaryLoaded(dir, embedV1, newTestReloader(launchDir, &loaded, &c2), 30); err != nil {
+	if err := ensureCompanionBinaryLoaded(dir, embedV1, newTestReloader(launchDir, &loaded, &c2), 30, time.Now()); err != nil {
 		t.Fatalf("ensureCompanionBinaryLoaded (identical): %v", err)
 	}
 	if (c2 != reloadCalls{}) {
@@ -415,7 +415,7 @@ func TestEnsureCompanionBinaryLoadedRefreshAndReload(t *testing.T) {
 	// Embed CHANGED (upgrade) while the job is loaded → refresh the on-disk binary
 	// AND force an immediate reload (bootout then bootstrap + plist rewrite).
 	var c3 reloadCalls
-	if err := ensureCompanionBinaryLoaded(dir, embedV2, newTestReloader(launchDir, &loaded, &c3), 30); err != nil {
+	if err := ensureCompanionBinaryLoaded(dir, embedV2, newTestReloader(launchDir, &loaded, &c3), 30, time.Now()); err != nil {
 		t.Fatalf("ensureCompanionBinaryLoaded (changed): %v", err)
 	}
 	if got, _ := os.ReadFile(dir.Binary()); !bytes.Equal(got, embedV2) {
@@ -429,6 +429,103 @@ func TestEnsureCompanionBinaryLoadedRefreshAndReload(t *testing.T) {
 	}
 	if !loaded {
 		t.Fatalf("job must be loaded again after the forced reload")
+	}
+}
+
+// TestEnsureCompanionBinaryLoadedRearmsWedged (#106-b2): a companion one-shot stuck
+// ALIVE after a blocking watchdog handoff keeps its launchd job loaded, so launchd
+// never fires a fresh pass and the RanMarker freezes. When the marker is loaded==true
+// but STALE beyond the window, the daemon replaces the wedged instance
+// (bootout+bootstrap via robustReload). A loaded job with a FRESH marker is a pure
+// no-op, and the re-arm is THROTTLED to once per window so it can't churn a
+// legitimately in-progress rebuild.
+func TestEnsureCompanionBinaryLoadedRearmsWedged(t *testing.T) {
+	home := t.TempDir()
+	dir := companion.For(mode.User, home)
+	if err := os.MkdirAll(dir.Root(), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	launchDir := t.TempDir()
+	embed := bytes.Repeat([]byte("C"), 2048)
+	now := time.Now()
+
+	// Materialize the binary on disk (byte-exact to the embed) so later ticks see
+	// binChanged=false and the ONLY driver is the RanMarker staleness.
+	if err := companionWriteFile(dir.Binary(), embed, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	loaded := true // the job is loaded (a wedged one-shot stays loaded)
+
+	// Case 1: loaded + FRESH RanMarker → pure no-op (the companion is firing).
+	if err := os.WriteFile(dir.RanMarker(), nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chtimes(dir.RanMarker(), now, now); err != nil {
+		t.Fatal(err)
+	}
+	var cFresh reloadCalls
+	if err := ensureCompanionBinaryLoaded(dir, embed, newTestReloader(launchDir, &loaded, &cFresh), 30, now); err != nil {
+		t.Fatalf("ensureCompanionBinaryLoaded (fresh marker): %v", err)
+	}
+	if (cFresh != reloadCalls{}) {
+		t.Fatalf("loaded + fresh RanMarker must be a pure no-op, got %+v", cFresh)
+	}
+
+	// Case 2: loaded + STALE RanMarker → replace the wedged instance (bootout +
+	// bootstrap + plist rewrite) via robustReload.
+	stale := now.Add(-companionRanRecentlyWindow - time.Minute)
+	if err := os.Chtimes(dir.RanMarker(), stale, stale); err != nil {
+		t.Fatal(err)
+	}
+	var cStale reloadCalls
+	if err := ensureCompanionBinaryLoaded(dir, embed, newTestReloader(launchDir, &loaded, &cStale), 30, now); err != nil {
+		t.Fatalf("ensureCompanionBinaryLoaded (stale marker): %v", err)
+	}
+	if cStale.bootout != 1 || cStale.bootstrap != 1 || cStale.plistWrite != 1 {
+		t.Fatalf("stale RanMarker must re-arm the wedged companion (bootout+bootstrap+plist), got %+v", cStale)
+	}
+	if !loaded {
+		t.Fatalf("companion must be loaded again after the re-arm")
+	}
+	// The re-arm stamped the throttle marker.
+	if _, err := os.Stat(dir.RearmMarker()); err != nil {
+		t.Fatalf("re-arm must stamp the RearmMarker throttle: %v", err)
+	}
+
+	// Case 3: THROTTLE — the marker is STILL stale, but we just re-armed, so a second
+	// pass within the window must NOT churn (no further bootout/bootstrap).
+	var cThrottled reloadCalls
+	if err := ensureCompanionBinaryLoaded(dir, embed, newTestReloader(launchDir, &loaded, &cThrottled), 30, now); err != nil {
+		t.Fatalf("ensureCompanionBinaryLoaded (throttled): %v", err)
+	}
+	if (cThrottled != reloadCalls{}) {
+		t.Fatalf("re-arm must be throttled to once per window, got %+v", cThrottled)
+	}
+}
+
+// TestEnsureCompanionBinaryLoadedMissingMarkerNoRearm (#106-b2 guard): a MISSING
+// RanMarker (fresh bootstrap not yet fired, or a crash-loop before b1's start-touch)
+// must NOT trigger the wedge re-arm — that case is not "wedged alive" and
+// re-bootstrapping would not help. A loaded job with no marker stays a pure no-op.
+func TestEnsureCompanionBinaryLoadedMissingMarkerNoRearm(t *testing.T) {
+	home := t.TempDir()
+	dir := companion.For(mode.User, home)
+	if err := os.MkdirAll(dir.Root(), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	launchDir := t.TempDir()
+	embed := bytes.Repeat([]byte("D"), 2048)
+	if err := companionWriteFile(dir.Binary(), embed, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	loaded := true // loaded, but NO RanMarker on disk
+
+	var c reloadCalls
+	if err := ensureCompanionBinaryLoaded(dir, embed, newTestReloader(launchDir, &loaded, &c), 30, time.Now()); err != nil {
+		t.Fatalf("ensureCompanionBinaryLoaded (missing marker): %v", err)
+	}
+	if (c != reloadCalls{}) {
+		t.Fatalf("a missing RanMarker must NOT trigger the wedge re-arm, got %+v", c)
 	}
 }
 

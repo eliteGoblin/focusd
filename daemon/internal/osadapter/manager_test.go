@@ -203,6 +203,29 @@ func TestRobustReloadRetriesTransientBootstrap(t *testing.T) {
 	}
 }
 
+// TestRobustReloadAbsorbsPostTeardownChurn (#106-c1): right after a big teardown,
+// launchd is async-tearing-down old jobs, so even a fresh-label bootstrap transiently
+// EIOs ("Bootstrap failed: 5") for SEVERAL tries. With reloadAttempts raised to 5,
+// ONE install absorbs 4 consecutive transient failures and still succeeds — the old
+// 3-try budget would have given up and forced a needless second install run.
+func TestRobustReloadAbsorbsPostTeardownChurn(t *testing.T) {
+	if reloadAttempts < 5 {
+		t.Fatalf("reloadAttempts must be >= 5 to absorb post-teardown churn, got %d", reloadAttempts)
+	}
+	c := newFakeCtl()
+	label := "com.vendor.churn"
+	pp := "/p/" + label + ".plist"
+	// Fail the first 4 bootstraps (more than the OLD 3-attempt budget), succeed on #5.
+	c.bootstrapFailN = map[string]int{pp: 4}
+
+	if err := robustReload(c, label, pp, noSleep); err != nil {
+		t.Fatalf("robustReload must absorb 4 transient failures with the raised attempts, got %v", err)
+	}
+	if !c.loaded(label) {
+		t.Fatalf("label must be loaded after absorbing the post-teardown churn")
+	}
+}
+
 // TestRobustReloadGivesUpAfterMaxAttempts: a bootstrap that NEVER succeeds returns
 // the underlying error after reloadAttempts tries (does not loop forever).
 func TestRobustReloadGivesUpAfterMaxAttempts(t *testing.T) {

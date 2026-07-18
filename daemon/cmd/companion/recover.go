@@ -35,6 +35,16 @@ func recover(
 	verify func(path string) (bool, error),
 	execDaemon func(bin, desired string) error,
 ) error {
+	// #106-b1: stamp the RanMarker at the START of every pass — BEFORE the (possibly
+	// long, blocking) watchdog handoff — IN ADDITION to the end-touch below. The
+	// marker means "a recovery pass FIRED" (which is exactly what rail-liveness
+	// needs); without this, a legitimately long rebuild leaves the marker frozen at
+	// the PREVIOUS pass's mtime, so status reads the rail as not-firing (ranRecently
+	// false) even while the companion is actively recovering. A companion that dies
+	// BEFORE reaching here (e.g. the #101 no-$HOME crash in main, before recover ran)
+	// still never stamps it, so a genuinely dead rail honestly reads not-firing.
+	touchRan(dir, now)
+
 	// 1. Heartbeat fresh → daemon alive → no-op. A missing heartbeat (Stat
 	//    error) falls through to the restore path (treated as stale).
 	if fi, err := os.Stat(dir.Heartbeat()); err == nil {
@@ -69,11 +79,13 @@ func recover(
 	return nil
 }
 
-// touchRan sets the RanMarker's mtime to now (best-effort), recording that this
-// recovery pass COMPLETED. status treats the rail as firing only when this marker
-// is recent — so a companion that dies before reaching a completion point (the
-// #101 no-$HOME class exited before recover ran at all) never touches it and the
-// rail honestly reads as not-firing. Only the mtime matters; content is empty.
+// touchRan sets the RanMarker's mtime to now (best-effort), recording that a
+// recovery pass FIRED. It is stamped at the START of every pass (#106-b1) AND on
+// completion, so the marker stays fresh even DURING a legitimately long watchdog
+// rebuild — status treats the rail as firing only when this marker is recent. A
+// companion that dies before reaching recover() at all (the #101 no-$HOME class
+// exited in main before this ran) never touches it, so a genuinely dead rail still
+// honestly reads not-firing. Only the mtime matters; content is empty.
 func touchRan(dir companion.Dir, now time.Time) {
 	p := dir.RanMarker()
 	if err := os.Chtimes(p, now, now); err != nil && errors.Is(err, fs.ErrNotExist) {

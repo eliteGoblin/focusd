@@ -43,11 +43,21 @@ func rosterLabels(s Spec) []string {
 // giving up. On a LIVE mesh, launchctl bootout returns BEFORE launchd finishes
 // its async teardown, so an immediate bootstrap of a still-loaded label returns
 // EIO ("Bootstrap failed: 5" / "already loaded"). Re-issuing bootout (idempotent)
-// + a brief backoff absorbs that window; ~3 tries is ample.
-const reloadAttempts = 3
+// + a brief backoff absorbs that window.
+//
+// #106-c1: raised 3→5. Right after a big teardown, launchd is ASYNC-tearing-down
+// the old jobs, so even a FRESH-label bootstrap transiently EIOs ("Bootstrap failed:
+// 5") until the churn settles — with only 3 tries (~750ms) that failed the whole
+// install and forced a needless SECOND run. Five tries with the escalating backoff
+// span ~2.5s, enough for ONE install to absorb the post-teardown churn. This stays
+// in the SAME idempotent bootout+bootstrap loop (bootout is idempotent, so it does
+// NOT reintroduce the #102 self-fighting race), and costs zero on a clean install
+// (the first bootstrap succeeds and returns immediately).
+const reloadAttempts = 5
 
-// reloadBackoff is the delay before retry #attempt (attempt≥1): ~250ms, then
-// ~500ms. Enough for launchd's async teardown to settle without a slow reconcile.
+// reloadBackoff is the delay before retry #attempt (attempt≥1): ~250ms, ~500ms,
+// ~750ms, ~1s (cumulatively ~2.5s across the raised reloadAttempts). Enough for
+// launchd's async teardown/post-teardown churn to settle without a slow reconcile.
 func reloadBackoff(attempt int) time.Duration {
 	return time.Duration(attempt) * 250 * time.Millisecond
 }

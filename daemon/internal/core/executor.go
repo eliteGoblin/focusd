@@ -305,10 +305,13 @@ func (e *Executor) Tick(ctx context.Context) (Action, error) {
 	return act, applyErr
 }
 
-// reapEveryTicks throttles the continuous foreign-platform reap so the winner
+// ReapEveryTicks throttles the continuous foreign-platform reap so the winner
 // scans the process table roughly once per this many reconcile ticks rather than
-// every tick. At the ~2s worker cadence this is ~10s.
-const reapEveryTicks = 5
+// every tick. At the ~2s worker cadence this is ~10s. Exported so the daemon's
+// reconcile loop can throttle its steady-state dead-generation retirement (#106-a)
+// on the SAME cadence — one shared source of truth for the winner's ~10s backstop
+// sweeps (foreign-platform reap + dead-generation retire).
+const ReapEveryTicks = 5
 
 // maybeReapForeign reaps orphaned platform processes when this executor is the
 // lock WINNER and has a live platform to exempt. Structurally incapable of
@@ -320,9 +323,9 @@ func (e *Executor) maybeReapForeign() {
 		return
 	}
 	e.reapTick++
-	// Reap on the first winning tick, then every reapEveryTicks after — prompt
+	// Reap on the first winning tick, then every ReapEveryTicks after — prompt
 	// on startup, throttled thereafter.
-	if (e.reapTick-1)%reapEveryTicks != 0 {
+	if (e.reapTick-1)%ReapEveryTicks != 0 {
 		return
 	}
 	pl, ok := e.Plat.(interface{ RunningPID() int })
