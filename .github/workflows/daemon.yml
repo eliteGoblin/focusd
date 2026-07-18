@@ -93,3 +93,21 @@ jobs:
             CGO_ENABLED=0 GOOS=darwin GOARCH=$a go build -o /tmp/sign-darwin-$a ./cmd/focusd-sign
           done
           ls -l /tmp/daemon-darwin-* /tmp/sign-darwin-*
+      - name: Cross-build companion + daemon (release matrix, build-only)
+        # #108: the release matrix (daemon-release.yml) builds cmd/companion for
+        # ALL FIVE targets below, but this job previously only built cmd/daemon
+        # for darwin — so a unix-only syscall with no build tag in cmd/companion
+        # broke windows/amd64 unnoticed until release. Mirror the release matrix
+        # here (build-only, no run, no signing) so this class of break fails on
+        # PRs instead.
+        working-directory: daemon
+        run: |
+          set -euo pipefail
+          targets="darwin/arm64 darwin/amd64 linux/amd64 linux/arm64 windows/amd64"
+          for t in $targets; do
+            os=${t%/*}; arch=${t#*/}; ext=""
+            [ "$os" = windows ] && ext=".exe"
+            CGO_ENABLED=0 GOOS=$os GOARCH=$arch go build -o /tmp/matrix-companion-$os-$arch$ext ./cmd/companion
+            CGO_ENABLED=0 GOOS=$os GOARCH=$arch go build -o /tmp/matrix-daemon-$os-$arch$ext ./cmd/daemon
+          done
+          ls -l /tmp/matrix-companion-* /tmp/matrix-daemon-*
