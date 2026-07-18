@@ -165,12 +165,13 @@ func (c companionReloaderCtl) bootout(label string) error { return c.r.bootout(l
 // ALIVE after its blocking watchdog handoff. Its launchd job then reads loaded=true,
 // so launchd never fires a fresh instance and the RanMarker freezes — the rail is
 // dead while the daemon is healthy. The existing !loaded re-arm never triggers. So
-// EVEN WHEN loaded==true, if the RanMarker is stale beyond companionRanRecentlyWindow
-// (the companion fired then froze), the DAEMON replaces the wedged instance:
+// EVEN WHEN loaded==true, if the RanMarker is stale beyond companionWedgeWindow (the
+// companion fired then froze), the DAEMON replaces the wedged instance:
 // bootout+bootstrap via robustReload. The actor is the DAEMON and the target is the
 // COMPANION (different processes), so the #102-a self-SIGTERM hazard does NOT apply.
-// A RearmMarker mtime throttles this to once per window so it can't churn a
-// legitimately in-progress (slow) rebuild.
+// companionWedgeWindow is deliberately > the companion's own watchdog timeout (b3), so
+// a legitimately-in-progress rebuild is never mistaken for wedged; a RearmMarker mtime
+// throttles this to once per window on top of that.
 func ensureCompanionBinaryLoaded(dir companion.Dir, embed []byte, r companionReloader, intervalSec int, now time.Time) error {
 	binChanged := false
 	if fileContentDiffers(dir.Binary(), embed) {
@@ -212,31 +213,46 @@ func ensureCompanionBinaryLoaded(dir companion.Dir, embed []byte, r companionRel
 	return r.bootstrap(pp) // reuses the enable-trick + bootstrap
 }
 
+// companionWedgeWindow is how long the companion RanMarker may stay frozen before
+// the daemon treats the companion as WEDGED and replaces it (#106-b2). It is
+// DELIBERATELY LONGER than the companion's own watchdog handoff timeout (cmd/companion
+// watchdogExecTimeout, ~3min) PLUS one StartInterval (~30s): b1 stamps the marker only
+// at pass START, so during a legitimately long (but healthy) rebuild the marker freezes
+// for up to that timeout. Keying the wedge decision off the shorter status window (90s)
+// would make the daemon bootout a still-progressing rebuild at 90s → kill → relaunch →
+// kill (a livelock). Above this window, b3's own timeout has ALREADY bounded any
+// genuine handoff hang and the companion has had a fresh pass to touch the marker — so
+// a marker still frozen past it is a truly wedged instance (loaded but not firing) the
+// daemon must replace. This is a SEPARATE concern from companionRanRecentlyWindow (the
+// status-display flap window), so it is its own constant even where the numbers differ.
+const companionWedgeWindow = 5 * time.Minute
+
 // companionRanStale reports whether the companion RanMarker EXISTS but is older than
-// companionRanRecentlyWindow as of now — the wedged-alive signal (#106-b2): b1 stamps
-// the marker at pass START, so a companion that fired and then FROZE in a blocking
-// handoff leaves an existing, frozen marker. A MISSING marker is deliberately NOT
-// stale here: it means the companion has not completed its first pass yet (a fresh
-// bootstrap) or crash-loops before b1's touch — neither is the wedged-alive case the
-// re-arm targets, and re-bootstrapping would not help.
+// companionWedgeWindow as of now — the wedged-alive signal (#106-b2): b1 stamps the
+// marker at pass START, so a companion that fired and then FROZE (loaded but not firing)
+// leaves an existing, long-frozen marker. A MISSING marker is deliberately NOT stale
+// here: it means the companion has not completed its first pass yet (a fresh bootstrap)
+// or crash-loops before b1's touch — neither is the wedged-alive case the re-arm targets,
+// and re-bootstrapping would not help.
 func companionRanStale(dir companion.Dir, now time.Time) bool {
 	fi, err := os.Stat(dir.RanMarker())
 	if err != nil {
 		return false // missing → not the wedged-alive case
 	}
-	return now.Sub(fi.ModTime()) >= companionRanRecentlyWindow
+	return now.Sub(fi.ModTime()) >= companionWedgeWindow
 }
 
 // companionRearmedRecently reports whether the daemon re-armed the companion (#106-b2)
-// within the last companionRanRecentlyWindow — the throttle so a wedge re-bootstrap
-// runs at most once per window (not every ~2s tick). A missing marker means never
-// re-armed → not throttled.
+// within the last companionWedgeWindow — the throttle so a wedge re-bootstrap runs at
+// most once per window (not every ~2s tick), giving the freshly-bootstrapped companion
+// a full window to complete a pass (and touch the marker) before another re-arm. A
+// missing marker means never re-armed → not throttled.
 func companionRearmedRecently(dir companion.Dir, now time.Time) bool {
 	fi, err := os.Stat(dir.RearmMarker())
 	if err != nil {
 		return false
 	}
-	return now.Sub(fi.ModTime()) < companionRanRecentlyWindow
+	return now.Sub(fi.ModTime()) < companionWedgeWindow
 }
 
 // touchCompanionRearm stamps the RearmMarker's mtime to now (best-effort) so the

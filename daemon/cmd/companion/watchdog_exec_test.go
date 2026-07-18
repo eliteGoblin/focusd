@@ -30,7 +30,9 @@ func TestExecWatchdogCtxTimesOut(t *testing.T) {
 	if err == nil {
 		t.Fatalf("a hung watchdog must be killed and surface an error, got nil")
 	}
-	if elapsed > 5*time.Second {
+	// Must return FAR sooner than the 30s sleep (proves the deadline fired). Generous
+	// upper bound tolerates the WaitDelay safety cap + loaded CI, still << 30s.
+	if elapsed > 15*time.Second {
 		t.Fatalf("execWatchdogCtx did not honor the timeout (elapsed %v, sleep was 30s)", elapsed)
 	}
 }
@@ -43,7 +45,9 @@ func TestExecWatchdogCtxSucceedsWithinTimeout(t *testing.T) {
 	if err := os.WriteFile(script, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := execWatchdogCtx(context.Background(), script, "v0.1.0", 3*time.Second); err != nil {
+	// A generous timeout: this asserts a fast run is NOT cut off — the deadline must
+	// never be the bottleneck, even under heavy parallel -race process-spawn latency.
+	if err := execWatchdogCtx(context.Background(), script, "v0.1.0", 60*time.Second); err != nil {
 		t.Fatalf("a fast watchdog run within the timeout must succeed, got %v", err)
 	}
 }

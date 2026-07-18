@@ -17,6 +17,7 @@ import (
 	"context"
 	"os"
 	"os/exec"
+	"syscall"
 	"time"
 
 	"github.com/eliteGoblin/focusd/daemon/internal/companion"
@@ -75,10 +76,29 @@ func execWatchdog(bin, desired string) error {
 
 // execWatchdogCtx is the timeout-bounded core of execWatchdog, split out with an
 // explicit context + timeout so the kill-on-timeout behavior is unit-tested without
-// waiting minutes. On timeout, exec.CommandContext SIGKILLs the child and Run
+// waiting minutes. On timeout, the child (and its subtree) is SIGKILLed and Run
 // returns a non-nil error.
+//
+// The watchdog rebuild itself shells out to launchctl (robustReload) — if the hang is
+// IN one of those grandchildren (a stuck/unresponsive launchd is exactly the scenario
+// this timeout guards), killing only the direct child would orphan the grandchild. So
+// the child is put in its OWN process group (Setpgid) and Cancel SIGKILLs the WHOLE
+// group, reaping the subtree. WaitDelay bounds Run() so a grandchild inheriting the
+// (nil ⇒ /dev/null) std handles can never make the wait hang after the kill.
 func execWatchdogCtx(ctx context.Context, bin, desired string, timeout time.Duration) error {
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
-	return exec.CommandContext(ctx, bin, "watchdog", "-v", desired).Run()
+	cmd := exec.CommandContext(ctx, bin, "watchdog", "-v", desired)
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	cmd.Cancel = func() error {
+		// Negative PID → signal the whole process group (the child + its launchctl
+		// grandchildren). Best-effort: fall back to the single child if the group
+		// signal fails (e.g. the child already exited).
+		if perr := syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL); perr != nil {
+			return cmd.Process.Kill()
+		}
+		return nil
+	}
+	cmd.WaitDelay = 5 * time.Second
+	return cmd.Run()
 }

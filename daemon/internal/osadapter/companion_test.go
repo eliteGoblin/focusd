@@ -471,9 +471,10 @@ func TestEnsureCompanionBinaryLoadedRearmsWedged(t *testing.T) {
 		t.Fatalf("loaded + fresh RanMarker must be a pure no-op, got %+v", cFresh)
 	}
 
-	// Case 2: loaded + STALE RanMarker → replace the wedged instance (bootout +
-	// bootstrap + plist rewrite) via robustReload.
-	stale := now.Add(-companionRanRecentlyWindow - time.Minute)
+	// Case 2: loaded + STALE RanMarker (older than the wedge window, which exceeds
+	// the companion's own watchdog timeout so a healthy long rebuild is never killed)
+	// → replace the wedged instance (bootout + bootstrap + plist rewrite) via robustReload.
+	stale := now.Add(-companionWedgeWindow - time.Minute)
 	if err := os.Chtimes(dir.RanMarker(), stale, stale); err != nil {
 		t.Fatal(err)
 	}
