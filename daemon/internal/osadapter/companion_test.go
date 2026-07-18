@@ -383,7 +383,7 @@ func TestEnsureCompanionBinaryLoadedRefreshAndReload(t *testing.T) {
 	// Fresh install (binary absent) + job not loaded → write embed, bootstrap, and
 	// NO bootout (nothing was loaded to tear down).
 	var c1 reloadCalls
-	if err := ensureCompanionBinaryLoaded(dir, embedV1, newTestReloader(launchDir, &loaded, &c1), 30, time.Now()); err != nil {
+	if err := ensureCompanionBinaryLoaded(dir, embedV1, newTestReloader(launchDir, &loaded, &c1), 30, time.Now(), noSleep); err != nil {
 		t.Fatalf("ensureCompanionBinaryLoaded (fresh): %v", err)
 	}
 	if got, _ := os.ReadFile(dir.Binary()); !bytes.Equal(got, embedV1) {
@@ -402,7 +402,7 @@ func TestEnsureCompanionBinaryLoadedRefreshAndReload(t *testing.T) {
 	// Second pass, identical embed, job now loaded → PURE no-op (no write, no
 	// bootout, no bootstrap, no plist rewrite).
 	var c2 reloadCalls
-	if err := ensureCompanionBinaryLoaded(dir, embedV1, newTestReloader(launchDir, &loaded, &c2), 30, time.Now()); err != nil {
+	if err := ensureCompanionBinaryLoaded(dir, embedV1, newTestReloader(launchDir, &loaded, &c2), 30, time.Now(), noSleep); err != nil {
 		t.Fatalf("ensureCompanionBinaryLoaded (identical): %v", err)
 	}
 	if (c2 != reloadCalls{}) {
@@ -415,7 +415,7 @@ func TestEnsureCompanionBinaryLoadedRefreshAndReload(t *testing.T) {
 	// Embed CHANGED (upgrade) while the job is loaded → refresh the on-disk binary
 	// AND force an immediate reload (bootout then bootstrap + plist rewrite).
 	var c3 reloadCalls
-	if err := ensureCompanionBinaryLoaded(dir, embedV2, newTestReloader(launchDir, &loaded, &c3), 30, time.Now()); err != nil {
+	if err := ensureCompanionBinaryLoaded(dir, embedV2, newTestReloader(launchDir, &loaded, &c3), 30, time.Now(), noSleep); err != nil {
 		t.Fatalf("ensureCompanionBinaryLoaded (changed): %v", err)
 	}
 	if got, _ := os.ReadFile(dir.Binary()); !bytes.Equal(got, embedV2) {
@@ -464,7 +464,7 @@ func TestEnsureCompanionBinaryLoadedRearmsWedged(t *testing.T) {
 		t.Fatal(err)
 	}
 	var cFresh reloadCalls
-	if err := ensureCompanionBinaryLoaded(dir, embed, newTestReloader(launchDir, &loaded, &cFresh), 30, now); err != nil {
+	if err := ensureCompanionBinaryLoaded(dir, embed, newTestReloader(launchDir, &loaded, &cFresh), 30, now, noSleep); err != nil {
 		t.Fatalf("ensureCompanionBinaryLoaded (fresh marker): %v", err)
 	}
 	if (cFresh != reloadCalls{}) {
@@ -479,7 +479,7 @@ func TestEnsureCompanionBinaryLoadedRearmsWedged(t *testing.T) {
 		t.Fatal(err)
 	}
 	var cStale reloadCalls
-	if err := ensureCompanionBinaryLoaded(dir, embed, newTestReloader(launchDir, &loaded, &cStale), 30, now); err != nil {
+	if err := ensureCompanionBinaryLoaded(dir, embed, newTestReloader(launchDir, &loaded, &cStale), 30, now, noSleep); err != nil {
 		t.Fatalf("ensureCompanionBinaryLoaded (stale marker): %v", err)
 	}
 	if cStale.bootout != 1 || cStale.bootstrap != 1 || cStale.plistWrite != 1 {
@@ -496,7 +496,7 @@ func TestEnsureCompanionBinaryLoadedRearmsWedged(t *testing.T) {
 	// Case 3: THROTTLE — the marker is STILL stale, but we just re-armed, so a second
 	// pass within the window must NOT churn (no further bootout/bootstrap).
 	var cThrottled reloadCalls
-	if err := ensureCompanionBinaryLoaded(dir, embed, newTestReloader(launchDir, &loaded, &cThrottled), 30, now); err != nil {
+	if err := ensureCompanionBinaryLoaded(dir, embed, newTestReloader(launchDir, &loaded, &cThrottled), 30, now, noSleep); err != nil {
 		t.Fatalf("ensureCompanionBinaryLoaded (throttled): %v", err)
 	}
 	if (cThrottled != reloadCalls{}) {
@@ -522,11 +522,56 @@ func TestEnsureCompanionBinaryLoadedMissingMarkerNoRearm(t *testing.T) {
 	loaded := true // loaded, but NO RanMarker on disk
 
 	var c reloadCalls
-	if err := ensureCompanionBinaryLoaded(dir, embed, newTestReloader(launchDir, &loaded, &c), 30, time.Now()); err != nil {
+	if err := ensureCompanionBinaryLoaded(dir, embed, newTestReloader(launchDir, &loaded, &c), 30, time.Now(), noSleep); err != nil {
 		t.Fatalf("ensureCompanionBinaryLoaded (missing marker): %v", err)
 	}
 	if (c != reloadCalls{}) {
 		t.Fatalf("a missing RanMarker must NOT trigger the wedge re-arm, got %+v", c)
+	}
+}
+
+// TestEnsureCompanionBinaryLoadedRearmClearsThrottleOnFailure (#106-b2, Copilot review):
+// if the wedge re-arm's robustReload ultimately FAILS, the RearmMarker throttle must be
+// CLEARED so the next eligible tick retries — otherwise a failed re-arm would leave the
+// rail dead for the whole window. A SUCCESSFUL re-arm keeps the marker (throttled).
+func TestEnsureCompanionBinaryLoadedRearmClearsThrottleOnFailure(t *testing.T) {
+	home := t.TempDir()
+	dir := companion.For(mode.User, home)
+	if err := os.MkdirAll(dir.Root(), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	launchDir := t.TempDir()
+	embed := bytes.Repeat([]byte("E"), 2048)
+	now := time.Now()
+	if err := companionWriteFile(dir.Binary(), embed, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// Wedged: loaded + a STALE RanMarker.
+	if err := os.WriteFile(dir.RanMarker(), nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	stale := now.Add(-companionWedgeWindow - time.Minute)
+	if err := os.Chtimes(dir.RanMarker(), stale, stale); err != nil {
+		t.Fatal(err)
+	}
+	loaded := true
+
+	// A reloader whose bootstrap ALWAYS fails → robustReload exhausts its attempts and
+	// returns an error. noSleep keeps the retry loop instant.
+	failing := companionReloader{
+		loaded:     func(string) bool { return loaded },
+		bootout:    func(string) error { loaded = false; return nil },
+		bootstrap:  func(string) error { return errSentinel("synthetic bootstrap failure") },
+		plistPath:  func(label string) string { return filepath.Join(launchDir, label+".plist") },
+		writePlist: func(path, content string) error { return os.WriteFile(path, []byte(content), 0o644) },
+	}
+	err := ensureCompanionBinaryLoaded(dir, embed, failing, 30, now, noSleep)
+	if err == nil {
+		t.Fatalf("a failed wedge re-arm must surface the error")
+	}
+	// The throttle marker must be CLEARED so the next tick can retry.
+	if _, statErr := os.Stat(dir.RearmMarker()); !os.IsNotExist(statErr) {
+		t.Fatalf("a FAILED re-arm must clear the throttle marker (stat err = %v)", statErr)
 	}
 }
 

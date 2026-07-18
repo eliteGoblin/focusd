@@ -125,7 +125,7 @@ func EnsureCompanion(m mode.Mode, daemonSelf, desired string) error {
 		bootstrap:  c.bootstrap,
 		plistPath:  f.plistPath,
 		writePlist: f.write,
-	}, companionInterval, time.Now())
+	}, companionInterval, time.Now(), time.Sleep)
 }
 
 // companionReloader is the injected launchd-control seam for the companion binary
@@ -172,7 +172,7 @@ func (c companionReloaderCtl) bootout(label string) error { return c.r.bootout(l
 // companionWedgeWindow is deliberately > the companion's own watchdog timeout (b3), so
 // a legitimately-in-progress rebuild is never mistaken for wedged; a RearmMarker mtime
 // throttles this to once per window on top of that.
-func ensureCompanionBinaryLoaded(dir companion.Dir, embed []byte, r companionReloader, intervalSec int, now time.Time) error {
+func ensureCompanionBinaryLoaded(dir companion.Dir, embed []byte, r companionReloader, intervalSec int, now time.Time, sleep func(time.Duration)) error {
 	binChanged := false
 	if fileContentDiffers(dir.Binary(), embed) {
 		if werr := companionWriteFile(dir.Binary(), embed, 0o755); werr != nil {
@@ -200,8 +200,19 @@ func ensureCompanionBinaryLoaded(dir companion.Dir, embed []byte, r companionRel
 		if werr := r.writePlist(pp, CompanionPlist(label, dir.Binary(), dir.Log(), intervalSec)); werr != nil {
 			return werr
 		}
-		touchCompanionRearm(dir, now) // stamp the throttle BEFORE the (retrying) reload
-		return robustReload(companionReloaderCtl{r}, label, pp, time.Sleep)
+		// Stamp the throttle BEFORE the (retrying) reload so a concurrent mesh worker
+		// (A and B both run EnsureCompanion) can't double-fire the re-arm, and a
+		// SUCCESSFUL re-arm is throttled for the whole window (giving the fresh
+		// companion time to touch RanMarker). On FAILURE, CLEAR it (Copilot review): a
+		// re-arm that didn't succeed must not throttle retries for the full window and
+		// leave the rail dead — the next eligible tick retries instead (robustReload's
+		// own backoff already bounds the launchctl churn on a persistently bad launchd).
+		touchCompanionRearm(dir, now)
+		if rerr := robustReload(companionReloaderCtl{r}, label, pp, sleep); rerr != nil {
+			clearCompanionRearm(dir)
+			return rerr
+		}
+		return nil
 	}
 	if loaded {
 		return nil
@@ -264,6 +275,13 @@ func touchCompanionRearm(dir companion.Dir, now time.Time) {
 		_ = companionWriteFile(p, nil, 0o644)
 	}
 	_ = os.Chtimes(p, now, now)
+}
+
+// clearCompanionRearm removes the RearmMarker (best-effort) so a FAILED wedge re-arm
+// (#106-b2) does not throttle retries for the whole window — the next eligible tick
+// re-attempts rather than leaving the rail dead on a re-arm that never succeeded.
+func clearCompanionRearm(dir companion.Dir) {
+	_ = os.Remove(dir.RearmMarker())
 }
 
 // fileContentDiffers reports whether the file at path is ABSENT or its bytes
