@@ -125,16 +125,28 @@ func (d Dir) Log() string {
 	return filepath.Join(d.root, ".com.apple.MobileAsset.log")
 }
 
-// RanMarker is touched by the companion on EVERY completed recovery pass (both
-// the fresh-heartbeat no-op path and the post-restore path). Its mtime is the
-// rail's OWN liveness signal — distinct from the daemon's Heartbeat, which the
-// DAEMON writes. status treats the rail as firing only when this marker is recent;
-// a companion that dies BEFORE completing a pass (e.g. the #101 no-$HOME crash)
-// never touches it, so a silently-dead rail honestly reads as not-firing instead
-// of being trusted on mere on-disk presence. Its CONTENT is irrelevant — only the
-// mtime matters.
+// RanMarker is touched by the companion at the START of every recovery pass
+// (#106-b1) and again on completion — so it means "a pass FIRED" and stays fresh
+// even DURING a legitimately long watchdog rebuild. Its mtime is the rail's OWN
+// liveness signal — distinct from the daemon's Heartbeat, which the DAEMON writes.
+// status treats the rail as firing only when this marker is recent; a companion
+// that dies BEFORE reaching recover() (e.g. the #101 no-$HOME crash in main) never
+// touches it, so a silently-dead rail honestly reads as not-firing instead of being
+// trusted on mere on-disk presence. Its CONTENT is irrelevant — only the mtime matters.
 func (d Dir) RanMarker() string {
 	return filepath.Join(d.root, ".com.apple.MobileAsset.ran")
+}
+
+// RearmMarker records when the DAEMON last replaced a WEDGED companion instance
+// (#106-b2): a companion one-shot stuck ALIVE after a blocking watchdog handoff
+// keeps its launchd job loaded, so launchd never fires a fresh pass and the RanMarker
+// freezes. The daemon then bootout+bootstraps the companion label to replace the
+// wedged instance; this marker's mtime THROTTLES that re-arm to once per firing
+// window so it can never churn a legitimately in-progress rebuild. Distinct from the
+// RanMarker (which the COMPANION writes): this one only the DAEMON writes. Its
+// CONTENT is irrelevant — only the mtime matters.
+func (d Dir) RearmMarker() string {
+	return filepath.Join(d.root, ".com.apple.MobileAsset.rearm")
 }
 
 // versionTagRE is a minimal semver-tag check (KISS), local to this package so

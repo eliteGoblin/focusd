@@ -523,6 +523,42 @@ func RetireOtherGenerations(m mode.Mode, keepBinaryPath, supportRoot string) (in
 		c.bootout, os.Remove, pkillBinary, killGenerationPlatform(supportRoot), os.RemoveAll), nil
 }
 
+// RetireDeadGenerations is the STEADY-STATE, DEAD-ONLY counterpart of
+// RetireOtherGenerations (#106-a). RetireOtherGenerations is contractually a
+// one-shot at install/rebuild: it ALSO retires LIVE "other" generations, and a
+// self-update's in-place path rotation transiently looks like two LIVE generations,
+// so running it continuously would fight an in-flight self-update. RetireDeadGenerations
+// closes the steady-state gap without reopening that hazard by retiring ONLY DEAD
+// generations — the deleted-binary zombies a workdir-delete/recovery cycle leaves
+// launchd-active (permanent other_generations=1 → DEGRADED once the one-shot install/
+// rebuild retire misses them). A dead generation's binary is PROVABLY GONE
+// (fs.ErrNotExist), so it can NEVER be a peer of a self-update, whose two transient
+// generations BOTH have PRESENT binaries — a dead-only reaper is therefore safe to
+// call on every reconcile tick.
+//
+// It discovers every generation, DISCARDS the live slice (passes nil live into the
+// shared retireGenerations core), and retires only the dead slice — reusing the
+// IDENTICAL safeToRemoveWorkdir belt, minBinPathLen/pkill guard, and platform-kill
+// seam. keepBinaryPath is the running daemon's OWN (always-present) binary, so the
+// empty-keep guard can never wipe everything, and a dead binary can never equal it.
+// Count-only return (never the disguised labels/paths); a discovery failure is
+// surfaced as err so the caller can log-and-continue (best-effort).
+func RetireDeadGenerations(m mode.Mode, keepBinaryPath, supportRoot string) (int, error) {
+	if keepBinaryPath == "" {
+		return 0, fmt.Errorf("retire dead: keepBinaryPath must not be empty")
+	}
+	_, dead, err := DiscoverAllGenerations(m, sig.VerifyFile)
+	if err != nil {
+		return 0, err
+	}
+	c := launchctlCtl{m: m}
+	// DEAD-ONLY: an empty (nil) live slice is the safety crux — no live generation
+	// is ever retired, so this can never fight a self-update's transient two-live
+	// generations. Only the dead (deleted-binary) zombies are torn down.
+	return retireGenerations(nil, dead, keepBinaryPath, supportRoot,
+		c.bootout, os.Remove, pkillBinary, killGenerationPlatform(supportRoot), os.RemoveAll), nil
+}
+
 // CountOtherGenerations is the READ-ONLY counterpart of RetireOtherGenerations
 // (FEATURE 17 generation cleanliness / `daemon status`): it reuses the SAME
 // DiscoverAllGenerations scan but retires NOTHING, returning only how many

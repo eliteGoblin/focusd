@@ -125,7 +125,7 @@ func EnsureCompanion(m mode.Mode, daemonSelf, desired string) error {
 		bootstrap:  c.bootstrap,
 		plistPath:  f.plistPath,
 		writePlist: f.write,
-	}, companionInterval)
+	}, companionInterval, time.Now(), time.Sleep)
 }
 
 // companionReloader is the injected launchd-control seam for the companion binary
@@ -139,6 +139,16 @@ type companionReloader struct {
 	writePlist func(path, content string) error
 }
 
+// companionReloaderCtl adapts a companionReloader's func fields to the controller
+// interface robustReload expects (loaded/bootstrap/bootout), so the wedged-instance
+// re-arm (#106-b2) reuses the SAME async-EIO-absorbing retry loop the mesh install
+// uses (manager.go robustReload) instead of a bespoke bootout+bootstrap.
+type companionReloaderCtl struct{ r companionReloader }
+
+func (c companionReloaderCtl) loaded(label string) bool   { return c.r.loaded(label) }
+func (c companionReloaderCtl) bootstrap(pp string) error  { return c.r.bootstrap(pp) }
+func (c companionReloaderCtl) bootout(label string) error { return c.r.bootout(label) }
+
 // ensureCompanionBinaryLoaded materializes the embedded companion binary and
 // keeps its launchd job loaded, REFRESHING the on-disk binary whenever it differs
 // from the embed. This is the upgrade fix: a prior install's companion was
@@ -150,7 +160,19 @@ type companionReloader struct {
 // fix runs on the NEXT tick rather than up to one StartInterval later; the bootout
 // is best-effort (a not-loaded label simply has nothing to tear down). An
 // unchanged, already-loaded companion is a pure no-op.
-func ensureCompanionBinaryLoaded(dir companion.Dir, embed []byte, r companionReloader, intervalSec int) error {
+//
+// #106-b2 (the companion's missing self-heal): a companion one-shot can get STUCK
+// ALIVE after its blocking watchdog handoff. Its launchd job then reads loaded=true,
+// so launchd never fires a fresh instance and the RanMarker freezes — the rail is
+// dead while the daemon is healthy. The existing !loaded re-arm never triggers. So
+// EVEN WHEN loaded==true, if the RanMarker is stale beyond companionWedgeWindow (the
+// companion fired then froze), the DAEMON replaces the wedged instance:
+// bootout+bootstrap via robustReload. The actor is the DAEMON and the target is the
+// COMPANION (different processes), so the #102-a self-SIGTERM hazard does NOT apply.
+// companionWedgeWindow is deliberately > the companion's own watchdog timeout (b3), so
+// a legitimately-in-progress rebuild is never mistaken for wedged; a RearmMarker mtime
+// throttles this to once per window on top of that.
+func ensureCompanionBinaryLoaded(dir companion.Dir, embed []byte, r companionReloader, intervalSec int, now time.Time, sleep func(time.Duration)) error {
 	binChanged := false
 	if fileContentDiffers(dir.Binary(), embed) {
 		if werr := companionWriteFile(dir.Binary(), embed, 0o755); werr != nil {
@@ -168,6 +190,30 @@ func ensureCompanionBinaryLoaded(dir companion.Dir, embed []byte, r companionRel
 		_ = r.bootout(label) // force reload of the changed binary; best-effort
 		loaded = false
 	}
+	// #106-b2: replace a WEDGED-but-loaded companion (fired then froze). Gated to a
+	// STALE-but-present RanMarker (b1 stamps it at pass start, so a wedged instance
+	// leaves an EXISTING, frozen marker) and throttled by the RearmMarker so a
+	// genuinely-slow rebuild is not churned every tick. A binChanged reload above
+	// already re-armed the job, so this only runs when we did NOT just reload.
+	if loaded && companionRanStale(dir, now) && !companionRearmedRecently(dir, now) {
+		pp := r.plistPath(label)
+		if werr := r.writePlist(pp, CompanionPlist(label, dir.Binary(), dir.Log(), intervalSec)); werr != nil {
+			return werr
+		}
+		// Stamp the throttle BEFORE the (retrying) reload so a concurrent mesh worker
+		// (A and B both run EnsureCompanion) can't double-fire the re-arm, and a
+		// SUCCESSFUL re-arm is throttled for the whole window (giving the fresh
+		// companion time to touch RanMarker). On FAILURE, CLEAR it (Copilot review): a
+		// re-arm that didn't succeed must not throttle retries for the full window and
+		// leave the rail dead — the next eligible tick retries instead (robustReload's
+		// own backoff already bounds the launchctl churn on a persistently bad launchd).
+		touchCompanionRearm(dir, now)
+		if rerr := robustReload(companionReloaderCtl{r}, label, pp, sleep); rerr != nil {
+			clearCompanionRearm(dir)
+			return rerr
+		}
+		return nil
+	}
 	if loaded {
 		return nil
 	}
@@ -176,6 +222,66 @@ func ensureCompanionBinaryLoaded(dir companion.Dir, embed []byte, r companionRel
 		return werr
 	}
 	return r.bootstrap(pp) // reuses the enable-trick + bootstrap
+}
+
+// companionWedgeWindow is how long the companion RanMarker may stay frozen before
+// the daemon treats the companion as WEDGED and replaces it (#106-b2). It is
+// DELIBERATELY LONGER than the companion's own watchdog handoff timeout (cmd/companion
+// watchdogExecTimeout, ~3min) PLUS one StartInterval (~30s): b1 stamps the marker only
+// at pass START, so during a legitimately long (but healthy) rebuild the marker freezes
+// for up to that timeout. Keying the wedge decision off the shorter status window (90s)
+// would make the daemon bootout a still-progressing rebuild at 90s → kill → relaunch →
+// kill (a livelock). Above this window, b3's own timeout has ALREADY bounded any
+// genuine handoff hang and the companion has had a fresh pass to touch the marker — so
+// a marker still frozen past it is a truly wedged instance (loaded but not firing) the
+// daemon must replace. This is a SEPARATE concern from companionRanRecentlyWindow (the
+// status-display flap window), so it is its own constant even where the numbers differ.
+const companionWedgeWindow = 5 * time.Minute
+
+// companionRanStale reports whether the companion RanMarker EXISTS but is older than
+// companionWedgeWindow as of now — the wedged-alive signal (#106-b2): b1 stamps the
+// marker at pass START, so a companion that fired and then FROZE (loaded but not firing)
+// leaves an existing, long-frozen marker. A MISSING marker is deliberately NOT stale
+// here: it means the companion has not completed its first pass yet (a fresh bootstrap)
+// or crash-loops before b1's touch — neither is the wedged-alive case the re-arm targets,
+// and re-bootstrapping would not help.
+func companionRanStale(dir companion.Dir, now time.Time) bool {
+	fi, err := os.Stat(dir.RanMarker())
+	if err != nil {
+		return false // missing → not the wedged-alive case
+	}
+	return now.Sub(fi.ModTime()) >= companionWedgeWindow
+}
+
+// companionRearmedRecently reports whether the daemon re-armed the companion (#106-b2)
+// within the last companionWedgeWindow — the throttle so a wedge re-bootstrap runs at
+// most once per window (not every ~2s tick), giving the freshly-bootstrapped companion
+// a full window to complete a pass (and touch the marker) before another re-arm. A
+// missing marker means never re-armed → not throttled.
+func companionRearmedRecently(dir companion.Dir, now time.Time) bool {
+	fi, err := os.Stat(dir.RearmMarker())
+	if err != nil {
+		return false
+	}
+	return now.Sub(fi.ModTime()) < companionWedgeWindow
+}
+
+// touchCompanionRearm stamps the RearmMarker's mtime to now (best-effort) so the
+// #106-b2 wedge re-arm is throttled to once per window. Mirrors touchRan: create the
+// file if absent, then align its mtime to the injected clock for deterministic tests.
+func touchCompanionRearm(dir companion.Dir, now time.Time) {
+	p := dir.RearmMarker()
+	if _, err := os.Stat(p); err != nil {
+		_ = companionWriteFile(p, nil, 0o644)
+	}
+	_ = os.Chtimes(p, now, now)
+}
+
+// clearCompanionRearm removes the RearmMarker (best-effort) so a FAILED wedge re-arm
+// (#106-b2) does not throttle retries for the whole window — the next eligible tick
+// re-attempts rather than leaving the rail dead on a re-arm that never succeeded.
+func clearCompanionRearm(dir companion.Dir) {
+	_ = os.Remove(dir.RearmMarker())
 }
 
 // fileContentDiffers reports whether the file at path is ABSENT or its bytes

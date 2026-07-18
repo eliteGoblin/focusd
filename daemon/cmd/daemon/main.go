@@ -497,6 +497,11 @@ func loop(args []string, once bool) int {
 	// companionHeartbeatInterval). Zero value ⇒ the first tick touches immediately.
 	var lastHeartbeat time.Time
 
+	// deadGenTicks is the winning-tick counter for the steady-state dead-generation
+	// retirement (#106-a). It advances only while this daemon holds the platform lock
+	// (non-test), throttling the retire to the foreign-platform reap cadence.
+	var deadGenTicks int
+
 	tick := func() {
 		// Steady-state ticks no longer emit a per-tick "tick" beacon (FEATURE 24 /
 		// HF-disguise): non-steady actions are already logged by the executor, and
@@ -558,6 +563,26 @@ func loop(args []string, once bool) int {
 					log.Warn("touch-heartbeat", "err", herr)
 				} else {
 					lastHeartbeat = now
+				}
+			}
+			// #106-a: steady-state DEAD-generation retirement. The install/rebuild
+			// path retires dead (deleted-binary) generations once, but a single miss
+			// otherwise leaves a launchd-active zombie forever (other_generations=1,
+			// DEGRADED). Give it a throttled steady-state path: only the platform-lock
+			// HOLDER, on the foreign-platform reap cadence, retires DEAD-ONLY
+			// generations (never live: a self-update in-place rotation transiently looks
+			// like two LIVE generations, but a DEAD gen binary is provably gone, so a
+			// dead-only reaper can never fight a self-update). keepBinaryPath is our OWN
+			// (always-present, possibly re-materialized) binary, so the empty-keep guard
+			// can never wipe everything.
+			var retireDead bool
+			retireDead, deadGenTicks = steadyDeadGenRetireDue(spec.Mode == mode.Test, e.HoldsPlatformLock(), deadGenTicks)
+			if retireDead {
+				home, _ := os.UserHomeDir()
+				if n, rerr := osadapter.RetireDeadGenerations(spec.Mode, self, mode.SupportRoot(spec.Mode, home)); rerr != nil {
+					log.Warn("retire-dead-generations", "err", rerr)
+				} else if n > 0 {
+					log.Info("retired dead generation(s)", "count", n)
 				}
 			}
 		}

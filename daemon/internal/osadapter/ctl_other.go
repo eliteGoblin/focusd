@@ -60,6 +60,12 @@ func DiscoverAllGenerations(mode.Mode, Verifier) ([]Generation, []DeadGeneration
 // to do" rather than surfacing ErrUnsupported on every install.
 func RetireOtherGenerations(mode.Mode, string, string) (int, error) { return 0, nil }
 
+// RetireDeadGenerations is a no-op on non-darwin (no launchd mesh / dead
+// generations to retire). Returns (0, nil) so the reconcile loop's steady-state
+// dead-generation retirement (#106-a) wires uniformly without surfacing
+// ErrUnsupported every tick.
+func RetireDeadGenerations(mode.Mode, string, string) (int, error) { return 0, nil }
+
 // CountOtherGenerations is unsupported on non-darwin (no launchd mesh to scan).
 // It returns ErrUnsupported so `daemon status` buckets generation cleanliness to
 // "unknown" (never a fabricated "clean" 0) off-platform.

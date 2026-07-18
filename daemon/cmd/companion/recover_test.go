@@ -243,6 +243,48 @@ func TestRecoverStaleInvalidDesiredNoVerify(t *testing.T) {
 	}
 }
 
+// TestRecoverStampsRanMarkerBeforeHandoff (#106-b1): the RanMarker must be stamped
+// at the START of a pass — BEFORE the (blocking) watchdog handoff — not only after
+// it returns. Otherwise a legitimately long rebuild leaves the marker frozen and
+// status reads the rail as not-firing. A fake execDaemon that BLOCKS proves the
+// marker already exists while the handoff is in flight (which can only be the
+// start-touch, since the end-touch runs after execDaemon returns).
+func TestRecoverStampsRanMarkerBeforeHandoff(t *testing.T) {
+	dir := companionTestDir(t)
+	staleMtime := time.Now().Add(-companion.StaleThreshold - time.Minute)
+	writeFile(t, dir.Heartbeat(), "")
+	if err := os.Chtimes(dir.Heartbeat(), staleMtime, staleMtime); err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, dir.Desired(), goodDesired)
+	writeFile(t, dir.Backup(), "SIGNED-DAEMON")
+
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	done := make(chan error, 1)
+	go func() {
+		done <- recover(dir, time.Now(),
+			func(string) (bool, error) { return true, nil },
+			func(bin, desired string) error {
+				close(entered) // the blocking handoff has begun
+				<-release      // ...and stays in flight until the test releases it
+				return nil
+			},
+		)
+	}()
+
+	<-entered
+	// The handoff is BLOCKED; the RanMarker must ALREADY be stamped (start-touch).
+	_, statErr := os.Stat(dir.RanMarker())
+	close(release)
+	if statErr != nil {
+		t.Fatalf("RanMarker not stamped before the blocking handoff (b1 regression): %v", statErr)
+	}
+	if err := <-done; err != nil {
+		t.Fatalf("recover = %v, want nil", err)
+	}
+}
+
 // TestRecoverMissingHeartbeatTreatedStale: with NO heartbeat file at all (a
 // freshly-wiped state), recover treats the daemon as down and restores.
 func TestRecoverMissingHeartbeatTreatedStale(t *testing.T) {
