@@ -15,6 +15,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"strings"
 
 	"github.com/eliteGoblin/focusd/plugins/kill-steam/internal/killer"
 	"github.com/eliteGoblin/focusd/plugins/kill-steam/internal/uninstaller"
@@ -80,10 +81,24 @@ func run(args []string) int {
 	// helper. Cheap when Steam is absent (one os.Stat → return).
 	un := (&uninstaller.Reconciler{}).Reconcile()
 
+	res, code := buildVerdict(out, un)
+	emit(res)
+	return code
+}
+
+// buildVerdict maps a kill + uninstall outcome to the plugin result and exit
+// code. It is a pure function (no I/O) so the exit-code/status wiring — the
+// externally observed contract — is unit-tested directly. Any of: failed
+// kills, surviving Steam processes, an unrunnable post-kill re-scan, or
+// uninstall errors is a controlled failure (status=failed, exit 1). The
+// verdict must NEVER read as a clean "ok" while Steam survives OR while its
+// removal could not be verified (green-over-dead-protection).
+func buildVerdict(out killer.Outcome, un uninstaller.Outcome) (result, int) {
+	base := fmt.Sprintf("scanned=%d killed=%d uninstall_detected=%v removed=%d",
+		out.Scanned, out.KilledCount(), un.Detected, len(un.Removed))
 	res := result{
-		Status: "ok",
-		Message: fmt.Sprintf("scanned=%d killed=%d uninstall_detected=%v removed=%d",
-			out.Scanned, out.KilledCount(), un.Detected, len(un.Removed)),
+		Status:  "ok",
+		Message: base,
 		Details: map[string]any{
 			"scanned":            out.Scanned,
 			"killed_count":       out.KilledCount(),
@@ -94,21 +109,32 @@ func run(args []string) int {
 			"uninstall_reason":   un.Reason,
 		},
 	}
+
+	var reasons []string
 	if len(out.Failed) > 0 {
-		res.Status = "failed"
-		res.Message = fmt.Sprintf("killed %d, %d failed; %s",
-			out.KilledCount(), len(out.Failed), res.Message)
+		reasons = append(reasons, fmt.Sprintf("%d kill(s) failed", len(out.Failed)))
 		res.Details["failed"] = out.Failed
-		emit(res)
-		return 1 // controlled failure
+	}
+	if len(out.Survivors) > 0 {
+		reasons = append(reasons, fmt.Sprintf("Steam/Dota target still present after kill (survivors=%d)", len(out.Survivors)))
+		res.Details["survivors"] = out.Survivors
+	}
+	if out.RescanError != "" {
+		// Verification could not run → we cannot confirm Steam is gone. Refuse
+		// to report green over an unverified pass.
+		reasons = append(reasons, "post-kill verification failed: "+out.RescanError)
+		res.Details["rescan_error"] = out.RescanError
 	}
 	if len(un.Errors) > 0 {
-		res.Status = "failed"
-		emit(res)
-		return 1
+		reasons = append(reasons, fmt.Sprintf("%d uninstall error(s)", len(un.Errors)))
 	}
-	emit(res)
-	return 0
+
+	if len(reasons) == 0 {
+		return res, 0
+	}
+	res.Status = "failed"
+	res.Message = strings.Join(reasons, "; ") + "; " + base
+	return res, 1 // controlled failure
 }
 
 // readJobConfig returns the job-config JSON bytes: from --config <path>
