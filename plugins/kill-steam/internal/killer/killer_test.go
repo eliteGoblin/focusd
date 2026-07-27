@@ -247,6 +247,82 @@ func TestSurvivorAfterKillIsNotClean(t *testing.T) {
 	}
 }
 
+// TestRescanErrorIsSurfacedNotSwallowed is the CRITICAL guard: if the
+// post-kill re-scan itself fails, that failure MUST be surfaced (so the
+// caller cannot report a clean "ok" over an unverified pass). The original
+// design silently discarded the rescan error — reintroducing the exact
+// false-green class this fix closes.
+func TestRescanErrorIsSurfacedNotSwallowed(t *testing.T) {
+	k := New(nil)
+	k.settle = 0
+	k.sleep = func(time.Duration) {}
+	calls := 0
+	k.list = func() ([]procView, error) {
+		calls++
+		if calls == 1 {
+			return []procView{{PID: 40, Name: "Steam"}}, nil // initial scan matches
+		}
+		return nil, errors.New("proc enum boom") // re-scan cannot run
+	}
+	k.killPID = func(int) error { return nil }
+	out, err := k.Run()
+	if err != nil {
+		t.Fatalf("Run must not hard-error on rescan failure: %v", err)
+	}
+	if out.RescanError == "" {
+		t.Fatal("rescan failure must be surfaced (RescanError), not swallowed into a clean ok")
+	}
+}
+
+// TestSurvivorClearsWithinPollWindow: a process still present on the first
+// re-scan but gone on a later poll is NOT a survivor (the kill took, it just
+// hadn't been reaped yet) — guards against a spurious status=failed.
+func TestSurvivorClearsWithinPollWindow(t *testing.T) {
+	k := New(nil)
+	k.settle = 0
+	k.sleep = func(time.Duration) {}
+	scan := 0
+	k.list = func() ([]procView, error) {
+		scan++
+		if scan <= 2 { // initial scan + first re-scan still show Steam
+			return []procView{{PID: 50, Name: "Steam"}}, nil
+		}
+		return nil, nil // reaped by the second re-scan
+	}
+	k.killPID = func(int) error { return nil }
+	out, err := k.Run()
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if len(out.Survivors) != 0 {
+		t.Fatalf("process reaped within the poll window must not be a survivor, got %v", out.Survivors)
+	}
+	if out.RescanError != "" {
+		t.Fatalf("unexpected rescan error: %s", out.RescanError)
+	}
+}
+
+// TestFailedKillNotDoubleCountedAsSurvivor: a PID whose kill errored is
+// recorded in Failed and MUST NOT also appear in Survivors (disjoint lists).
+func TestFailedKillNotDoubleCountedAsSurvivor(t *testing.T) {
+	// Static list: the failed-kill Steam persists across re-scans.
+	k := New(nil)
+	k.settle = 0
+	k.sleep = func(time.Duration) {}
+	k.list = func() ([]procView, error) { return []procView{{PID: 60, Name: "Steam"}}, nil }
+	k.killPID = func(int) error { return errors.New("EPERM") }
+	out, err := k.Run()
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if len(out.Failed) != 1 {
+		t.Fatalf("expected pid 60 in Failed, got %v", out.Failed)
+	}
+	if len(out.Survivors) != 0 {
+		t.Fatalf("failed-kill PID must not double-count as a survivor, got %v", out.Survivors)
+	}
+}
+
 // TestNoSurvivorRescanWhenNothingMatched: the settle+re-scan only runs when
 // something matched, so a steady-state (no Steam) pass stays cheap and never
 // sleeps. The sleep seam panics to prove it is not called.

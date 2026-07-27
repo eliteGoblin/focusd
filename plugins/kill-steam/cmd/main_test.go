@@ -4,6 +4,9 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+
+	"github.com/eliteGoblin/focusd/plugins/kill-steam/internal/killer"
+	"github.com/eliteGoblin/focusd/plugins/kill-steam/internal/uninstaller"
 )
 
 // writeF writes a test fixture file, failing fast on I/O error so a
@@ -154,5 +157,53 @@ func TestRunErrorOnBadStdinConfig(t *testing.T) {
 	withStdin(t, `{nope`, func() { code = run([]string{"run"}) })
 	if code != 2 {
 		t.Errorf("bad stdin config exit = %d, want 2", code)
+	}
+}
+
+// --- buildVerdict: the externally observed status/exit-code contract ---
+
+func TestBuildVerdictCleanIsOk(t *testing.T) {
+	res, code := buildVerdict(killer.Outcome{Scanned: 42}, uninstaller.Outcome{Reason: "clean"})
+	if res.Status != "ok" || code != 0 {
+		t.Fatalf("clean pass => ok/0, got %q/%d", res.Status, code)
+	}
+}
+
+// TestBuildVerdictSurvivorsFailAndExit1 locks the core fix: a surviving Steam
+// process must flip the reported status to failed and exit 1 — never a clean
+// green over a live Steam.
+func TestBuildVerdictSurvivorsFailAndExit1(t *testing.T) {
+	res, code := buildVerdict(killer.Outcome{Survivors: []int{123}}, uninstaller.Outcome{})
+	if res.Status != "failed" || code != 1 {
+		t.Fatalf("survivors => failed/1, got %q/%d", res.Status, code)
+	}
+	if res.Details["survivors"] == nil {
+		t.Error("survivors must be surfaced in details")
+	}
+}
+
+// TestBuildVerdictRescanErrorIsNotClean is the CRITICAL guard at the verdict
+// layer: an unverifiable post-kill re-scan must NOT read as clean ok.
+func TestBuildVerdictRescanErrorIsNotClean(t *testing.T) {
+	res, code := buildVerdict(killer.Outcome{RescanError: "post-kill re-scan failed: boom"}, uninstaller.Outcome{})
+	if res.Status != "failed" || code != 1 {
+		t.Fatalf("rescan error => failed/1 (never green over unverified protection), got %q/%d", res.Status, code)
+	}
+	if res.Details["rescan_error"] == nil {
+		t.Error("rescan_error must be surfaced in details")
+	}
+}
+
+func TestBuildVerdictFailedKillsExit1(t *testing.T) {
+	res, code := buildVerdict(killer.Outcome{Failed: []string{"10: EPERM"}}, uninstaller.Outcome{})
+	if res.Status != "failed" || code != 1 {
+		t.Fatalf("failed kills => failed/1, got %q/%d", res.Status, code)
+	}
+}
+
+func TestBuildVerdictUninstallErrorsExit1(t *testing.T) {
+	res, code := buildVerdict(killer.Outcome{}, uninstaller.Outcome{Errors: []string{"perm denied"}})
+	if res.Status != "failed" || code != 1 {
+		t.Fatalf("uninstall errors => failed/1, got %q/%d", res.Status, code)
 	}
 }

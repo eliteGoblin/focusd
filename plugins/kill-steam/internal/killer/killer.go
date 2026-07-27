@@ -49,17 +49,30 @@ var DefaultSteamPathMarkers = []string{
 	"/library/application support/steam/",
 }
 
-// settleDelay is how long we wait after killing before re-scanning, so a
-// SIGKILLed process has a moment to be reaped before we count it as a
-// survivor (avoids a false "still alive" on a kill that actually took).
-const settleDelay = 500 * time.Millisecond
+// settleInterval is how long we wait between post-kill re-scans, and
+// settleAttempts is how many times we re-check. Polling (rather than one
+// fixed sleep) gives a SIGKILLed process time to be reaped before we count
+// it as a survivor, while short-circuiting the moment it is confirmed gone
+// — so a successful kill is never miscounted as "still alive". Max wait
+// when a real survivor persists: settleInterval * settleAttempts (~1.5s).
+const (
+	settleInterval = 300 * time.Millisecond
+	settleAttempts = 5
+)
 
 // Outcome summarises a kill pass.
 type Outcome struct {
 	Scanned    int      `json:"scanned"`
 	KilledPIDs []int    `json:"killed_pids"`
-	Failed     []string `json:"failed,omitempty"`    // "pid: reason"
-	Survivors  []int    `json:"survivors,omitempty"` // Steam procs still present after the kill
+	Failed     []string `json:"failed,omitempty"` // "pid: reason"
+	// Survivors are Steam procs still present after the kill+settle window
+	// (kill didn't take / relaunch). Excludes PIDs already in Failed, so the
+	// two lists are disjoint.
+	Survivors []int `json:"survivors,omitempty"`
+	// RescanError is set when the post-kill re-scan itself could not run.
+	// Verification could not confirm Steam is gone, so the caller MUST NOT
+	// treat the pass as clean — an unverifiable pass is never green.
+	RescanError string `json:"rescan_error,omitempty"`
 }
 
 // KilledCount is the number of processes successfully terminated.
@@ -73,12 +86,13 @@ type procView struct {
 }
 
 type Killer struct {
-	names   []string
-	markers []string
-	list    func() ([]procView, error)
-	killPID func(pid int) error
-	sleep   func(time.Duration)
-	settle  time.Duration
+	names    []string
+	markers  []string
+	list     func() ([]procView, error)
+	killPID  func(pid int) error
+	sleep    func(time.Duration)
+	settle   time.Duration
+	attempts int
 }
 
 // New builds a Killer. Empty names => DefaultProcessNames.
@@ -87,12 +101,13 @@ func New(names []string) *Killer {
 		names = DefaultProcessNames
 	}
 	return &Killer{
-		names:   names,
-		markers: DefaultSteamPathMarkers,
-		list:    listProcesses,
-		killPID: killProcess,
-		sleep:   time.Sleep,
-		settle:  settleDelay,
+		names:    names,
+		markers:  DefaultSteamPathMarkers,
+		list:     listProcesses,
+		killPID:  killProcess,
+		sleep:    time.Sleep,
+		settle:   settleInterval,
+		attempts: settleAttempts,
 	}
 }
 
@@ -108,6 +123,7 @@ func (k *Killer) Run() (Outcome, error) {
 
 	var out Outcome
 	out.Scanned = len(procs)
+	failedPIDs := make(map[int]bool)
 	matchedAny := false
 	for _, p := range procs {
 		if !k.matches(p, want) {
@@ -116,28 +132,54 @@ func (k *Killer) Run() (Outcome, error) {
 		matchedAny = true
 		if err := k.killPID(p.PID); err != nil {
 			out.Failed = append(out.Failed, fmt.Sprintf("%d: %v", p.PID, err))
+			failedPIDs[p.PID] = true
 			continue
 		}
 		out.KilledPIDs = append(out.KilledPIDs, p.PID)
 	}
 	sort.Ints(out.KilledPIDs)
 
-	// Honest-verdict re-scan: if anything matched, let the kills settle and
-	// re-enumerate. A process STILL matching is a survivor — the kill did
-	// not take, or Steam relaunched. Surfacing survivors stops a clean "ok"
-	// from masking a live Steam (the green-over-dead-protection class).
+	// Honest-verdict re-scan: if anything matched, confirm it is actually
+	// gone. Survivors (or an unrunnable re-scan) stop a clean "ok" from
+	// masking a live Steam — the green-over-dead-protection class.
 	if matchedAny {
-		k.sleep(k.settle)
-		if after, err := k.list(); err == nil {
-			for _, p := range after {
-				if k.matches(p, want) {
-					out.Survivors = append(out.Survivors, p.PID)
-				}
-			}
-			sort.Ints(out.Survivors)
-		}
+		out.Survivors, out.RescanError = k.confirmGone(want, failedPIDs)
 	}
 	return out, nil
+}
+
+// confirmGone polls (bounded) after the kill pass until no Steam match
+// remains, giving SIGKILLed processes a moment to be reaped so a successful
+// kill is not miscounted as a survivor. A match that persists through the
+// whole window is a real survivor — the kill did not take or Steam
+// relaunched. PIDs already recorded as Failed are excluded (surfaced there),
+// so survivors and failures stay disjoint. If the re-scan ITSELF cannot run,
+// it returns a non-empty error string: verification could not confirm the
+// system is clean, and the caller must treat that as NOT ok — never a silent
+// green over an unverified pass.
+func (k *Killer) confirmGone(want map[string]struct{}, failed map[int]bool) ([]int, string) {
+	var survivors []int
+	for attempt := 0; attempt < k.attempts; attempt++ {
+		k.sleep(k.settle)
+		after, err := k.list()
+		if err != nil {
+			return nil, fmt.Sprintf("post-kill re-scan failed: %v", err)
+		}
+		survivors = nil
+		for _, p := range after {
+			if failed[p.PID] {
+				continue
+			}
+			if k.matches(p, want) {
+				survivors = append(survivors, p.PID)
+			}
+		}
+		if len(survivors) == 0 {
+			return nil, "" // confirmed gone
+		}
+	}
+	sort.Ints(survivors)
+	return survivors, ""
 }
 
 // matches reports whether p is a target: an exact (case-insensitive) comm
