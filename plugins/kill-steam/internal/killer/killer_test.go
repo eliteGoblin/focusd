@@ -179,7 +179,7 @@ func TestDefaultsCoverSteamAndDota(t *testing.T) {
 // under a Steam path) MUST be left alone. This is the live-observed
 // survivor: /…/Library/Application Support/Steam/Steam.AppBundle/…/ipcserver.
 func TestMatchesByPathUnderSteamBundle(t *testing.T) {
-	const appSupport = "/Users/frank.sun/Library/Application Support/Steam"
+	const appSupport = "/Users/testuser/Library/Application Support/Steam"
 	procs := []procView{
 		// generic comm name, but under the Steam bundle → MUST be killed
 		{PID: 20, Name: "ipcserver", Path: appSupport + "/Steam.AppBundle/Steam/Contents/MacOS/ipcserver"},
@@ -227,7 +227,7 @@ func TestSurvivorAfterKillIsNotClean(t *testing.T) {
 	steam := procView{
 		PID:  30,
 		Name: "ipcserver",
-		Path: "/Users/frank.sun/Library/Application Support/Steam/Steam.AppBundle/Steam/Contents/MacOS/ipcserver",
+		Path: "/Users/testuser/Library/Application Support/Steam/Steam.AppBundle/Steam/Contents/MacOS/ipcserver",
 	}
 	k := New(nil)
 	k.settle = 0
@@ -345,6 +345,19 @@ func TestPathMatchIsCaseInsensitive(t *testing.T) {
 	upper := procView{PID: 9, Name: "x", Path: "/USERS/X/LIBRARY/APPLICATION SUPPORT/STEAM/STEAM.APPBUNDLE/X"}
 	if !k.matches(upper, want) {
 		t.Error("Steam bundle path match must be case-insensitive")
+	}
+}
+
+// TestMatchesEmptyNamePathOnly documents the enumeration fix: a helper whose
+// comm name is unreadable (empty) but which resolves to a Steam bundle path
+// MUST still match by path. This is why listProcesses keeps a PID when Name()
+// errors as long as Exe() is readable — a path-only survivor is not lost.
+func TestMatchesEmptyNamePathOnly(t *testing.T) {
+	k := New(nil)
+	want := lowerSet(k.names)
+	p := procView{PID: 7, Name: "", Path: "/Users/testuser/Library/Application Support/Steam/Steam.AppBundle/x"}
+	if !k.matches(p, want) {
+		t.Error("empty-name process under a Steam path must match by path")
 	}
 }
 

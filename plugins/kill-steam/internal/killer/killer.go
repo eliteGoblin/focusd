@@ -65,9 +65,10 @@ type Outcome struct {
 	Scanned    int      `json:"scanned"`
 	KilledPIDs []int    `json:"killed_pids"`
 	Failed     []string `json:"failed,omitempty"` // "pid: reason"
-	// Survivors are Steam procs still present after the kill+settle window
-	// (kill didn't take / relaunch). Excludes PIDs already in Failed, so the
-	// two lists are disjoint.
+	// Survivors are target (Steam/Dota) procs still present after the
+	// kill+settle window (kill didn't take / relaunch). A survivor can be a
+	// name-matched Dota process, not only a Steam-bundle path. Excludes PIDs
+	// already in Failed, so the two lists are disjoint.
 	Survivors []int `json:"survivors,omitempty"`
 	// RescanError is set when the post-kill re-scan itself could not run.
 	// Verification could not confirm Steam is gone, so the caller MUST NOT
@@ -215,11 +216,16 @@ func listProcesses() ([]procView, error) {
 	}
 	out := make([]procView, 0, len(ps))
 	for _, p := range ps {
-		name, err := p.Name()
-		if err != nil {
-			continue // process vanished or unreadable; skip
+		// Read BOTH fields best-effort. Name() alone is not enough: Steam's
+		// helpers run under generic comm names and are caught by executable
+		// path, so a PID whose Name() is unreadable but whose Exe() resolves
+		// must still be enumerated — otherwise a path-only match never sees
+		// it. Skip only when NEITHER field is readable (nothing to match on).
+		name, nameErr := p.Name()
+		path, exeErr := p.Exe()
+		if nameErr != nil && exeErr != nil {
+			continue // process vanished or fully opaque; nothing to match
 		}
-		path, _ := p.Exe() // best-effort; empty on EPERM/vanished — name-match still works
 		out = append(out, procView{PID: int(p.Pid), Name: name, Path: path})
 	}
 	return out, nil

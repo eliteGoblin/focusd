@@ -116,7 +116,7 @@ func buildVerdict(out killer.Outcome, un uninstaller.Outcome) (result, int) {
 		res.Details["failed"] = out.Failed
 	}
 	if len(out.Survivors) > 0 {
-		reasons = append(reasons, fmt.Sprintf("Steam still present after kill (survivors=%d)", len(out.Survivors)))
+		reasons = append(reasons, fmt.Sprintf("Steam/Dota target still present after kill (survivors=%d)", len(out.Survivors)))
 		res.Details["survivors"] = out.Survivors
 	}
 	if out.RescanError != "" {
