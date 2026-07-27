@@ -94,20 +94,34 @@ func run(args []string) int {
 			"uninstall_reason":   un.Reason,
 		},
 	}
+
+	// Any of these is a controlled failure — the verdict must NOT read as a
+	// clean "ok" while Steam survives (green-over-dead-protection).
+	failed := false
 	if len(out.Failed) > 0 {
 		res.Status = "failed"
 		res.Message = fmt.Sprintf("killed %d, %d failed; %s",
 			out.KilledCount(), len(out.Failed), res.Message)
 		res.Details["failed"] = out.Failed
-		emit(res)
-		return 1 // controlled failure
+		failed = true
+	}
+	if len(out.Survivors) > 0 {
+		// Steam bundle processes still present after the kill pass — the
+		// kill didn't take or Steam relaunched. Report it honestly.
+		res.Status = "failed"
+		res.Message = fmt.Sprintf("Steam still present after kill (survivors=%d); %s",
+			len(out.Survivors), res.Message)
+		res.Details["survivors"] = out.Survivors
+		failed = true
 	}
 	if len(un.Errors) > 0 {
 		res.Status = "failed"
-		emit(res)
-		return 1
+		failed = true
 	}
 	emit(res)
+	if failed {
+		return 1 // controlled failure
+	}
 	return 0
 }
 

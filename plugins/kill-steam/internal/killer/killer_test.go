@@ -3,12 +3,34 @@ package killer
 import (
 	"errors"
 	"testing"
+	"time"
 )
 
+// newFake wires a stateful, instant Killer: a successful kill removes the
+// PID from the process list (so the post-kill re-scan reflects reality),
+// and the settle delay is zeroed so tests never sleep.
 func newFake(procs []procView, killErr map[int]error) *Killer {
 	k := New(nil)
-	k.list = func() ([]procView, error) { return procs, nil }
-	k.killPID = func(pid int) error { return killErr[pid] }
+	k.settle = 0
+	k.sleep = func(time.Duration) {}
+	killed := map[int]bool{}
+	k.list = func() ([]procView, error) {
+		live := make([]procView, 0, len(procs))
+		for _, p := range procs {
+			if killed[p.PID] {
+				continue
+			}
+			live = append(live, p)
+		}
+		return live, nil
+	}
+	k.killPID = func(pid int) error {
+		if err := killErr[pid]; err != nil {
+			return err
+		}
+		killed[pid] = true
+		return nil
+	}
 	return k
 }
 
@@ -65,10 +87,20 @@ func TestKillFailureRecordedNotFatal(t *testing.T) {
 
 func TestCustomNamesOverrideDefaults(t *testing.T) {
 	k := New([]string{"OnlyThis"})
+	k.settle = 0
+	k.sleep = func(time.Duration) {}
+	killed := map[int]bool{}
+	all := []procView{{PID: 1, Name: "Steam"}, {PID: 2, Name: "OnlyThis"}}
 	k.list = func() ([]procView, error) {
-		return []procView{{PID: 1, Name: "Steam"}, {PID: 2, Name: "OnlyThis"}}, nil
+		var live []procView
+		for _, p := range all {
+			if !killed[p.PID] {
+				live = append(live, p)
+			}
+		}
+		return live, nil
 	}
-	k.killPID = func(int) error { return nil }
+	k.killPID = func(pid int) error { killed[pid] = true; return nil }
 	out, _ := k.Run()
 	if out.KilledCount() != 1 || out.KilledPIDs[0] != 2 {
 		t.Errorf("custom names not honored: %+v", out)
@@ -136,6 +168,118 @@ func TestDefaultsCoverSteamAndDota(t *testing.T) {
 	for _, must := range []string{"Steam", "steamwebhelper", "dota2", "Dota 2"} {
 		if !got[must] {
 			t.Errorf("default process names missing %q", must)
+		}
+	}
+}
+
+// TestMatchesByPathUnderSteamBundle is the core false-green regression:
+// a generically-named helper (ipcserver) that a name-only match misses,
+// but which executes from under the Steam bundle, MUST be killed — while
+// an unrelated binary that merely shares that generic name (and is NOT
+// under a Steam path) MUST be left alone. This is the live-observed
+// survivor: /…/Library/Application Support/Steam/Steam.AppBundle/…/ipcserver.
+func TestMatchesByPathUnderSteamBundle(t *testing.T) {
+	const appSupport = "/Users/frank.sun/Library/Application Support/Steam"
+	procs := []procView{
+		// generic comm name, but under the Steam bundle → MUST be killed
+		{PID: 20, Name: "ipcserver", Path: appSupport + "/Steam.AppBundle/Steam/Contents/MacOS/ipcserver"},
+		// another generic helper under Application Support/Steam → killed
+		{PID: 21, Name: "gameoverlayui", Path: appSupport + "/gameoverlayui"},
+		// Steam.app bundle path (case varies) → killed by path
+		{PID: 22, Name: "someHelper", Path: "/Applications/Steam.app/Contents/MacOS/steam_osx"},
+		// SAME generic name but NOT under any Steam path → MUST survive
+		{PID: 23, Name: "ipcserver", Path: "/usr/local/bin/ipcserver"},
+		// unrelated app → survives
+		{PID: 24, Name: "Finder", Path: "/System/Library/CoreServices/Finder.app/Contents/MacOS/Finder"},
+		// classic name matches still work (name-only, empty path)
+		{PID: 25, Name: "Steam", Path: ""},
+		{PID: 26, Name: "dota2", Path: ""},
+	}
+	out, err := newFake(procs, nil).Run()
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	want := map[int]bool{20: true, 21: true, 22: true, 25: true, 26: true}
+	if out.KilledCount() != len(want) {
+		t.Fatalf("killed %v, want %v", out.KilledPIDs, want)
+	}
+	for _, pid := range out.KilledPIDs {
+		if !want[pid] {
+			t.Errorf("killed unexpected pid %d (path/name over-match)", pid)
+		}
+	}
+	// The unrelated /usr/local/bin/ipcserver must never be touched.
+	for _, pid := range out.KilledPIDs {
+		if pid == 23 {
+			t.Fatal("false-matched unrelated /usr/local/bin/ipcserver by generic name")
+		}
+	}
+	if len(out.Survivors) != 0 {
+		t.Errorf("expected no survivors after successful kills, got %v", out.Survivors)
+	}
+}
+
+// TestSurvivorAfterKillIsNotClean locks the honest-verdict re-scan: when a
+// Steam-bundle process is STILL present after the kill (kill didn't take /
+// relaunched), it must be reported as a survivor so the verdict cannot read
+// as clean "ok" over a live Steam.
+func TestSurvivorAfterKillIsNotClean(t *testing.T) {
+	steam := procView{
+		PID:  30,
+		Name: "ipcserver",
+		Path: "/Users/frank.sun/Library/Application Support/Steam/Steam.AppBundle/Steam/Contents/MacOS/ipcserver",
+	}
+	k := New(nil)
+	k.settle = 0
+	k.sleep = func(time.Duration) {}
+	// The process persists across both scans (relaunch / kill ineffective).
+	k.list = func() ([]procView, error) { return []procView{steam}, nil }
+	k.killPID = func(int) error { return nil } // "succeeds" but proc survives
+	out, err := k.Run()
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if out.KilledCount() != 1 {
+		t.Fatalf("expected the matched pid to be killed once, got %v", out.KilledPIDs)
+	}
+	if len(out.Survivors) != 1 || out.Survivors[0] != 30 {
+		t.Fatalf("expected survivor pid 30, got %v", out.Survivors)
+	}
+}
+
+// TestNoSurvivorRescanWhenNothingMatched: the settle+re-scan only runs when
+// something matched, so a steady-state (no Steam) pass stays cheap and never
+// sleeps. The sleep seam panics to prove it is not called.
+func TestNoSurvivorRescanWhenNothingMatched(t *testing.T) {
+	k := New(nil)
+	k.sleep = func(time.Duration) { t.Fatal("must not sleep/re-scan when nothing matched") }
+	k.list = func() ([]procView, error) {
+		return []procView{{PID: 1, Name: "Finder", Path: "/System/.../Finder"}}, nil
+	}
+	k.killPID = func(int) error { return nil }
+	out, err := k.Run()
+	if err != nil || out.KilledCount() != 0 || len(out.Survivors) != 0 {
+		t.Fatalf("expected clean no-match outcome, got %+v err=%v", out, err)
+	}
+}
+
+func TestPathMatchIsCaseInsensitive(t *testing.T) {
+	k := New(nil)
+	want := lowerSet(k.names)
+	upper := procView{PID: 9, Name: "x", Path: "/USERS/X/LIBRARY/APPLICATION SUPPORT/STEAM/STEAM.APPBUNDLE/X"}
+	if !k.matches(upper, want) {
+		t.Error("Steam bundle path match must be case-insensitive")
+	}
+}
+
+func TestDefaultSteamPathMarkersPresent(t *testing.T) {
+	got := map[string]bool{}
+	for _, m := range DefaultSteamPathMarkers {
+		got[m] = true
+	}
+	for _, must := range []string{"/steam.appbundle/", "/library/application support/steam/"} {
+		if !got[must] {
+			t.Errorf("default steam path markers missing %q", must)
 		}
 	}
 }
