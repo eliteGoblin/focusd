@@ -17,6 +17,7 @@
 package killer
 
 import (
+	"context"
 	"fmt"
 	"os/exec"
 	"path/filepath"
@@ -212,14 +213,24 @@ func lowerSet(names []string) map[string]struct{} {
 	return want
 }
 
+// psTimeout bounds the single ps spawn. #111 is a timeout-class bug (the
+// enumeration blew the per-job budget); a bounded inner deadline makes sure a
+// pathologically hung /bin/ps can never recreate that symptom — it fails fast
+// and honestly (enumerate error → not a silent green) instead of blocking
+// until the platform's outer job-kill fires.
+const psTimeout = 3 * time.Second
+
 // psCommand is the single-spawn process listing (the seam that makes
-// enumeration O(1) exec calls, not O(N) syscalls). macOS `comm` is the FULL
-// path of the executable — not the truncated accounting name, and not the
-// argument vector — so one `ps` exec yields every process's pid + full exe
-// path at once. Matching Steam markers against the exe path (never the args)
-// keeps a process that merely MENTIONS a Steam path in its arguments from
-// being false-matched. Overridable in tests so parsing is exercised without
-// spawning ps and a test can assert the enumeration spawns exactly once.
+// enumeration O(1) exec calls, not O(N) syscalls). On macOS `comm` is
+// typically the FULL path of the executable — not the truncated accounting
+// name, and not the argument vector — so one `ps` exec yields every process's
+// pid + exe path at once. Matching Steam markers against the exe path (never
+// the args) keeps a process that merely MENTIONS a Steam path in its arguments
+// from being false-matched. (A few system processes report a short display
+// name rather than a path; parsePS degrades gracefully — such a process simply
+// can't path-match, exactly as the old gopsutil Exe()-failure case behaved.)
+// Overridable in tests so parsing is exercised without spawning ps and a test
+// can assert the enumeration spawns exactly once.
 //
 // This replaces the per-PID gopsutil Exe() enumeration from #110: that read
 // each process's path with its own proc_pidpath syscall, and under the
@@ -227,7 +238,9 @@ func lowerSet(names []string) map[string]struct{} {
 // (kill-steam-reconcile flipped DEGRADED, #111). The path-match itself — the
 // #110 fix that catches generically-named Steam helpers — is unchanged.
 var psCommand = func() ([]byte, error) {
-	return exec.Command("/bin/ps", "-Ao", "pid=,comm=").Output()
+	ctx, cancel := context.WithTimeout(context.Background(), psTimeout)
+	defer cancel()
+	return exec.CommandContext(ctx, "/bin/ps", "-Ao", "pid=,comm=").Output()
 }
 
 func listProcesses() ([]procView, error) {

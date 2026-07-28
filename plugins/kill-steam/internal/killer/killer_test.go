@@ -407,6 +407,28 @@ func TestParsePSExtractsPidNameAndFullPath(t *testing.T) {
 	}
 }
 
+// TestParsePSSkipsMalformedLines locks the two documented defensive skips:
+// a line with no comm column (no space) and a line whose first column is not
+// numeric (a stray header/garbage row) are dropped, never mis-parsed into a
+// bogus procView. Only the one well-formed row survives.
+func TestParsePSSkipsMalformedLines(t *testing.T) {
+	raw := []byte(strings.Join([]string{
+		"  PID COMM",     // header-like: non-numeric first column → skipped
+		"total 0",        // garbage: non-numeric first column → skipped
+		"123",            // pid only, no comm column (no space) → skipped
+		"   ",            // whitespace-only → skipped
+		"78x9 /bad/pid",  // non-numeric pid token → skipped
+		"  456 /bin/zsh", // the only valid row
+	}, "\n"))
+	got := parsePS(raw)
+	if len(got) != 1 {
+		t.Fatalf("expected exactly 1 valid row, got %d: %+v", len(got), got)
+	}
+	if got[0].PID != 456 || got[0].Name != "zsh" || got[0].Path != "/bin/zsh" {
+		t.Fatalf("malformed-line filtering wrong, got %+v", got[0])
+	}
+}
+
 // TestParsedListDrivesKillMatch runs the full ps→parse→match pipeline through
 // an injected list and asserts #110 behavior is preserved end-to-end: an
 // ipcserver under the Steam bundle IS killed, an unrelated same-named
