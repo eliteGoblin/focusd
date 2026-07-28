@@ -17,8 +17,12 @@
 package killer
 
 import (
+	"context"
 	"fmt"
+	"os/exec"
+	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -209,26 +213,74 @@ func lowerSet(names []string) map[string]struct{} {
 	return want
 }
 
+// psTimeout bounds the single ps spawn. #111 is a timeout-class bug (the
+// enumeration blew the per-job budget); a bounded inner deadline makes sure a
+// pathologically hung /bin/ps can never recreate that symptom — it fails fast
+// and honestly (enumerate error → not a silent green) instead of blocking
+// until the platform's outer job-kill fires.
+const psTimeout = 3 * time.Second
+
+// psCommand is the single-spawn process listing (the seam that makes
+// enumeration O(1) exec calls, not O(N) syscalls). On macOS `comm` is
+// typically the FULL path of the executable — not the truncated accounting
+// name, and not the argument vector — so one `ps` exec yields every process's
+// pid + exe path at once. Matching Steam markers against the exe path (never
+// the args) keeps a process that merely MENTIONS a Steam path in its arguments
+// from being false-matched. (A few system processes report a short display
+// name rather than a path; parsePS degrades gracefully — such a process simply
+// can't path-match, exactly as the old gopsutil Exe()-failure case behaved.)
+// Overridable in tests so parsing is exercised without spawning ps and a test
+// can assert the enumeration spawns exactly once.
+//
+// This replaces the per-PID gopsutil Exe() enumeration from #110: that read
+// each process's path with its own proc_pidpath syscall, and under the
+// platform's per-job timeout + machine load the O(N) syscalls blew the budget
+// (kill-steam-reconcile flipped DEGRADED, #111). The path-match itself — the
+// #110 fix that catches generically-named Steam helpers — is unchanged.
+var psCommand = func() ([]byte, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), psTimeout)
+	defer cancel()
+	return exec.CommandContext(ctx, "/bin/ps", "-Ao", "pid=,comm=").Output()
+}
+
 func listProcesses() ([]procView, error) {
-	ps, err := process.Processes()
+	raw, err := psCommand()
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("ps enumerate: %w", err)
 	}
-	out := make([]procView, 0, len(ps))
-	for _, p := range ps {
-		// Read BOTH fields best-effort. Name() alone is not enough: Steam's
-		// helpers run under generic comm names and are caught by executable
-		// path, so a PID whose Name() is unreadable but whose Exe() resolves
-		// must still be enumerated — otherwise a path-only match never sees
-		// it. Skip only when NEITHER field is readable (nothing to match on).
-		name, nameErr := p.Name()
-		path, exeErr := p.Exe()
-		if nameErr != nil && exeErr != nil {
-			continue // process vanished or fully opaque; nothing to match
+	return parsePS(raw), nil
+}
+
+// parsePS turns `ps -Ao pid=,comm=` output into procViews. Each line is
+// "<pid> <full-exe-path>"; the exe path may contain spaces, so we split on the
+// FIRST space only (never strings.Fields, which would shatter a spaced path).
+// Name is the path basename — for the exact, case-insensitive name-set match
+// (Steam/Dota by comm). Path is the full exe path — for the Steam bundle
+// marker match. Pure (no I/O), so it is unit-tested on fixed fake output.
+func parsePS(raw []byte) []procView {
+	lines := strings.Split(string(raw), "\n")
+	out := make([]procView, 0, len(lines))
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
 		}
-		out = append(out, procView{PID: int(p.Pid), Name: name, Path: path})
+		sp := strings.IndexByte(line, ' ')
+		if sp < 0 {
+			continue // no comm column; nothing to match on
+		}
+		pid, err := strconv.Atoi(line[:sp])
+		if err != nil {
+			continue // non-numeric first column → not a process row
+		}
+		exe := strings.TrimLeft(line[sp+1:], " ")
+		name := ""
+		if exe != "" {
+			name = filepath.Base(exe)
+		}
+		out = append(out, procView{PID: pid, Name: name, Path: exe})
 	}
-	return out, nil
+	return out
 }
 
 func killProcess(pid int) error {

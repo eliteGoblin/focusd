@@ -2,6 +2,8 @@ package killer
 
 import (
 	"errors"
+	"fmt"
+	"strings"
 	"testing"
 	"time"
 )
@@ -358,6 +360,162 @@ func TestMatchesEmptyNamePathOnly(t *testing.T) {
 	p := procView{PID: 7, Name: "", Path: "/Users/testuser/Library/Application Support/Steam/Steam.AppBundle/x"}
 	if !k.matches(p, want) {
 		t.Error("empty-name process under a Steam path must match by path")
+	}
+}
+
+// --- #111: single-spawn enumeration (perf regression guards) ---
+//
+// #110 matched Steam helpers by executable path but read that path with a
+// per-PID gopsutil Exe() call (one proc_pidpath syscall per process). Under
+// the platform's per-job timeout + machine load the O(N) syscalls blew the
+// budget → kill-steam-reconcile flipped DEGRADED. The fix reads every
+// process's pid + full exe path from a SINGLE `ps` spawn and parses it. These
+// tests lock the fast path and its preserved match behavior, and would fail
+// if per-PID enumeration were reintroduced.
+
+// TestParsePSExtractsPidNameAndFullPath verifies the pure parser: each line is
+// "<pid> <full-exe-path>", the exe path may contain spaces (split on the FIRST
+// space only), Name is the path basename, Path is the full exe path.
+func TestParsePSExtractsPidNameAndFullPath(t *testing.T) {
+	const appSupport = "/Users/testuser/Library/Application Support/Steam"
+	raw := []byte(strings.Join([]string{
+		"    1 /sbin/launchd",
+		// space-containing path: basename must stay intact, path preserved whole
+		"  796 /System/Library/CoreServices/Finder.app/Contents/MacOS/Finder",
+		"  900 " + appSupport + "/Steam.AppBundle/Steam/Contents/MacOS/ipcserver",
+		"  901 /usr/local/bin/ipcserver",
+		"  902 /Applications/Steam.app/Contents/MacOS/steam_osx",
+		"  903 /Applications/Dota 2 beta/game/dota.app/Contents/MacOS/dota2",
+		"", // trailing blank line tolerated
+	}, "\n"))
+
+	byPID := map[int]procView{}
+	for _, p := range parsePS(raw) {
+		byPID[p.PID] = p
+	}
+	if len(byPID) != 6 {
+		t.Fatalf("parsed %d procs, want 6: %+v", len(byPID), byPID)
+	}
+	if p := byPID[900]; p.Name != "ipcserver" || !strings.HasSuffix(p.Path, "/Contents/MacOS/ipcserver") || !strings.Contains(p.Path, "/Steam.AppBundle/") {
+		t.Errorf("pid 900 (bundle ipcserver) parsed wrong: %+v", p)
+	}
+	if p := byPID[903]; p.Name != "dota2" || !strings.Contains(p.Path, "/Dota 2 beta/") {
+		t.Errorf("space-containing exe path not preserved for pid 903: %+v", p)
+	}
+	if p := byPID[796]; p.Name != "Finder" {
+		t.Errorf("basename of pid 796 = %q, want Finder", p.Name)
+	}
+}
+
+// TestParsePSSkipsMalformedLines locks the two documented defensive skips:
+// a line with no comm column (no space) and a line whose first column is not
+// numeric (a stray header/garbage row) are dropped, never mis-parsed into a
+// bogus procView. Only the one well-formed row survives.
+func TestParsePSSkipsMalformedLines(t *testing.T) {
+	raw := []byte(strings.Join([]string{
+		"  PID COMM",     // header-like: non-numeric first column → skipped
+		"total 0",        // garbage: non-numeric first column → skipped
+		"123",            // pid only, no comm column (no space) → skipped
+		"   ",            // whitespace-only → skipped
+		"78x9 /bad/pid",  // non-numeric pid token → skipped
+		"  456 /bin/zsh", // the only valid row
+	}, "\n"))
+	got := parsePS(raw)
+	if len(got) != 1 {
+		t.Fatalf("expected exactly 1 valid row, got %d: %+v", len(got), got)
+	}
+	if got[0].PID != 456 || got[0].Name != "zsh" || got[0].Path != "/bin/zsh" {
+		t.Fatalf("malformed-line filtering wrong, got %+v", got[0])
+	}
+}
+
+// TestParsedListDrivesKillMatch runs the full ps→parse→match pipeline through
+// an injected list and asserts #110 behavior is preserved end-to-end: an
+// ipcserver under the Steam bundle IS killed, an unrelated same-named
+// /usr/local/bin/ipcserver is NOT, and main Steam/Dota2 are killed by name.
+func TestParsedListDrivesKillMatch(t *testing.T) {
+	const appSupport = "/Users/testuser/Library/Application Support/Steam"
+	raw := []byte(strings.Join([]string{
+		"    1 /sbin/launchd",
+		"  796 /System/Library/CoreServices/Finder.app/Contents/MacOS/Finder",
+		"  900 " + appSupport + "/Steam.AppBundle/Steam/Contents/MacOS/ipcserver",
+		"  901 /usr/local/bin/ipcserver",
+		"  902 /Applications/Steam.app/Contents/MacOS/steam_osx",
+		"  903 /Applications/Dota 2 beta/game/dota.app/Contents/MacOS/dota2",
+	}, "\n"))
+
+	k := New(nil)
+	k.settle = 0
+	k.sleep = func(time.Duration) {}
+	killed := map[int]bool{}
+	k.list = func() ([]procView, error) {
+		live := make([]procView, 0)
+		for _, p := range parsePS(raw) {
+			if !killed[p.PID] {
+				live = append(live, p)
+			}
+		}
+		return live, nil
+	}
+	k.killPID = func(pid int) error { killed[pid] = true; return nil }
+
+	out, err := k.Run()
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	want := map[int]bool{900: true, 902: true, 903: true} // bundle ipcserver + steam_osx + dota2
+	if out.KilledCount() != len(want) {
+		t.Fatalf("killed %v, want pids %v", out.KilledPIDs, want)
+	}
+	for _, pid := range out.KilledPIDs {
+		if !want[pid] {
+			t.Errorf("killed unexpected pid %d (over-match)", pid)
+		}
+		if pid == 901 {
+			t.Fatal("false-matched unrelated /usr/local/bin/ipcserver")
+		}
+	}
+	if len(out.Survivors) != 0 {
+		t.Errorf("expected no survivors, got %v", out.Survivors)
+	}
+}
+
+// TestEnumerationIsSingleSpawnNotPerPID is the core perf-regression guard: the
+// enumeration must issue exactly ONE process listing regardless of process
+// count. A reintroduction of per-PID enumeration (one proc_pidpath syscall per
+// process — the #110→#111 regression) would scale spawns with N; this locks it
+// to O(1).
+func TestEnumerationIsSingleSpawnNotPerPID(t *testing.T) {
+	var b strings.Builder
+	const n = 500
+	for i := 1; i <= n; i++ {
+		fmt.Fprintf(&b, "%d /usr/bin/proc%d\n", i, i)
+	}
+	orig := psCommand
+	t.Cleanup(func() { psCommand = orig })
+	calls := 0
+	psCommand = func() ([]byte, error) { calls++; return []byte(b.String()), nil }
+
+	procs, err := listProcesses()
+	if err != nil {
+		t.Fatalf("listProcesses: %v", err)
+	}
+	if calls != 1 {
+		t.Fatalf("enumeration spawned %d times for %d processes; must be exactly 1 (O(1) spawns)", calls, n)
+	}
+	if len(procs) != n {
+		t.Fatalf("parsed %d processes, want %d", len(procs), n)
+	}
+}
+
+// TestListProcessesSurfacesPSError: a failing ps spawn must propagate, not be
+// swallowed into a silent empty (and thus falsely-clean) process list.
+func TestListProcessesSurfacesPSError(t *testing.T) {
+	orig := psCommand
+	t.Cleanup(func() { psCommand = orig })
+	psCommand = func() ([]byte, error) { return nil, errors.New("ps boom") }
+	if _, err := listProcesses(); err == nil {
+		t.Fatal("expected ps spawn error to surface")
 	}
 }
 
