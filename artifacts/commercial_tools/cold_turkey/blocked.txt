@@ -1,0 +1,57 @@
+# Cold Turkey — BLOCKED websites (paste into the block's Websites tab).
+# Master list for the Windows corp laptop. Mac is enforced by focusd
+# (plugins/browser-monitor/internal/guard/guard.go DefaultBlocklist).
+# Lines starting with # are comments — do not paste them.
+
+# Search
+www.google.com
+google.com
+
+# Video / streaming
+youtube.com
+bilibili.com
+
+# Gaming
+steampowered.com
+steamcommunity.com
+steamcontent.com
+steamstatic.com
+dota2.com
+dota.com
+chronodivide.com
+dos.zone
+play-cs.com
+webrcade.com
+cg51.com
+
+# News / doomscroll
+9news.com.au
+abc.net.au
+news.com.au
+smh.com.au
+espn.com.au
+theaustralian.com.au
+163.com
+iranintl.com
+southcn.com
+tmtpost.com
+
+# Social
+x.com
+zhihu.com
+
+# Shopping
+amazon.com
+amazon.com.au
+alibaba.com
+
+# Misc
+heheda.top
+
+# Porn (keyword wildcards — * matches any text in the URL)
+*porn*
+*xvideo*
+*xnxx*
+*xhamster*
+*onlyfans*
+*hentai*

@@ -1,0 +1,17 @@
+# Cold Turkey — WHITELIST / exceptions (paste into the block's Exceptions tab).
+# Exceptions win over blocks. Needed because google.com/amazon.com are blocked
+# broadly but corp work and Kindle reading must stay reachable.
+
+# Corp Google (Workspace + GCP)
+admin.google.com
+cloud.google.com
+console.cloud.google.com
+accounts.google.com
+mail.google.com
+docs.google.com
+drive.google.com
+meet.google.com
+calendar.google.com
+
+# Kindle web reader (amazon.com is blocked; reading stays open)
+read.amazon.com
