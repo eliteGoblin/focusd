@@ -62,3 +62,19 @@ play-cs.com
 www.play-cs.com
 webrcade.com
 www.webrcade.com
+
+# --- adult / gossip (always-block) ---
+haijiao.com
+www.haijiao.com
+haijiaolove.com
+www.haijiaolove.com
+haijiaoo.com
+www.haijiaoo.com
+51cg.app
+www.51cg.app
+
+# --- search (ban Google search only; Gmail/Calendar/GCP/Drive stay off this list) ---
+# www.google.com is intentionally NOT here: DNS is host-only and can't tell
+# www.google.com/search from www.google.com/maps, so blocking it would break
+# Maps. The browser guard blocks www.google.com search path-awarely instead.
+google.com
