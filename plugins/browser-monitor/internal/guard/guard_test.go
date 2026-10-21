@@ -243,3 +243,107 @@ func contains(s, sub string) bool {
 	}
 	return false
 }
+
+func TestPathOf(t *testing.T) {
+	cases := []struct{ in, want string }{
+		{"https://www.google.com", "/"},
+		{"https://www.google.com/", "/"},
+		{"https://www.google.com/search?q=cats", "/search"},
+		{"https://www.google.com/maps/place", "/maps/place"},
+		{"https://www.google.com/?q=x", "/"},
+		{"https://www.google.com?q=a/b", "/"},      // slash inside query is not the path
+		{"https://www.google.com?next=/maps", "/"}, // ditto
+		{"https://www.google.com/Travel/Flights#a", "/travel/flights"},
+		{"www.google.com/search", "/search"}, // no scheme
+	}
+	for _, c := range cases {
+		t.Run(c.in, func(t *testing.T) {
+			if got := pathOf(c.in); got != c.want {
+				t.Errorf("pathOf(%q) = %q, want %q", c.in, got, c.want)
+			}
+		})
+	}
+}
+
+func TestExtractHostNormalises(t *testing.T) {
+	cases := []struct{ in, want string }{
+		{"https://www.google.com./search", "www.google.com"}, // trailing-dot FQDN
+		{"https://www.google.com#frag", "www.google.com"},    // fragment, no path
+		{"https://WWW.Google.COM/search", "www.google.com"},
+	}
+	for _, c := range cases {
+		t.Run(c.in, func(t *testing.T) {
+			if got := ExtractHost(c.in); got != c.want {
+				t.Errorf("ExtractHost(%q) = %q, want %q", c.in, got, c.want)
+			}
+		})
+	}
+}
+
+func TestScanGoogleSearchPathAware(t *testing.T) {
+	cases := []struct {
+		name string
+		url  string
+		kill bool
+	}{
+		{"search", "https://www.google.com/search?q=cats", true},
+		{"webhp", "https://www.google.com/webhp", true},
+		{"imghp", "https://www.google.com/imghp", true},
+		{"images", "https://www.google.com/images", true},     // fail-closed: not allowlisted
+		{"shopping", "https://www.google.com/shopping", true}, // fail-closed
+		{"news", "https://www.google.com/news", true},
+		{"homepage_slash", "https://www.google.com/", true},
+		{"homepage_bare", "https://www.google.com", true},
+		{"homepage_query", "https://www.google.com/?q=x", true},
+		{"query_slash_homepage", "https://www.google.com?q=a/b", true}, // query-slash bug
+		{"double_slash_search", "https://www.google.com//search?q=x", true},
+		{"uppercase_search", "https://www.google.com/SEARCH?q=x", true},
+		{"trailing_dot_search", "https://www.google.com./search?q=x", true}, // FQDN dodge
+		{"au_search", "https://www.google.com.au/search?q=x", true},         // ccTLD
+		{"maps", "https://www.google.com/maps", false},
+		{"maps_place", "https://www.google.com/maps/place/x", false},
+		{"flights_travel", "https://www.google.com/travel/flights", false},
+		{"flights_short", "https://www.google.com/flights", false},
+		{"redirect_url", "https://www.google.com/url?q=https://x", false},
+		{"au_maps", "https://www.google.com.au/maps", false},
+		{"maps_subdomain", "https://maps.google.com/", false},
+		{"gmail", "https://mail.google.com/mail/u/0", false},
+		{"calendar", "https://calendar.google.com/calendar", false},
+		{"docs", "https://docs.google.com/document/d/x", false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := scanOne(t, c.url); got != c.kill {
+				t.Errorf("Scan(%q): killed=%v, want %v", c.url, got, c.kill)
+			}
+		})
+	}
+}
+
+func TestScanBlocksAdultGossipAndClassics(t *testing.T) {
+	for _, u := range []string{
+		"https://haijiao.com/x", "https://www.haijiao.com", "https://haijiaolove.com",
+		"https://haijiaoo.com", "https://51cg.app/post/1", "https://www.51cg.app",
+		"https://www.bilibili.com/video", "https://youtube.com/feed",
+	} {
+		t.Run(u, func(t *testing.T) {
+			if !scanOne(t, u) {
+				t.Errorf("Scan(%q): expected kill, got none", u)
+			}
+		})
+	}
+}
+
+// scanOne runs a single-tab Scan with the DefaultBlocklist and reports whether
+// the browser was killed.
+func scanOne(t *testing.T, url string) bool {
+	t.Helper()
+	var killed bool
+	g := New(nil,
+		func() ([]Tab, error) { return []Tab{{App: "Safari", URL: url}}, nil },
+		func(string) error { killed = true; return nil })
+	if _, err := g.Scan(); err != nil {
+		t.Fatalf("Scan(%q): %v", url, err)
+	}
+	return killed
+}
