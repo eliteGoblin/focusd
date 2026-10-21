@@ -33,7 +33,8 @@ from xml.sax.saxutils import escape
 # >>> BEGIN GENERATED BLOCKLIST — source of truth: plugins/browser-monitor guard.DefaultBlocklist.
 # Do NOT edit by hand; run `go generate ./...` in plugins/browser-monitor. <<<
 BLOCKLIST = [
-    "google.com",
+    "www.google.com",
+    "www.google.com.au",
     "youtube.com",
     "bilibili.com",
     "steampowered.com",
@@ -59,6 +60,10 @@ BLOCKLIST = [
     "zhihu.com",
     "heheda.top",
     "alibaba.com",
+    "haijiao.com",
+    "haijiaolove.com",
+    "haijiaoo.com",
+    "51cg.app",
 ]
 # >>> END GENERATED BLOCKLIST <<<
 

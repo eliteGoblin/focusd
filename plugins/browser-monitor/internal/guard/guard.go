@@ -20,8 +20,15 @@ import (
 //
 //go:generate go run github.com/eliteGoblin/focusd/plugins/browser-monitor/internal/blocklistsync/gen
 var DefaultBlocklist = []string{
-	// Search
-	"google.com",
+	// Search — www.google.com only, and (via Scan's path-aware carve-out)
+	// its SEARCH surfaces only. Maps/Flights/Travel on the same host, and
+	// the other Google properties on their own subdomains (mail, calendar,
+	// drive, docs, meet, accounts, maps.google.com), are deliberately NOT
+	// matched here so they keep working. The apex google.com is handled at
+	// the DNS layer, not here, because a host-only match can't tell
+	// www.google.com/search from www.google.com/maps. The AU ccTLD is
+	// included because Google redirects AU users to it.
+	"www.google.com", "www.google.com.au",
 	// Video / streaming
 	"youtube.com", "bilibili.com",
 	// Gaming
@@ -34,6 +41,8 @@ var DefaultBlocklist = []string{
 	"southcn.com", "tmtpost.com",
 	// Misc
 	"zhihu.com", "heheda.top", "alibaba.com",
+	// Adult / gossip (always-block; www. and other subdomains match via IsBlocked)
+	"haijiao.com", "haijiaolove.com", "haijiaoo.com", "51cg.app",
 }
 
 // Tab is one open browser tab.
@@ -90,6 +99,13 @@ func (g *Guard) Scan() (Outcome, error) {
 		if !IsBlocked(host, g.Blocklist) {
 			continue
 		}
+		// Path-aware carve-out: the Google search hosts are blocklisted, but a
+		// non-search tab on them (Maps, Flights, Travel, …) is left alone so the
+		// browser isn't killed for using those. Everything else on the host —
+		// search, images, shopping, the homepage — stays blocked (fail closed).
+		if googleSearchHosts[host] && isGoogleAllowed(t.URL) {
+			continue
+		}
 		out.Blocked = append(out.Blocked, BlockedHit{App: t.App, Host: host, URL: t.URL})
 		if killed[t.App] {
 			continue // already killed this browser this pass
@@ -119,6 +135,9 @@ func ExtractHost(rawURL string) string {
 	if i := strings.IndexByte(s, '?'); i >= 0 {
 		s = s[:i]
 	}
+	if i := strings.IndexByte(s, '#'); i >= 0 {
+		s = s[:i]
+	}
 	// Strip userinfo if present (user:pass@host).
 	if i := strings.LastIndexByte(s, '@'); i >= 0 {
 		s = s[i+1:]
@@ -126,7 +145,9 @@ func ExtractHost(rawURL string) string {
 	if i := strings.IndexByte(s, ':'); i >= 0 {
 		s = s[:i]
 	}
-	return strings.ToLower(strings.TrimSpace(s))
+	// Normalise a trailing-dot FQDN (www.google.com. == www.google.com) so it
+	// can't dodge the blocklist.
+	return strings.TrimSuffix(strings.ToLower(strings.TrimSpace(s)), ".")
 }
 
 // IsBlocked reports whether host matches a blocklist entry exactly or as
@@ -146,4 +167,56 @@ func IsBlocked(host string, blocklist []string) bool {
 		}
 	}
 	return false
+}
+
+// googleSearchHosts are the Google hosts given the path-aware carve-out: their
+// search surfaces are blocked while their non-search surfaces (Maps/Flights/
+// Travel) stay allowed. The AU ccTLD is included because Google redirects AU
+// users to it. Gmail/Calendar/Drive live on their own subdomains (mail.,
+// calendar., drive.google.com) and are never matched here at all.
+var googleSearchHosts = map[string]bool{
+	"www.google.com":    true,
+	"www.google.com.au": true,
+}
+
+// googleAllowedPrefixes is the ONLY set of path prefixes on a googleSearchHost
+// that are treated as non-search and left alone. The match is an ALLOWLIST so
+// it FAILS CLOSED: any path not listed here — /search, /images, /shopping,
+// /news, /finance, the bare homepage, odd shapes like //search or percent-
+// encoded paths — is treated as search and blocked. That's the right default
+// for a commitment tool: a surface we forgot errs toward blocking, not leaking.
+var googleAllowedPrefixes = []string{"/maps", "/travel", "/flights", "/url", "/recaptcha", "/sorry"}
+
+// isGoogleAllowed reports whether a googleSearchHost URL points at a non-search
+// surface that must keep working. Fails closed (see googleAllowedPrefixes).
+func isGoogleAllowed(rawURL string) bool {
+	p := pathOf(rawURL)
+	for _, pre := range googleAllowedPrefixes {
+		if p == pre || strings.HasPrefix(p, pre+"/") {
+			return true
+		}
+	}
+	return false
+}
+
+// pathOf returns the lowercased path of rawURL (leading "/..."), without query
+// or fragment. Query and fragment are stripped BEFORE the path is located so a
+// '/' inside them isn't mistaken for the path. A URL with a host but no path
+// yields "/". Deliberately lenient: never errors, mirrors ExtractHost's parsing.
+func pathOf(rawURL string) string {
+	s := rawURL
+	if i := strings.Index(s, "://"); i >= 0 {
+		s = s[i+3:]
+	}
+	if i := strings.IndexByte(s, '?'); i >= 0 {
+		s = s[:i]
+	}
+	if i := strings.IndexByte(s, '#'); i >= 0 {
+		s = s[:i]
+	}
+	i := strings.IndexByte(s, '/')
+	if i < 0 {
+		return "/" // host only, no path → homepage
+	}
+	return strings.ToLower(s[i:])
 }
