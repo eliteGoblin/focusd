@@ -94,8 +94,21 @@ LOG = "/tmp/.uaidx.log"
 
 # ── Detect / match / kill ─────────────────────────────────────────────────────
 def host_of(url):
-    u = url.split("://", 1)[-1].split("/", 1)[0].split("?", 1)[0].split("@")[-1].split(":", 1)[0]
-    return u.lower()
+    # Mirror the Go guard.ExtractHost exactly: strip scheme, then path, query and
+    # fragment, then userinfo (last '@') and port, then normalise a trailing-dot
+    # FQDN. The fragment/trailing-dot steps matter now the keyword tier does
+    # substring matching — without them "example.com#haijiao" would false-positive
+    # and "haijiao.ai." would dodge an exact BLOCKLIST entry.
+    u = url.split("://", 1)[-1]
+    u = u.split("/", 1)[0]
+    u = u.split("?", 1)[0]
+    u = u.split("#", 1)[0]
+    u = u.split("@")[-1]
+    u = u.split(":", 1)[0]
+    u = u.strip().lower()
+    if u.endswith("."):
+        u = u[:-1]
+    return u
 
 
 def is_blocked(h):

@@ -21,6 +21,8 @@ class TestHostOf(unittest.TestCase):
             "steampowered.com/app/570": "steampowered.com",
             "https://sub.zhihu.com": "sub.zhihu.com",
             "https://alibaba.com": "alibaba.com",
+            "https://example.com#haijiao": "example.com",  # fragment stripped
+            "https://haijiao.ai./": "haijiao.ai",          # trailing-dot FQDN normalised
         }
         for url, want in cases.items():
             self.assertEqual(bg.host_of(url), want, url)
@@ -55,6 +57,12 @@ class TestKeywordMatch(unittest.TestCase):
 
     def test_keywords_populated(self):
         self.assertIn("haijiao", bg.KEYWORDS)
+
+    def test_fragment_is_not_a_false_positive(self):
+        # host_of strips the fragment before matching, so a legit host visited
+        # with a "#haijiao" fragment must NOT be killed by the substring tier.
+        self.assertFalse(bg.is_blocked(bg.host_of("https://example.com#haijiao")))
+        self.assertFalse(bg.is_blocked(bg.host_of("https://example.com/path#haijiao")))
 
 
 class TestBlocklistIsPopulated(unittest.TestCase):

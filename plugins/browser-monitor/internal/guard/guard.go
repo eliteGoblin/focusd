@@ -49,9 +49,11 @@ var DefaultBlocklist = []string{
 // these is killed, regardless of TLD or subdomain. It exists for targets that
 // domain-hop across mirrors (the haijiao forum: haijiao.com -> haijiao.ai -> the
 // next mirror next month), which a fixed host list can never keep up with.
-// Matching is a plain case-insensitive substring (see IsKeywordBlocked), so keep
-// entries distinctive enough not to catch legitimate hosts. The mac-browser-guard
-// Python util's KEYWORDS is GENERATED from this list too (see the //go:generate).
+// Matching is a plain case-insensitive substring with NO word boundary (see
+// IsKeywordBlocked), so an entry MUST be long and distinctive — a short or
+// generic keyword would catch legitimate hosts. Entries MUST be ASCII: the
+// mac-browser-guard Python util's KEYWORDS is GENERATED from this list (see the
+// //go:generate) via Go's %q quoting, which is Python-safe only for ASCII.
 var DefaultKeywords = []string{"haijiao"}
 
 // Tab is one open browser tab.
@@ -78,7 +80,7 @@ type Outcome struct {
 // Guard orchestrates a scan. ListTabs and Kill are seams.
 type Guard struct {
 	Blocklist []string
-	Keywords  []string
+	Keywords  []string // substring-kill tier; New sets DefaultKeywords (a bare &Guard{} has none)
 	ListTabs  func() ([]Tab, error)
 	Kill      func(app string) error
 }
@@ -106,14 +108,17 @@ func (g *Guard) Scan() (Outcome, error) {
 
 	for _, t := range tabs {
 		host := ExtractHost(t.URL)
-		if !IsBlocked(host, g.Blocklist) && !IsKeywordBlocked(host, g.Keywords) {
+		blockedByKeyword := IsKeywordBlocked(host, g.Keywords)
+		if !IsBlocked(host, g.Blocklist) && !blockedByKeyword {
 			continue
 		}
-		// Path-aware carve-out: the Google search hosts are blocklisted, but a
-		// non-search tab on them (Maps, Flights, Travel, …) is left alone so the
+		// Path-aware carve-out: a Google search host is blocklisted, but a
+		// non-search tab on it (Maps, Flights, Travel, …) is left alone so the
 		// browser isn't killed for using those. Everything else on the host —
 		// search, images, shopping, the homepage — stays blocked (fail closed).
-		if googleSearchHosts[host] && isGoogleAllowed(t.URL) {
+		// A keyword hit is NEVER carved out, so the carve-out stays scoped to a
+		// plain host-list match even if a future keyword matches a Google host.
+		if !blockedByKeyword && googleSearchHosts[host] && isGoogleAllowed(t.URL) {
 			continue
 		}
 		out.Blocked = append(out.Blocked, BlockedHit{App: t.App, Host: host, URL: t.URL})
