@@ -67,6 +67,17 @@ BLOCKLIST = [
 ]
 # >>> END GENERATED BLOCKLIST <<<
 
+# ── Keyword kill: killed if a tab's host CONTAINS any of these (substring) ────
+# Catches a domain-hopping target across every mirror/TLD (haijiao.com ->
+# haijiao.ai -> next mirror). GENERATED from the Go guard.DefaultKeywords (the
+# single source of truth) — run `go generate ./...` in plugins/browser-monitor.
+# >>> BEGIN GENERATED KEYWORDS — source of truth: plugins/browser-monitor guard.DefaultKeywords.
+# Do NOT edit by hand; run `go generate ./...` in plugins/browser-monitor. <<<
+KEYWORDS = [
+    "haijiao",
+]
+# >>> END GENERATED KEYWORDS <<<
+
 BROWSERS = ["Google Chrome", "Brave Browser", "Microsoft Edge", "Safari"]
 
 # ── Self-protecting install layout (user-level, disguised) ───────────────────
@@ -83,17 +94,35 @@ LOG = "/tmp/.uaidx.log"
 
 # ── Detect / match / kill ─────────────────────────────────────────────────────
 def host_of(url):
-    u = url.split("://", 1)[-1].split("/", 1)[0].split("?", 1)[0].split("@")[-1].split(":", 1)[0]
-    return u.lower()
+    # Mirror the Go guard.ExtractHost exactly: strip scheme, then path, query and
+    # fragment, then userinfo (last '@') and port, then normalise a trailing-dot
+    # FQDN. The fragment/trailing-dot steps matter now the keyword tier does
+    # substring matching — without them "example.com#haijiao" would false-positive
+    # and "haijiao.ai." would dodge an exact BLOCKLIST entry.
+    u = url.split("://", 1)[-1]
+    u = u.split("/", 1)[0]
+    u = u.split("?", 1)[0]
+    u = u.split("#", 1)[0]
+    u = u.split("@")[-1]
+    u = u.split(":", 1)[0]
+    u = u.strip().lower()
+    if u.endswith("."):
+        u = u[:-1]
+    return u
 
 
 def is_blocked(h):
-    # Semantics kept EQUAL to the Go guard.IsBlocked: empty host never matches;
-    # each entry is normalized (strip/lower) and skipped if empty; a host matches
-    # an entry exactly or as a dot-anchored subdomain (foo.example.com ~ example.com,
+    # Semantics kept EQUAL to the Go guard: empty host never matches. A host is
+    # blocked if it CONTAINS any KEYWORD (case-insensitive substring — catches a
+    # domain-hopping target across every mirror/TLD), OR it matches a BLOCKLIST
+    # entry exactly or as a dot-anchored subdomain (foo.example.com ~ example.com,
     # but youtube.com.evil.com does NOT match youtube.com).
     if not h:
         return False
+    for k in KEYWORDS:
+        k = k.strip().lower()
+        if k and k in h:
+            return True
     for d in BLOCKLIST:
         d = d.strip().lower()
         if not d:

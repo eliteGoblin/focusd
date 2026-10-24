@@ -21,11 +21,21 @@ import (
 const (
 	BeginMarker = "# >>> BEGIN GENERATED BLOCKLIST"
 	EndMarker   = "# >>> END GENERATED BLOCKLIST"
+
+	BeginKeywordMarker = "# >>> BEGIN GENERATED KEYWORDS"
+	EndKeywordMarker   = "# >>> END GENERATED KEYWORDS"
 )
 
-// blockRe matches the whole generated region: the BEGIN marker, through the END
+// regionRe matches a whole generated region: the BEGIN marker, through the END
 // marker line (to end of that line). (?s) lets . span newlines.
-var blockRe = regexp.MustCompile(`(?s)` + regexp.QuoteMeta(BeginMarker) + `.*?` + regexp.QuoteMeta(EndMarker) + `[^\n]*`)
+func regionRe(begin, end string) *regexp.Regexp {
+	return regexp.MustCompile(`(?s)` + regexp.QuoteMeta(begin) + `.*?` + regexp.QuoteMeta(end) + `[^\n]*`)
+}
+
+var (
+	blockRe   = regionRe(BeginMarker, EndMarker)
+	keywordRe = regionRe(BeginKeywordMarker, EndKeywordMarker)
+)
 
 // entryRe pulls each double-quoted domain from the generated block. Anchored to
 // list-entry lines (leading whitespace + a quoted string) so it can never pick
@@ -35,31 +45,64 @@ var entryRe = regexp.MustCompile(`(?m)^\s+"([^"]+)"`)
 // RenderPython renders the marked, generated BLOCKLIST block (both markers
 // included) from entries. Output is valid Python: a `BLOCKLIST = [ ... ]` list.
 func RenderPython(entries []string) string {
+	return renderRegion(BeginMarker, EndMarker, "BLOCKLIST",
+		"plugins/browser-monitor guard.DefaultBlocklist", entries)
+}
+
+// RenderPythonKeywords renders the generated KEYWORDS block. Output is valid
+// Python: a `KEYWORDS = [ ... ]` list. A host is killed if it CONTAINS any
+// keyword (substring), so a domain-hopping target is caught across every mirror.
+func RenderPythonKeywords(keywords []string) string {
+	return renderRegion(BeginKeywordMarker, EndKeywordMarker, "KEYWORDS",
+		"plugins/browser-monitor guard.DefaultKeywords", keywords)
+}
+
+// renderRegion renders a marked, generated Python list block (both markers
+// included): a `<varName> = [ ... ]` list sourced from the named Go variable.
+func renderRegion(begin, end, varName, source string, entries []string) string {
 	var b strings.Builder
-	b.WriteString(BeginMarker)
-	b.WriteString(" — source of truth: plugins/browser-monitor guard.DefaultBlocklist.\n")
+	b.WriteString(begin)
+	b.WriteString(" — source of truth: " + source + ".\n")
 	b.WriteString("# Do NOT edit by hand; run `go generate ./...` in plugins/browser-monitor. <<<\n")
-	b.WriteString("BLOCKLIST = [\n")
+	b.WriteString(varName + " = [\n")
 	for _, e := range entries {
 		fmt.Fprintf(&b, "    %q,\n", e)
 	}
 	b.WriteString("]\n")
-	b.WriteString(EndMarker + " <<<")
+	b.WriteString(end + " <<<")
 	return b.String()
 }
 
-// Splice replaces the existing generated region in src with block. It errors if
-// the markers are absent (so a mangled target never silently no-ops).
+// Splice replaces the existing generated BLOCKLIST region in src with block. It
+// errors if the markers are absent (so a mangled target never silently no-ops).
 func Splice(src []byte, block string) ([]byte, error) {
-	if !blockRe.Match(src) {
-		return nil, fmt.Errorf("blocklistsync: markers %q..%q not found in target", BeginMarker, EndMarker)
-	}
-	return blockRe.ReplaceAllLiteral(src, []byte(block)), nil
+	return spliceRegion(src, blockRe, block, BeginMarker, EndMarker)
 }
 
-// Extract returns the blocklist entries found inside the generated region.
+// SpliceKeywords replaces the existing generated KEYWORDS region in src with block.
+func SpliceKeywords(src []byte, block string) ([]byte, error) {
+	return spliceRegion(src, keywordRe, block, BeginKeywordMarker, EndKeywordMarker)
+}
+
+func spliceRegion(src []byte, re *regexp.Regexp, block, begin, end string) ([]byte, error) {
+	if !re.Match(src) {
+		return nil, fmt.Errorf("blocklistsync: markers %q..%q not found in target", begin, end)
+	}
+	return re.ReplaceAllLiteral(src, []byte(block)), nil
+}
+
+// Extract returns the BLOCKLIST entries found inside the generated region.
 func Extract(src []byte) ([]string, error) {
-	region := blockRe.Find(src)
+	return extractRegion(src, blockRe)
+}
+
+// ExtractKeywords returns the KEYWORDS entries found inside the generated region.
+func ExtractKeywords(src []byte) ([]string, error) {
+	return extractRegion(src, keywordRe)
+}
+
+func extractRegion(src []byte, re *regexp.Regexp) ([]string, error) {
+	region := re.Find(src)
 	if region == nil {
 		return nil, fmt.Errorf("blocklistsync: generated block not found (markers missing?)")
 	}

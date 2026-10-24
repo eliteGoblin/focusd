@@ -334,6 +334,41 @@ func TestScanBlocksAdultGossipAndClassics(t *testing.T) {
 	}
 }
 
+func TestIsKeywordBlocked(t *testing.T) {
+	kw := []string{"haijiao"}
+	block := []string{"haijiao.ai", "www.haijiao.ai", "haijiao.com", "bbs.haijiao.net",
+		"haijiaoluntan.com", "haijiaoshequ.xyz", "m.haijiao.io", "HAIJIAO.AI"}
+	for _, h := range block {
+		if !IsKeywordBlocked(h, kw) {
+			t.Errorf("IsKeywordBlocked(%q) = false, want true", h)
+		}
+	}
+	allow := []string{"", "example.com", "youtube.com", "haiji.com"}
+	for _, h := range allow {
+		if IsKeywordBlocked(h, kw) {
+			t.Errorf("IsKeywordBlocked(%q) = true, want false", h)
+		}
+	}
+	if IsKeywordBlocked("haijiao.ai", nil) {
+		t.Error("no keywords => never blocked")
+	}
+}
+
+func TestScanKeywordKillsHaijiaoMirrors(t *testing.T) {
+	// The whole haijiao forum series is caught via the keyword tier, including
+	// mirrors never enumerated in the blocklist (haijiao.ai and future hops).
+	for _, u := range []string{
+		"https://haijiao.ai/", "https://www.haijiao.ai/post", "https://haijiaoluntan.com/x",
+		"https://bbs.haijiao.net/t/1", "https://m.haijiao.io",
+	} {
+		t.Run(u, func(t *testing.T) {
+			if !scanOne(t, u) {
+				t.Errorf("Scan(%q): expected keyword kill, got none", u)
+			}
+		})
+	}
+}
+
 // scanOne runs a single-tab Scan with the DefaultBlocklist and reports whether
 // the browser was killed.
 func scanOne(t *testing.T, url string) bool {

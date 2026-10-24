@@ -40,6 +40,37 @@ func TestPythonBlocklistMatchesGoSourceOfTruth(t *testing.T) {
 	}
 }
 
+// TestPythonKeywordsMatchGoSourceOfTruth is the DRIFT GUARD for the keyword
+// tier: the committed Python util's generated KEYWORDS must equal
+// guard.DefaultKeywords exactly. Run `go generate ./...` if this fails.
+func TestPythonKeywordsMatchGoSourceOfTruth(t *testing.T) {
+	cwd, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	py, err := blocklistsync.RepoPythonPath(cwd)
+	if err != nil {
+		t.Fatalf("locate python util: %v", err)
+	}
+	src, err := os.ReadFile(py)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := blocklistsync.ExtractKeywords(src)
+	if err != nil {
+		t.Fatalf("extract python keywords: %v", err)
+	}
+	want := guard.DefaultKeywords
+	if len(got) != len(want) {
+		t.Fatalf("python keywords has %d entries, Go has %d — run `go generate ./...`\npython=%v", len(got), len(want), got)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("keyword %d: python=%q Go=%q — run `go generate ./...`", i, got[i], want[i])
+		}
+	}
+}
+
 func TestRenderSpliceExtractRoundTrip(t *testing.T) {
 	entries := []string{"a.com", "b.co.uk", "c.io"}
 	file := []byte("prefix\n" +
