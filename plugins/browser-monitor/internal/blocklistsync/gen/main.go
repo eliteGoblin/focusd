@@ -29,10 +29,14 @@ func main() {
 	if err != nil {
 		fail(err)
 	}
+	out, err = blocklistsync.SpliceKeywords(out, blocklistsync.RenderPythonKeywords(guard.DefaultKeywords))
+	if err != nil {
+		fail(err)
+	}
 	if err := os.WriteFile(py, out, 0o644); err != nil {
 		fail(err)
 	}
-	fmt.Printf("regenerated %s (%d blocklist entries)\n", py, len(guard.DefaultBlocklist))
+	fmt.Printf("regenerated %s (%d blocklist entries, %d keywords)\n", py, len(guard.DefaultBlocklist), len(guard.DefaultKeywords))
 }
 
 func fail(err error) {

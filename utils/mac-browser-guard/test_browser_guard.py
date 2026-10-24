@@ -29,18 +29,32 @@ class TestHostOf(unittest.TestCase):
 class TestIsBlocked(unittest.TestCase):
     def test_exact_and_subdomain_match(self):
         for h in ["youtube.com", "www.youtube.com", "m.youtube.com",
-                  "alibaba.com", "deep.sub.alibaba.com", "google.com"]:
+                  "alibaba.com", "deep.sub.alibaba.com", "www.google.com"]:
             self.assertTrue(bg.is_blocked(h), h)
 
     def test_non_matches(self):
-        # Empty, unrelated, the classic suffix-bypass, and a look-alike prefix.
+        # Empty, unrelated, the classic suffix-bypass, a look-alike prefix, the
+        # apex google.com (the guard matches www.google.com only; apex is handled
+        # at the DNS layer), and a keyword look-alike that must NOT trip "haijiao".
         for h in ["", "notyoutube.com", "youtube.com.evil.com",
-                  "myalibaba.com", "example.com"]:
+                  "myalibaba.com", "example.com", "google.com", "haiji.com"]:
             self.assertFalse(bg.is_blocked(h), h)
 
     def test_dot_anchored_boundary(self):
         # "youtube.com.evil.com" must NOT match youtube.com — anchored on a dot.
         self.assertFalse(bg.is_blocked("youtube.com.evil.com"))
+
+
+class TestKeywordMatch(unittest.TestCase):
+    def test_substring_catches_mirrors(self):
+        # The keyword tier kills ANY host containing a keyword — catches the
+        # haijiao forum across every mirror/TLD, including ones never enumerated.
+        for h in ["haijiao.ai", "www.haijiao.ai", "haijiaoluntan.com",
+                  "bbs.haijiao.net", "m.haijiao.io", "haijiao.com"]:
+            self.assertTrue(bg.is_blocked(h), h)
+
+    def test_keywords_populated(self):
+        self.assertIn("haijiao", bg.KEYWORDS)
 
 
 class TestBlocklistIsPopulated(unittest.TestCase):

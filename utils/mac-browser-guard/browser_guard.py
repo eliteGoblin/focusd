@@ -67,6 +67,17 @@ BLOCKLIST = [
 ]
 # >>> END GENERATED BLOCKLIST <<<
 
+# ── Keyword kill: killed if a tab's host CONTAINS any of these (substring) ────
+# Catches a domain-hopping target across every mirror/TLD (haijiao.com ->
+# haijiao.ai -> next mirror). GENERATED from the Go guard.DefaultKeywords (the
+# single source of truth) — run `go generate ./...` in plugins/browser-monitor.
+# >>> BEGIN GENERATED KEYWORDS — source of truth: plugins/browser-monitor guard.DefaultKeywords.
+# Do NOT edit by hand; run `go generate ./...` in plugins/browser-monitor. <<<
+KEYWORDS = [
+    "haijiao",
+]
+# >>> END GENERATED KEYWORDS <<<
+
 BROWSERS = ["Google Chrome", "Brave Browser", "Microsoft Edge", "Safari"]
 
 # ── Self-protecting install layout (user-level, disguised) ───────────────────
@@ -88,12 +99,17 @@ def host_of(url):
 
 
 def is_blocked(h):
-    # Semantics kept EQUAL to the Go guard.IsBlocked: empty host never matches;
-    # each entry is normalized (strip/lower) and skipped if empty; a host matches
-    # an entry exactly or as a dot-anchored subdomain (foo.example.com ~ example.com,
+    # Semantics kept EQUAL to the Go guard: empty host never matches. A host is
+    # blocked if it CONTAINS any KEYWORD (case-insensitive substring — catches a
+    # domain-hopping target across every mirror/TLD), OR it matches a BLOCKLIST
+    # entry exactly or as a dot-anchored subdomain (foo.example.com ~ example.com,
     # but youtube.com.evil.com does NOT match youtube.com).
     if not h:
         return False
+    for k in KEYWORDS:
+        k = k.strip().lower()
+        if k and k in h:
+            return True
     for d in BLOCKLIST:
         d = d.strip().lower()
         if not d:
